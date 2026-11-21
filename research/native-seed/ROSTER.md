@@ -9,8 +9,8 @@ holds the reasoning.
 
 | | Work | Why | Done when |
 |---|---|---|---|
-| 🔨 | Native bundle export (metadata self-hosted) | Regenerating a bundle needs the retired `partition-closure.py` and an old pinned SDK | `bundle.scm` produced natively, byte-identical to today's |
-| ⏳ | Disk safety on Work and the build station | Work filled to 100% twice | Nix `min-free`/`max-free` set; old SDK preparations pruned |
+| 🔨 | Structural: direct tuple construction | `(tuple …)` / `(erlang/list_to_tuple (list …))` build a list and convert it | Codegen candidate at a fixpoint, paired; BEAM SDK tests |
+| 🅿️ | Disk: daemon `min-free`/`max-free` | This account is not a trusted Nix user, and the daemon runs with `min-free = 0` | Root sets `nix.settings.min-free` / `nix.gc.automatic` on Work |
 | ⏳ | Foundry: sharded unit compilation | A compiler edit recompiles 659 units on 4 cores (575 s) | Compiler-edit SDK under 1 minute |
 | ⏳ | Foundry: incremental SDK for runtime edits | 6.4 min for about 1 s of compilation | Runtime-edit SDK under 30 s |
 | ⏳ | Codegen candidates in `qualify.bl` | Code-changing compiler work needs a fixpoint and behaviour gates | `candidate --codegen` iterates to a fixpoint and checks corpus and actors |
@@ -20,6 +20,9 @@ holds the reasoning.
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | Native bundle export (metadata self-hosted) | Refresh reproduces the BEAM export byte for byte in 2 s; leaves from the image registry; namespace additions qualify 13/13 | `10cef613b` and the commits after it |
+| ✅ | Disk: SDK preparation pruning, GC roots for tools and PCRE2 | A dry run keeps 6 of 197 preparations; GC can no longer take a tool | `56cc89c8c` |
+| ✅ | `qualify.bl`: codegen candidates, refresh, eval, `--source-root` | Code-changing compiler work has a fixpoint mode | `56cc89c8c` and the commits after it |
 | ✅ | JS runtime copies, seed test floor | Both BEAM failures fixed; 315 checks pass | `32ad701fa` |
 | ✅ | `env.bl` `:tools` | Tools as Nix packages; `qualify.bl` uses them | `1fab5d6dc` |
 | ✅ | Escape scan + table, one-pass `maps/without` | Reader job 133.5 → 121.2 ms | `e0fedbf6a`, `f665458be` |
@@ -30,6 +33,12 @@ holds the reasoning.
 | ✅ | Warm VM stderr | Errors reach the client | `52ef85948` |
 | ✅ | Local-lock wakeup | Lock waits per 10 requests 4.3 s → 0.19 s | `60aede9b3` |
 | ✅ | Chez substrate qualified | Byte-identical fixpoint, 461 actor checks × 3 budgets | `c69269bc5` |
+
+## Scratch trees
+
+| Tree | Owner | Removed when |
+|---|---|---|
+| `/tmp/claude-ab/wt-tuple` (git worktree, detached) | the tuple codegen candidate | its change is merged into `main` |
 
 ## Numbers to beat
 

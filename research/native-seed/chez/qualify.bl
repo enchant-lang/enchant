@@ -1,7 +1,7 @@
 ;; The native compiler on Chez Scheme: build, qualify, derive and time it.
 ;;
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- qualify   --image DIR --work DIR [--fresh] [--skip-actors]
-;;   ./bin/bl run research/native-seed/chez/qualify.bl -- candidate --image DIR --out DIR [--fresh] [--codegen] [--additions FILE.edn]
+;;   ./bin/bl run research/native-seed/chez/qualify.bl -- candidate --image DIR --out DIR [--fresh] [--codegen] [--additions FILE.edn] [--source-root DIR]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- derive    --image DIR --out DIR [--base REV]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- pair      --base PRELUDE --cand PRELUDE --out DIR [--reps N] [--rounds N]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- profile   --prelude PRELUDE --out DIR [--reps N] [--ticks N]
@@ -404,19 +404,22 @@
     :else (recur next (inc generation) rows)))))
 
 (defn candidate!
- [image out {:keys [fresh codegen additions]}]
+ "`source-root` (default this checkout) is the tree unit sources are read
+  from, so a candidate's compiler edits can live outside the checkout."
+ [image out {:keys [fresh codegen additions source-root]}]
  (when (File/exists? out) (throw (ex-info "candidate output exists" {:out out})))
  (File/mkdir_p! out)
  (let [started (now-ms)
        text (File/read! (Path/join image "bundle.scm"))
        units (bundle-units text)
-       changed (filterv (fn [u] (not= (:source u) (File/read! (Path/join (root) (:path u))))) units)
+       src-root (or source-root (root))
+       changed (filterv (fn [u] (not= (:source u) (File/read! (Path/join src-root (:path u))))) units)
        bundle (Path/join out "bundle.scm")]
   (write-atomic! (Path/join out "literal-bundle.scm")
    (erlang/iolist_to_binary
     (to-list (let [[parts at] (reduce (fn [[parts at] u]
                                        [(conj parts (binary/part text at (- (:start u) at))
-                                              (encode-literal (File/read! (Path/join (root) (:path u)))))
+                                              (encode-literal (File/read! (Path/join src-root (:path u)))))
                                         (:end u)])
                                       [[] 0] changed)]
               (conj parts (binary/part text at (- (erlang/byte_size text) at)))))))
@@ -428,7 +431,7 @@
         ;; two output files, about 2 s: run directly rather than through the run cache
         refresh (cmd! (:scheme (tools)) (concat ["--script" (:launcher s1) "--refresh-bundle" (Path/join image "bundle.scm") bundle eval-bundle]
                                                 (if additions [(Path/expand additions)] []))
-                      {:env (chez-env)})
+                      {:env (chez-env) :cwd src-root})
         refreshed? (= 0 (:exit refresh))
         ;; a stage without the mode answers with its usage; anything else is a
         ;; refresh failure, not a reason to fall back
@@ -471,7 +474,7 @@
                       (= (File/read! old) (File/read! (Path/join image "stage2.scm")))))
          receipt {"schema" "bl.native-chez.candidate.v1" "image" image "S2_sha256" (sha-file s2)
                   "units" (mapv (fn [u] {"ns" (:ns u) "path" (:path u) "old_sha256" (sha (:source u))
-                                         "new_sha256" (sha-file (Path/join (root) (:path u)))}) changed)
+                                         "new_sha256" (sha-file (Path/join src-root (:path u)))}) changed)
                   "stage1_builds_S2" {"ms" (:ms r) "reused" (:reused r)}
                   "bundle_refreshed" refreshed? "bundle_sha256" (sha-file bundle)
                   "codegen" (boolean codegen) "fixpoint_sha256" (sha-file fix) "generations" generations
@@ -687,7 +690,7 @@
   (case command
    "qualify" (let [r (qualify! (abs (:image o)) (abs (:work o)) o)]
               (when-not (= "qualified" (get r "status")) (throw (ex-info "image did not qualify" {}))))
-   "candidate" (let [r (candidate! (abs (:image o)) (abs (:out o)) o)]
+   "candidate" (let [r (candidate! (abs (:image o)) (abs (:out o)) (assoc o :source-root (abs (:source-root o))))]
                 (when-not (= "qualified" (get r "status")) (throw (ex-info "candidate did not qualify" {}))))
    "derive" (derive! (abs (:image o)) (abs (:out o)) (or (:base o) "HEAD"))
    "pair" (pair! (abs (:base o)) (abs (:cand o)) (abs (:out o))
