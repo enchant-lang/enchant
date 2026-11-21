@@ -7,8 +7,11 @@
 ;   sequence is created, so nothing captures an ANF subtree or the options.
 ; Every caller-visible result, and the order in which subtrees are emitted (it
 ; decides which refusal is reported first), is the previous emitter's.
-(defn- glue [& parts] (Enum/join parts ""))
-(defn- spaced [parts] (Enum/join parts " "))
+;; Emission builds iodata: nested lists of texts, flattened once by the public
+;; entry points (emit, emit-definition, emit-sealed-function, literal, text,
+;; remote). Gluing therefore never copies a child's text into its parent.
+(defn- glue [& parts] parts)
+(defn- flat [io] (erlang/iolist_to_binary io))
 (defn- items
  "A finite ANF collection (Erlang list, vector, set, nil) as an Erlang list."
  [xs]
@@ -16,6 +19,8 @@
        (nil? xs) (list)
        (vector? xs) (BeamLisp.Vector/to_list xs)
        :else (BeamLisp.Vector/to_list (vec xs))))
+(defn- spaced [parts]
+ (let [ps (items parts)] (if (erlang/== ps (list)) (list) (erlang/tl (Enum/flat_map ps (fn [p] (list " " p)))))))
 (defn- indexed
  "Each item with its position, as Erlang tuples {x, i} (Enum.with_index)."
  [xs] (Enum/with_index (items xs)))
@@ -23,24 +28,25 @@
 
 (def ^:private ascii-codes
  (erlang/list_to_tuple (Enum/map (lists/seq 0 127) (fn [c] (str "_" c)))))
-(defn- code-text [c] (if (< c 128) (erlang/element (inc c) ascii-codes) (glue "_" (erlang/integer_to_binary c))))
+(defn- code-text [c] (if (< c 128) (erlang/element (inc c) ascii-codes) (flat (glue "_" (erlang/integer_to_binary c)))))
 (defn ident [s]
  (Enum/join (cons "v" (Enum/map (unicode/characters_to_list s) (fn [c] (code-text c)))) ""))
 (defn- plain-text-code? [c] (and (>= c 32) (not= c 127) (not= c 34) (not= c 92)))
 (defn- text-code [c]
  (cond (= c 34) "\\\"" (= c 92) "\\\\" (= c 10) "\\n" (= c 13) "\\r" (= c 9) "\\t"
-       (or (< c 32) (= c 127)) (glue "\\x" (Integer/to_string c 16) ";")
+       (or (< c 32) (= c 127)) (flat (glue "\\x" (Integer/to_string c 16) ";"))
        :else (unicode/characters_to_binary (list c))))
 ; Every code plain-text-code? refuses, as one-byte texts. None of them occurs
 ; inside a multibyte UTF-8 scalar, so a text holding none of these bytes is
 ; exactly a text every code of which is plain.
 (def ^:private text-escapes
  (Enum/map (erlang/++ (lists/seq 0 31) (list 127 34 92)) (fn [c] (erlang/list_to_binary (list c)))))
-(defn text [s]
+(defn- text* [s]
  ; A text with nothing to escape is its own escape (same UTF-8 bytes): one
  ; byte scan decides it, without a code list or a test per code.
  (if (erlang/== :nomatch (binary/match s text-escapes)) (glue "\"" s "\"")
   (glue "\"" (Enum/join (Enum/map (unicode/characters_to_list s) (fn [c] (text-code c))) "") "\"")))
+(defn text [s] (flat (text* s)))
 ; A keyword whose name is plain ASCII symbol text is a quoted symbol constant,
 ; free in compiled and interpreted Gambit alike; any other name keeps the
 ; run-time interning of its escaped text.
@@ -59,7 +65,7 @@
   (glue "(string->symbol " (text (glue ":" name)) ")")))
 (declare literal)
 (defn- literal-items [xs] (spaced (Enum/map (items xs) (fn [x] (literal x)))))
-(defn literal [v]
+(defn- literal* [v]
  (cond (nil? v) "bl-nil" (= v true) "#t" (= v false) "#f"
        (integer? v) (erlang/integer_to_binary v) (string? v) (text v)
        (erlang/is_float v) (glue "(bl-float " (erlang/float_to_binary v (list :short)) ")")
@@ -80,6 +86,7 @@
          (if module (glue "(bl-struct " (literal module) " " fields ")") fields))
        (erlang/is_tuple v) (glue "(bl-make-tuple " (literal-items (erlang/tuple_to_list v)) ")")
        :else (throw (ex-info "native seed: unsupported literal" {:value v}))))
+(defn literal [v] (flat (literal* v)))
 ; Constant hoisting. Under a definition's sink (:constants, an atom of
 ; {:index {text name} :rows [[name text]…]}, with :constant-prefix), a literal
 ; whose Scheme text builds a value (a set, map, vector, list, tuple, struct,
@@ -88,11 +95,11 @@
 ; is built at load, not at every evaluation (native.bootstrap/emit-definition
 ; writes the defines). Without a sink, literals are emitted in place.
 (defn- hoisted [text options]
- (let [sink (:constants options)]
+ (let [text (flat text) sink (:constants options)]
   (if (and sink (string/starts-with? text "("))
    (let [state @sink found (get (:index state) text)]
     (or found
-     (let [name (glue (:constant-prefix options) "$q" (erlang/integer_to_binary (count (:rows state))))]
+     (let [name (flat (glue (:constant-prefix options) "$q" (erlang/integer_to_binary (count (:rows state)))))]
       (reset! sink {:index (assoc (:index state) text name) :rows (conj (:rows state) [name text])})
       name)))
    text)))
@@ -101,7 +108,7 @@
                       (pr-str (select-keys n [:op :mod :fun :ns :name :val :pop])))
                 {:op (:op n) :module (:mod n) :function (:fun n) :ann (:ann n)})))
 
-(declare emit)
+(declare emit*)
 (defn- operand-options [options]
  (if (and (erlang/=/= nil options) (maps/get :tail? options false))
   (assoc options :tail? false) options))
@@ -136,7 +143,7 @@
               [(site-datum (erlang/element 1 pair)) (site-datum (erlang/element 2 pair))]))
        flag (if internal? "#t" "#f")]
   (if (Enum/all? data (fn [d] (and (some? (first d)) (some? (second d)))))
-   (glue "'#(" flag (Enum/join (Enum/map data (fn [d] (glue " " (first d) " " (second d)))) "") ")")
+   (glue "'#(" flag (Enum/map data (fn [d] (glue " " (first d) " " (second d)))) ")")
    (glue "(vector " flag " (lambda () " (literal frame) "))"))))
 (defn- source-call [node expression options]
  (if (:source-frames? options)
@@ -145,13 +152,13 @@
     (glue "(begin (bl-source-tail " site ") " expression ")")
     (glue "(let ((source-entry (bl-source-call " site "))) (bl-source-return source-entry " expression "))")))
   expression))
-(defn joined [xs options] (spaced (Enum/map (items xs) (fn [x] (emit x options)))))
+(defn joined [xs options] (spaced (Enum/map (items xs) (fn [x] (emit* x options)))))
 (defn- operand-bindings
  "`(a<i> <operand>)` for each operand, emitted in source order."
  [args options]
  (let [operand (operand-options options)]
   (Enum/map (indexed args)
-   (fn [pair] (glue "(" (operand-name (erlang/element 2 pair)) " " (emit (erlang/element 1 pair) operand) ")")))))
+   (fn [pair] (glue "(" (operand-name (erlang/element 2 pair)) " " (emit* (erlang/element 1 pair) operand) ")")))))
 (defn ordered
  "Pin source operand order explicitly, as js.emit/emit-all and current lower
   operand tests do. Scheme application order is unspecified. Capture callee first."
@@ -174,8 +181,8 @@
 (defn- ordered-target-call [node function arguments operation options]
  ; Evaluate the ACTUAL target and arglist before installing its source context.
  ; The raw-fun operation validates before calling; language dispatch stays generic.
- (glue "(let* ((actual-callee " (emit function (operand-options options)) ") "
-      "(actual-arguments " (emit arguments (operand-options options)) ")) "
+ (glue "(let* ((actual-callee " (emit* function (operand-options options)) ") "
+      "(actual-arguments " (emit* arguments (operand-options options)) ")) "
       (source-call node (glue "(" operation " actual-callee actual-arguments)") options) ")"))
 (defn- linked-operands
  "Bind operands in source order to fresh a<i> variables. With :inline?, a
@@ -186,7 +193,7 @@
   (loop [remaining (items args) index 0 binds (list) operands (list)]
    (if (erlang/=:= remaining (list))
     [(lists/reverse binds) (vec (lists/reverse operands))]
-    (let [arg (erlang/hd remaining) value (emit arg operand)]
+    (let [arg (erlang/hd remaining) value (emit* arg operand)]
      (if (and inline? (let [op (maps/get :op arg nil)] (or (erlang/=:= op :var) (erlang/=:= op :lit))))
       (recur (erlang/tl remaining) (erlang/+ index 1) binds (cons value operands))
       (let [local (operand-name index)]
@@ -225,21 +232,21 @@
         cell (when (and direct? statics)
                (let [c (get (or (:self-cells options) {}) (:name (:fn function)))]
                 (when (and c (= (second c) (count statics))) (first c))))
-        callee (emit function (operand-options options))]
+        callee (emit* function (operand-options options))]
   (cond
    cell
    (let [[binds operands] (linked-operands true statics options)
-         call (glue "(" cell (Enum/join (Enum/map (items operands) (fn [o] (glue " " o))) "") ")")]
+         call (glue "(" cell (Enum/map (items operands) (fn [o] (glue " " o))) ")")]
     (if (empty? binds) call (glue "(let* (" (spaced binds) ") " call ")")))
    statics
    (let [[binds operands] (linked-operands true statics options)
-         spread (Enum/join (Enum/map (items operands) (fn [o] (glue " " o))) "")
+         spread (Enum/map (items operands) (fn [o] (glue " " o)))
          call (if direct? (glue "(callee" spread ")")
                 (glue "(if (procedure? callee) (callee" spread ") (bl-invoke callee (list" spread ")))"))]
     (glue "(let ((callee " callee ")) "
          (if (empty? binds) call (glue "(let* (" (spaced binds) ") " call ")")) ")"))
    :else
-   (glue "(let* ((callee " callee ") (arguments " (emit arguments (operand-options options)) ")) "
+   (glue "(let* ((callee " callee ") (arguments " (emit* arguments (operand-options options)) ")) "
         (if direct? "(apply callee arguments))"
           "(if (procedure? callee) (apply callee arguments) (bl-invoke callee arguments)))")))))))
 (defn- ordered-language-call [node function arguments options]
@@ -317,7 +324,7 @@
        (integer? v) (glue "(eqv? " subject " " (erlang/integer_to_binary v) ")")
        :else (glue "(bl-key-equal? " (literal v) " " subject ")")))
 (defn- with-subject [subject path k]
- (if (string/starts-with? subject "(")
+ (if (string/starts-with? (flat subject) "(")
   (let [local (glue "pm" path)] (glue "(let ((" local " " subject ")) " (k local) ")"))
   (k subject)))
 (declare match-pattern)
@@ -496,13 +503,13 @@
    (if-not fits? (or more fallback)
     (let [next (if final? fallback "(clause-next)")
           options (forget-facts options (fn [] (patterns-binders pats)))
-          body (emit (:body cl) options)
+          body (emit* (:body cl) options)
           body (if wrap? (glue "(bl-vec (list " (literal :match) " (lambda () " body ")))") body)
           guard (:guard cl)
           guard-options (assoc (operand-options options) :source-frames? false)
           body (cond (nil? guard) body
-                     (total? guard guard-options) (branch guard (emit guard guard-options) body next guard-options)
-                     :else (glue "(if (bl-guard (lambda () " (emit guard guard-options) ")) " body " " next ")"))
+                     (total? guard guard-options) (branch guard (emit* guard guard-options) body next guard-options)
+                     :else (glue "(if (bl-guard (lambda () " (emit* guard guard-options) ")) " body " " next ")"))
           _ (when-let [counts (:emission-counts options)]
               (swap! counts update :compiled-pattern-clauses (fnil inc 0)))
           key-bindings (Enum/reverse (Enum/reduce (indexed pats) (list) (fn [pair acc]
@@ -516,7 +523,7 @@
                  {} keys (fn [_] body) next))
           arm (if (empty? key-bindings) arm
                 (glue "(let* (" (spaced (Enum/map key-bindings (fn [binding]
-                  (glue "(pk" (first binding) " " (emit (second binding) guard-options) ")")))) ") " arm ")"))]
+                  (glue "(pk" (first binding) " " (emit* (second binding) guard-options) ")")))) ") " arm ")"))]
      (if more (glue "(let ((clause-next (lambda () " more "))) " arm ")") arm))))))
 
 ; Budget sites. A turn budget is spent by (h-tick) at every loop back-edge
@@ -554,7 +561,7 @@
   Scheme formals; other same-width chains match fixed formals directly."
  [n options]
  (if-let [layout (simple-layout n)]
-  (assoc layout :body (emit (:body layout) options))
+  (assoc layout :body (emit* (:body layout) options))
   (let [cs (items (:clauses n))
         widths (Enum/uniq (Enum/map cs (fn [c] (count (:pats c)))))]
    (when (= 1 (count widths))
@@ -588,7 +595,7 @@
 (defn remote [n options]
  (let [m (:mod n) f (erlang/atom_to_binary (:fun n))]
   (or (when-let [resolver (:remote-resolver options)] (resolver n))
-   (cond (and (= m :host) (contains? host-leaves f)) (glue "h-" f)
+   (cond (and (= m :host) (contains? host-leaves f)) (flat (glue "h-" f))
         (and (contains? #{:Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Core} m) (get core-leaves f)) (get core-leaves f)
         (and (= m :Elixir.BeamLisp.Num) (get arithmetic (keyword f))) (get arithmetic (keyword f))
         (and (= m :erlang) (= f "not")) "not"
@@ -610,8 +617,8 @@
        handler (clauses (items (:catch n)) ["caught-kind" "caught-reason"]
                    "(bl-reraise caught-kind caught-reason caught-trace)"
                    (forget-facts options (fn [] (list (:frames stack) (:raw stack)))) false)
-       body (emit (:body n) options)
-       cleanup (when (:after n) (emit (:after n) options))]
+       body (emit* (:body n) options)
+       cleanup (when (:after n) (emit* (:after n) options))]
   ; Lower the handler as usual so unsupported operations still fail at
   ; emission. The same raise-free subset used by native guards can avoid
   ; installing a handler at runtime. Cleanup stays after the body.
@@ -832,14 +839,14 @@
        names (Enum/map inits (fn [pair] (let [i (erlang/element 2 pair)]
                (if (< i 64) (erlang/element (inc i) loop-initial-table) (glue "loop-initial-" (erlang/integer_to_binary i))))))
        bindings (Enum/map (Enum/zip names inits) (fn [pair]
-                  (glue "(" (erlang/element 1 pair) " " (emit (erlang/element 1 (erlang/element 2 pair)) operand) ")")))
+                  (glue "(" (erlang/element 1 pair) " " (emit* (erlang/element 1 (erlang/element 2 pair)) operand) ")")))
        parameters (Enum/map (Enum/zip variables names) (fn [pair]
                     (glue "(" (ident (erlang/element 1 pair)) " " (erlang/element 2 pair) ")")))
        outer (or (:facts options) {})
        options (forget-facts options (fn [] variables))
        facts (loop-facts parts outer (or (:facts options) {}))
        options (if (empty? facts) options (assoc options :facts facts))
-       body (emit (:body parts) (assoc options :loop {:self (:self parts) :name loop-name}))]
+       body (emit* (:body parts) (assoc options :loop {:self (:self parts) :name loop-name}))]
   (glue "(let* (" (spaced bindings) ") (let " loop-name " (" (spaced parameters)
        ") (h-tick) " body "))")))
 (defn- emit-source-function [n options]
@@ -863,7 +870,7 @@
  (glue "(letrec ((" local " " body ")) " local ")"))
 (defn- emit-source-scaffold [n parts options]
  (let [self (:name n) local (ident self) inner (:inner parts)]
-  (wrap-scaffold local (emit inner (scaffold-options options self local inner)))))
+  (wrap-scaffold local (emit* inner (scaffold-options options self local inner)))))
 
 (defn- multi-layout [n]
  ; The compiler's exact $blfn constructor, with checked inert function
@@ -898,7 +905,7 @@
   ; scaffold variable to a one-argument thunk of the WHOLE dispatcher.
   ; The arm still receives its original parameters/rest-list convention.
   (glue "(let ((" (ident self) " (lambda (ignored-self) " target "))) "
-       (emit (:inner parts) inside) ")")))
+       (emit* (:inner parts) inside) ")")))
 (defn- emit-multi [layout options]
  ; Same emission order as before: fixed keys, variadic tag, arms, $blfn tag.
  (let [target (ident (glue "$multi/" (:name (first (:arms layout)))))
@@ -906,23 +913,23 @@
        arms (Enum/map (indexed fixed) (fn [entry]
               (let [pair (erlang/element 1 entry)]
                [(glue "multi-arm-" (erlang/integer_to_binary (erlang/element 2 entry))) (first pair) (second pair)])))
-       fixed-source (glue "(bl-map " (spaced (Enum/flat_map arms (fn [arm] (list (emit (nth arm 1) options) (nth arm 0))))) ")")
-       variadic-source (if variadic (glue "(bl-make-tuple " (emit (first (:elems variadic)) options) " multi-variadic-arm)") "bl-nil")
+       fixed-source (glue "(bl-map " (spaced (Enum/flat_map arms (fn [arm] (list (emit* (nth arm 1) options) (nth arm 0))))) ")")
+       variadic-source (if variadic (glue "(bl-make-tuple " (emit* (first (:elems variadic)) options) " multi-variadic-arm)") "bl-nil")
        bindings (Enum/map arms (fn [arm] (glue "(" (nth arm 0) " " (emit-multi-arm (nth arm 2) target options) ")")))
        bindings (if variadic (lists/append bindings (list (glue "(multi-variadic-arm "
                                  (emit-multi-arm (second (:elems variadic)) target options) ")"))) bindings)]
   (glue "(let ((" target " bl-nil)) (let* (" (spaced bindings) ") "
-       "(set! " target " (bl-make-tuple " (emit (:tag layout) options) " " fixed-source " " variadic-source ")) "
+       "(set! " target " (bl-make-tuple " (emit* (:tag layout) options) " " fixed-source " " variadic-source ")) "
        target "))")))
 
 (defn- emit-junction
  "A boolean junction, emitted as `:let` and `:if` emit it, with the plain test."
  [n options]
  (let [local (ident (:name n)) body (:body n)
-       init (emit (:init n) (operand-options options))
+       init (emit* (:init n) (operand-options options))
        options (integer-binding options (:name n) (:init n))]
   (glue "(let ((" local " " init ")) (if " local " "
-       (emit (:then body) (integer-branch options (:test body))) " " (emit (:else body) options) "))")))
+       (emit* (:then body) (integer-branch options (:test body))) " " (emit* (:else body) options) "))")))
 ; Keyword dispatch. A chain `(cond (== x :a) A (== x :b) B … :else E)` whose
 ; AOT templates are exactly `(eq? x KEYWORD)` becomes one Scheme `case` on the
 ; interned symbol (eqv? is eq? on symbols). The tests are a variable and a
@@ -962,8 +969,8 @@
        (recur (:else node) (cons [(second t) (:then node)] arms) (conj seen (second t)))
        (when (not (erlang/=:= (erlang/tl arms) ())) {:subject subject :arms arms :else node}))))))))
 (defn- emit-keyword-dispatch [dispatch options]
- (let [arms (Enum/map (Enum/reverse (:arms dispatch)) (fn [arm] [(first arm) (emit (second arm) options)]))
-       otherwise (emit (:else dispatch) options)
+ (let [arms (Enum/map (Enum/reverse (:arms dispatch)) (fn [arm] [(first arm) (flat (emit* (second arm) options))]))
+       otherwise (emit* (:else dispatch) options)
        ; Adjacent arms with the same code share one clause: groups of
        ; {reversed datums, code}, in reverse.
        groups (Enum/reduce arms (list) (fn [arm acc]
@@ -986,7 +993,7 @@
   function))
 (defn- finish-wrapper-chain [body heads tails]
  (if (empty? heads) body
-  (Enum/join (lists/reverse heads (cons body tails)) "")))
+  (lists/reverse heads (cons body tails))))
 (defn- emit-unframed-chain
  "Emit consecutive fixed function and self-binding wrappers without repeatedly
   materializing their child text. The terminal expression uses normal emission."
@@ -1016,13 +1023,13 @@
        (recur body inside next-scaffold (cons head heads) (cons tail tails)))
       (let [function (if simple
                         (let [tick? (function-ticks? n inside)]
-                         (fixed-function (:formals simple) (emit body inside) clause-fallback nil tick?))
+                         (fixed-function (:formals simple) (emit* body inside) clause-fallback nil tick?))
                         (function-expression n inside nil))
             registered (register-function function arity inside)]
        (finish-wrapper-chain (if local (wrap-scaffold local registered) registered) heads tails))))
-    (finish-wrapper-chain (emit n options) heads tails)))))
+    (finish-wrapper-chain (emit* n options) heads tails)))))
 (defn- pairs-operands [pairs] (Enum/flat_map (items pairs) (fn [pair] (items pair))))
-(defn emit [n options]
+(defn- emit* [n options]
  (case (:op n)
   :lit (hoisted (literal (:val n)) options)
   :var (ident (:name n))
@@ -1046,7 +1053,7 @@
                        (get arithmetic (:fun n)))] (ordered f (:args n) options) (refuse n))
   :apply (if-let [plan (loop-plan n options)]
            (let [options (assoc options :loop-verdicts (:verdicts plan))]
-            (if (:parts plan) (emit-source-loop n (:parts plan) options) (emit n options)))
+            (if (:parts plan) (emit-source-loop n (:parts plan) options) (emit* n options)))
            (cond (and (:loop options) (recur-node? n (:self (:loop options))))
                   (ordered (:name (:loop options)) (:args n) (operand-options options))
                  (self-knot? n options) (get (:selves options) (:name (:fn n)))
@@ -1056,22 +1063,22 @@
          (if (:source-frames? options) (emit-source-scaffold n parts options)
           (emit-unframed-chain n options parts))
          (if (boolean-junction? n options) (emit-junction n options)
-          (glue "(let ((" (ident (:name n)) " " (emit (:init n) (operand-options options)) ")) "
-                (emit (:body n) (integer-binding options (:name n) (:init n))) ")")))
+          (glue "(let ((" (ident (:name n)) " " (emit* (:init n) (operand-options options)) ")) "
+                (emit* (:body n) (integer-binding options (:name n) (:init n))) ")")))
   :if (if-let [dispatch (keyword-dispatch n options)] (emit-keyword-dispatch dispatch options)
-       (branch (:test n) (emit (:test n) (operand-options options))
-               (emit (:then n) (integer-branch options (:test n))) (emit (:else n) options) options))
+       (branch (:test n) (emit* (:test n) (operand-options options))
+               (emit* (:then n) (integer-branch options (:test n))) (emit* (:else n) options) options))
   :do (let [statements (items (:stmts n))]
         (glue "(begin " (if (empty? statements) "bl-nil"
-          (glue (joined (butlast statements) (operand-options options)) " " (emit (last statements) options))) ")"))
+          (glue (joined (butlast statements) (operand-options options)) " " (emit* (last statements) options))) ")"))
   :fn (if (:source-frames? options) (emit-source-function n (function-options n options))
        (emit-unframed-chain n options nil))
-  :case (glue "(let ((subject " (emit (:subj n) (operand-options options)) ")) "
+  :case (glue "(let ((subject " (emit* (:subj n) (operand-options options)) ")) "
           (clauses (items (:clauses n)) ["subject"] "(error \"native seed: case clause\")" options false) ")")
-  :recv (let [timeout (if (:timeout n) (emit (:timeout n) (operand-options options)) "bl-nil")
+  :recv (let [timeout (if (:timeout n) (emit* (:timeout n) (operand-options options)) "bl-nil")
               scan (glue "(lambda (message) "
                     (clauses (items (:clauses n)) ["message"] (literal :nomatch) options true) ")")
-              after (glue "(lambda () " (if (:after n) (emit (:after n) options) "bl-nil") ")")
+              after (glue "(lambda () " (if (:after n) (emit* (:after n) options) "bl-nil") ")")
               receive (source-call n (glue "(" (ident "rt-receive") " " scan " " after " timeout)")
                          (operand-options options))]
           (glue "(let* ((timeout " timeout ") (selection " receive ")) ((bl-nth selection 1)))"))
@@ -1089,15 +1096,16 @@
               (ordered "bl-map" (pairs-operands (:fields n)) options) ")"))
   (refuse n)))
 
+(defn emit [n options] (flat (emit* n options)))
 (defn emit-definition [definition options]
  (try
-  (glue "(define " (or (:scheme-name definition)
+  (flat (glue "(define " (or (:scheme-name definition)
                       (when (:namespace-qualified? options)
                        (ident (str (or (:ns definition) (:ns options)) "/" (:name definition))))
                       (ident (:name definition))) " "
-       (emit (:node definition)
+       (emit* (:node definition)
         (assoc options :definition-ns (or (:ns definition) (:ns options)) :fn-label (:name definition)
-                       :source-fn nil :source-arity nil :tail? false :loop nil)) ")\n")
+                       :source-fn nil :source-arity nil :tail? false :loop nil)) ")\n"))
   (catch e (throw (ex-info (str (:name definition) ": " (ex-message e)) (assoc (or (ex-data e) {}) :emission-stack __STACKTRACE__))))))
 
 (defn emit-sealed-function
@@ -1125,9 +1133,9 @@
            tick? (function-ticks? inner inside)]
       (when-let [fixed (fixed-parts inner inside)]
        (let [formals (:formals fixed)
-             forward (glue "(" cell (Enum/join (Enum/map formals (fn [f] (glue " " f))) "") ")")
+             forward (glue "(" cell (Enum/map formals (fn [f] (glue " " f))) ")")
              value (fixed-function formals forward clause-fallback nil false)]
         {:arity arity
-         :lambda (glue "(lambda (" (spaced formals) ") " (function-entry (:body fixed) nil tick?) ")")
-         :value (if (:callable-arities? options)
-                  (glue "(bl-register-callable! " value " " (erlang/integer_to_binary arity) ")") value)}))))))))
+         :lambda (flat (glue "(lambda (" (spaced formals) ") " (function-entry (:body fixed) nil tick?) ")"))
+         :value (flat (if (:callable-arities? options)
+                  (glue "(bl-register-callable! " value " " (erlang/integer_to_binary arity) ")") value))}))))))))
