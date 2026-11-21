@@ -19,6 +19,18 @@ pub struct Recording {
     encoder: Option<thread::JoinHandle<Result<u64>>>,
 }
 
+// A short sleep cap keeps stop responsive, but it must not advance the next
+// encode. Otherwise every requested rate below 20 fps emits at least 20 fps.
+fn wait_for_frame_deadline(deadline: Instant, stop: &AtomicBool) {
+    while !stop.load(Ordering::Relaxed) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
+}
+
 fn encoder_preset(opts: &Value) -> Result<&str> {
     match opts.get("preset") {
         None => Ok("veryfast"),
@@ -247,11 +259,7 @@ impl Recording {
                     // Wall-clock pacing preserves waits and actual input motion.
                     let deadline =
                         started + Duration::from_secs_f64((encoded + 1) as f64 / fps as f64);
-                    thread::sleep(
-                        deadline
-                            .saturating_duration_since(Instant::now())
-                            .min(Duration::from_millis(50)),
-                    );
+                    wait_for_frame_deadline(deadline, &encoder_stop);
                 }
                 Ok(encoded)
             })();
@@ -338,6 +346,22 @@ impl Drop for Recording {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn low_rate_waits_through_each_short_sleep_until_its_deadline() {
+        let stop = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_millis(140);
+        wait_for_frame_deadline(deadline, &stop);
+        assert!(Instant::now() >= deadline);
+    }
+
+    #[test]
+    fn already_stopped_recording_does_not_wait_for_a_future_frame() {
+        let stop = AtomicBool::new(true);
+        let started = Instant::now();
+        wait_for_frame_deadline(started + Duration::from_secs(30), &stop);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn preset_is_closed_and_keeps_the_existing_default() {

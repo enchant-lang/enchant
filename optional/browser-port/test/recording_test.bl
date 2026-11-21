@@ -81,3 +81,28 @@
         (is (not (File/exists? (str root "/invalid.pending.mp4"))))
         (is (thrown? (page/recording p))))
       (finally (page/close! p) (File/rm_rf! root)))))
+
+
+(deftest low-frame-rate-film-preserves-the-independent-recording-clock
+  (let [root (str "/tmp/bl-low-rate-" (erlang/unique_integer (list :positive)))
+        p (page/open! {:width 640 :height 480 :launch
+             {"profile" (str root "/profile") "runtime" (str root "/runtime")
+              "chromium" (System/get_env "CHROMIUM") "compositor" (System/get_env "SWAY")
+              "vnc" (System/get_env "WAYVNC") "width" 640 "height" 580}})
+        movie (str root "/six-fps.mp4")]
+    (try
+      (page/navigate! p "data:text/html,<body style='background:steelblue'>Native low-rate recording")
+      (page/record! p movie {:fps 6 :record-preset "ultrafast"})
+      (Process/sleep 1400)
+      (let [recording (page/stop-recording! p)
+            probe (System/cmd "ffprobe" (list "-v" "error" "-show_streams" "-show_format" "-of" "json" movie))
+            metadata (interop/json-> (elem probe 0))
+            elapsed (get recording "at")
+            duration (String/to_float (get-in metadata ["format" "duration"]))]
+        (is (= 0 (elem probe 1)))
+        (is (> (get recording "sourceFrames") 0))
+        (is (= "6/1" (get-in metadata ["streams" 0 "r_frame_rate"])))
+        (is (<= (- elapsed 0.75) duration (+ elapsed 0.75))
+            "The decoded duration follows the recorder clock, not the 50 ms wakeup cap")
+        (is (<= (get recording "encodedFrames") (+ 2 (* 6 elapsed)))))
+      (finally (page/close! p) (File/rm_rf! root)))))
