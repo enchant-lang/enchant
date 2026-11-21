@@ -230,3 +230,20 @@ What remains, with its cost:
 - Compiling =(erlang/list_to_tuple (list …))= and =(tuple …)= to direct tuple construction, and reading env fields once per node, both change generated code. They need a candidate mode that iterates to a new fixpoint and checks the corpora and actors instead of byte identity, followed by an SDK rebuild and its tests. Measured potential: 2–5% each.
 - The bundle's link metadata (modules, leaves, resolution ledger) is still the pinned BEAM SDK's export. A change that adds a namespace or a host leaf needs a new export.
 - The checkout SDK preparation takes about 6 minutes for a runtime edit and about 22 for a compiler edit, because a compiler edit rotates the compiler key and recompiles all 659 units. Making that fast needs early cutoff on output equivalence. That is a foundry design change I have not made.
+
+* The native compiler exports its own bundle
+=native.bootstrap --refresh-bundle= recomputes a bundle's metadata natively: namespace headers (the grammar of =BeamLisp.AOT/namespace_header=, over the =CompilerData= functions the image already carries), resolution seeds and public names, member link rows, module rows, unit requires, and =:leaves= taken from the running image's leaf registry. Closure facts no unit source determines travel unchanged: core link rows, boot-tier stub rows, boot namespaces and options.
+
+- *Parity.* Refreshing the v3 bundle from its own sources reproduces the BEAM export's =bundle.scm= and =eval-bundle.scm= byte for byte, in 2 s.
+- *Candidates.* =qualify.bl candidate= now takes its metadata from the refresh, so a candidate's link rows match its sources.
+- *Additions.* =--additions= appends namespaces, with the export's module naming and pinned host modules. A probe namespace added this way qualifies 13/13.
+- *Leaves.* A host leaf added by a host edit reaches =:leaves= through the registry. The refresh calls =host/registered-leaves= dynamically, because an older =:leaves= could not link a direct call to it.
+
+The retired =partition-closure.py= step and the pinned BEAM SDK are no longer needed to regenerate a bundle.
+
+A store collection had removed the PCRE2 library that the host C =dlopen=s by store path, and every stage then failed with PCRE2 status −10000. =qualify.bl= now realises and roots that path, and =bl.tools= builds declared packages with an out-link, so each is a GC root. =prepare-checkout-sdk= prunes retired preparations after each publish, under its lock. It keeps the current fingerprint, jobs whose foundry ledger is queued or running, directories holding the current SDK's or previous preparation's roots, and the four newest others. Its first real run went from 197 directories to 14.
+
+* Code-changing compiler work and SDK sharding
+=candidate --codegen= qualifies a change that alters generated code. S2 compiles the new bundle into S3 and S3 into S4; S4 = S3 is the fixpoint, and the fixpoint compiler passes the corpus, fixpoint and actor gates. The first such change compiles =(tuple …)= and =(erlang/list_to_tuple (list …))= to an ANF tuple when the names resolve to core and the BIF. S3 differs from S2, S3 = S4, and all 13 gates pass. Paired on the reader job, the compile minimum went from 84.8 to 82.3 ms.
+
+The SDK's library producer compiled every unit serially on one owner. The reported "jobs 4" covered only verified restoration, and that serial compile is the 575 s of a compiler-edit SDK. With =sdkShards= = k, k producer VMs first compile disjoint source subsets into their own unit stores. Each VM has its own shadow ebin and claims. The stores merge with the previous one. The ordinary producer then runs with the merged store as its previous store, so every unit is a verified reuse under the rule cross-build reuse already relies on. =sdkShardVerify= instead compiles serially as well and fails unless every unit's files equal the shards' bytes. The tuple change rotates the compiler key, so its SDK build is that verification.
