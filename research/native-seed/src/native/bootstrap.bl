@@ -516,11 +516,37 @@
                       (remove #(= "core" (:ns %)) units)))
        stub-links (filterv #(contains? stubs (first %)) (:namespace-links metadata))]
   (assoc metadata
+   ; Dynamic on purpose: a metadata whose :leaves predates this leaf could not
+   ; link a direct call to it.
+   :leaves (vec (sort (erlang/apply :host :registered-leaves (list))))
    :resolution {:version 1 :seed-names seeds :headers headers}
    :namespace-links (vec (concat member-links stub-links))
    :namespace-modules (mapv (fn [u] [(:ns u) (:module u) (:base-module u)]) units))))
 
 (defn- unit-data [u] (data (select-keys u [:ns :path :source :requires :module :base-module])))
+
+(defn- module-name
+ "The closure module of namespace `ns`: Elixir.BeamLisp.Ns. and each dotted
+  segment with its first letter upper-cased, as the BEAM export names them."
+ [ns]
+ (erlang/binary_to_atom
+  (str "Elixir.BeamLisp.Ns."
+       ; a plain-text split: no regular-expression resource
+       (string/join "." (map (fn [seg] (str (String/upcase (String/slice seg 0 1)) (String/slice seg 1 (count seg))))
+                             (String/split ns "."))))))
+
+(defn- with-additions
+ "`bundle` with the namespaces of `additions` (a vector of {:ns :path :module?}
+  in dependency order) appended; a :module is a pinned BL host module."
+ [bundle additions]
+ (reduce (fn [b row]
+          (let [ns (:ns row) module (module-name ns)]
+           (when (some #(= ns (:ns %)) (:units b)) (refresh-refuse! "namespace already in the bundle" {:namespace ns}))
+           (let [b (update b :units (fn [us] (conj (vec us) {:ns ns :path (:path row) :module module :base-module module :requires []})))]
+            (if (:module row)
+             (update b :host-modules (fn [rows] (vec (sort-by first (conj (vec rows) [ns (:module row)])))))
+             b))))
+         bundle additions))
 
 (defn refresh-bundle
  "[bundle-text eval-bundle-text] for `bundle` with its units' sources taken
@@ -551,8 +577,12 @@
          output (compile-bundle bundle host-source)]
     (host/write-file (nth args 3) output)
     (println (str "NATIVE_SELF_COMPILE " (count (:units bundle)) " namespaces")))
-  (and (= 4 (count args)) (contains? #{"--refresh-bundle" "--refresh-bundle-own"} (first args)))
+  (and (contains? #{4 5} (count args)) (contains? #{"--refresh-bundle" "--refresh-bundle-own"} (first args)))
    (let [bundle (host/eval-scheme (host/read-file (nth args 1)))
+         bundle (if (= 5 (count args))
+                  ; additions are a data literal: it evaluates to itself
+                  (with-additions bundle (ev/eval-string (host/read-file (nth args 4)) (nth args 4)))
+                  bundle)
          own? (= "--refresh-bundle-own" (first args))
          [text eval-text] (refresh-bundle bundle (fn [u] (if own? (:source u) (host/read-file (:path u)))))]
     (host/write-file (nth args 2) text)

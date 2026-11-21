@@ -1,11 +1,12 @@
 ;; The native compiler on Chez Scheme: build, qualify, derive and time it.
 ;;
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- qualify   --image DIR --work DIR [--fresh] [--skip-actors]
-;;   ./bin/bl run research/native-seed/chez/qualify.bl -- candidate --image DIR --out DIR [--fresh] [--codegen]
+;;   ./bin/bl run research/native-seed/chez/qualify.bl -- candidate --image DIR --out DIR [--fresh] [--codegen] [--additions FILE.edn]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- derive    --image DIR --out DIR [--base REV]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- pair      --base PRELUDE --cand PRELUDE --out DIR [--reps N] [--rounds N]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- profile   --prelude PRELUDE --out DIR [--reps N] [--ticks N]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- refresh   --image DIR --out DIR [--own]
+;;   ./bin/bl run research/native-seed/chez/qualify.bl -- eval      --image DIR --file SOURCE.bl
 ;;
 ;; Tools come from the repository env.bl's :tools (bl.tools): Chez Scheme and the
 ;; C compiler for the host's text FFI as packages of the locked nixpkgs. No tool
@@ -403,7 +404,7 @@
     :else (recur next (inc generation) rows)))))
 
 (defn candidate!
- [image out {:keys [fresh codegen]}]
+ [image out {:keys [fresh codegen additions]}]
  (when (File/exists? out) (throw (ex-info "candidate output exists" {:out out})))
  (File/mkdir_p! out)
  (let [started (now-ms)
@@ -425,9 +426,14 @@
         ;; sources; an older stage gets the sources replaced in place.
         eval-bundle (Path/join out "eval-bundle.scm")
         ;; two output files, about 2 s: run directly rather than through the run cache
-        refresh (cmd! (:scheme (tools)) ["--script" (:launcher s1) "--refresh-bundle" (Path/join image "bundle.scm") bundle eval-bundle]
+        refresh (cmd! (:scheme (tools)) (concat ["--script" (:launcher s1) "--refresh-bundle" (Path/join image "bundle.scm") bundle eval-bundle]
+                                                (if additions [(Path/expand additions)] []))
                       {:env (chez-env)})
         refreshed? (= 0 (:exit refresh))
+        ;; a stage without the mode answers with its usage; anything else is a
+        ;; refresh failure, not a reason to fall back
+        _ (when (and (not refreshed?) (not (String/contains? (:out refresh) "usage: native-compiler")))
+           (throw (ex-info (str "bundle refresh failed:\n" (String/slice (:out refresh) -3000 3000)) {})))
         _ (when-not refreshed?
            (File/cp! (Path/join out "literal-bundle.scm") bundle)
            (File/cp! (Path/join image "eval-bundle.scm") eval-bundle))
@@ -688,6 +694,11 @@
                  {:reps (String/to_integer (or (:reps o) "8")) :rounds (String/to_integer (or (:rounds o) "2"))
                   :prepared (abs (:prepared o))})
    "refresh" (refresh! (abs (:image o)) (abs (:out o)) o)
+   "eval" (let [b (build! (Path/join (abs (:image o)) "stage1.scm"))
+                r (cmd! (:scheme (tools)) ["--script" (:launcher b) "--eval" (Path/join (abs (:image o)) "bundle.scm") (abs (:file o))]
+                        {:env (chez-env)})]
+           (IO/write (:out r))
+           (when-not (= 0 (:exit r)) (throw (ex-info "native eval failed" {:exit (:exit r)}))))
    "profile" (profile! (abs (:prelude o)) (abs (:out o))
                        {:reps (String/to_integer (or (:reps o) "10")) :ticks (String/to_integer (or (:ticks o) "20000"))
                         :prepared (abs (:prepared o)) :focus (:focus o)})

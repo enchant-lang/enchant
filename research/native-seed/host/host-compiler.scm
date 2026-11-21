@@ -534,6 +534,11 @@
 (native-add-leaf! "host/read-file/1" native-read-file)
 (native-add-leaf! "host/write-file/2" native-write-file)
 (native-add-leaf! "host/command-line/0" native-command-line)
+;; Every registered leaf key, sorted: the bundle refresh's :leaves. It is the
+;; registry of the running image, so a host leaf added by a host edit reaches
+;; the metadata without another export.
+(native-add-leaf! "host/registered-leaves/0"
+ (lambda () (sort string<? (map (lambda (pair) (bl-nth pair 0)) (native-map-pairs native-leaf-registry)))))
 (for-each (lambda (name)
  (native-add-leaf! (string-append "Elixir.BeamLisp.Loader/" name "/1") native-ensure-loaded))
  '("ensure_loaded" "ensure_ready" "load_provider"))
