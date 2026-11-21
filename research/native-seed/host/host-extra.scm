@@ -368,7 +368,23 @@
   ((and (h-is-int x) (>= x 0) (< x 256)) (list x))
   ((null? x) '()) ((pair? x) (append (native-iolist-bytes-checked (car x)) (native-iolist-bytes-checked (cdr x))))
   (else (native-badarg "iolist byte or binary expected"))))
-(define (native-iolist-binary x) (native-utf8-string (native-iolist-bytes x)))
+(define (native-iolist-binary x)
+ ;; An iolist of scalar strings only (any nesting) is their concatenation:
+ ;; encoding each to UTF-8 and decoding the joined bytes gives the same text.
+ ;; A byte integer can join a scalar across a boundary, and anything else is
+ ;; an error to report, so both keep the byte path.
+ (let ((pieces (native-iolist-strings x '())))
+  (cond ((eq? pieces native-missing) (native-utf8-string (native-iolist-bytes x)))
+        ((string? x) x)
+        (else (native-join "" pieces)))))
+;; The strings of an iolist in order, or native-missing if it holds anything
+;; else (integers included); `tail` collects from the right.
+(define (native-iolist-strings x tail)
+ (cond ((eq? tail native-missing) tail)
+  ((string? x) (cons x tail))
+  ((null? x) tail)
+  ((pair? x) (native-iolist-strings (car x) (native-iolist-strings (cdr x) tail)))
+  (else native-missing)))
 (define (native-error-value? x)
  (and (bl-tag? x 'map) (eq? (bl-get x (bl-key "__exception__")) #t)))
 (define (native-error-value module message . fields)

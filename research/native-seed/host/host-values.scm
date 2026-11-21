@@ -5,9 +5,19 @@
 ;; binary tries. Neither representation exposes mutable storage to BL code.
 
 (define native-key-intern bl-key)
+;; Host code names its keywords with literal strings, so the same string object
+;; arrives again and again: remember each one's atom by identity (weakly) instead
+;; of re-testing the three atom spellings, appending the colon and re-interning.
+;; BL text is immutable, so an identical string always names the same atom.
+(define native-key-memo (make-table test: eq? weak-keys: #t))
+(define native-key-memo-miss (list 'native-key-memo-miss))
 (set! bl-key (lambda (name)
- (cond ((string=? name "nil") bl-nil) ((string=? name "true") #t) ((string=? name "false") #f)
-  (else (native-key-intern name)))))
+ (let ((hit (table-ref native-key-memo name native-key-memo-miss)))
+  (if (not (eq? hit native-key-memo-miss)) hit
+   (let ((atom (cond ((string=? name "nil") bl-nil) ((string=? name "true") #t) ((string=? name "false") #f)
+                (else (native-key-intern name)))))
+    (if (string? name) (table-set! native-key-memo name atom))
+    atom)))))
 (define native-opaque-structs (make-table test: eq? weak-keys: #t))
 ;; True once any non-vector value has been registered as an opaque struct.
 ;; Until then a struct-module query on a non-vector is exactly bl-nil without
@@ -1382,7 +1392,13 @@
 (define native-scalar-to-str h-to-str)
 (set! h-to-str (lambda (x) (if (native-utf16-fragment? x) x (native-scalar-to-str x))))
 (set! h-str-cat (lambda xs
- (native-from-utf16 (apply append (map (lambda (x) (native-utf16-units (h-to-str x))) xs)))))
+ ;; Scalar strings hold whole scalars, so their UTF16 units joined and decoded
+ ;; are their concatenation. A UTF16 fragment may pair a surrogate across a
+ ;; piece boundary, so any fragment keeps the unit path.
+ (let ((texts (map h-to-str xs)))
+  (if (let all ((ts texts)) (or (null? ts) (and (string? (car ts)) (all (cdr ts)))))
+   (native-join "" texts)
+   (native-from-utf16 (apply append (map native-utf16-units texts)))))))
 (set! bl-str h-str-cat)
 (define native-utf16-keywords (make-table test: equal?))
 (define native-scalar-keyword-intern bl-key)
