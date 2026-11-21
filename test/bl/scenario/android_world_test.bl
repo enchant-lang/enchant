@@ -95,3 +95,23 @@
         taps (count (filter (fn [l] (= l "shell input tap 150 350")) (String/split (File/read! (Path/join dir "log")) "\n")))]
     (is (:ok r))
     (is (= 2 taps))))
+
+(deftest a-wedged-adb-call-is-cut-off
+  ;; uiautomator dump waits for an idle UI; a screen that never idles must not hang the run
+  (let [dir (tmp "wedged") adb (Path/join dir "adb")]
+    (File/mkdir_p! dir)
+    (File/write! adb "#!/bin/sh\nexec sleep 30\n")
+    (System/cmd "chmod" (list "+x" adb))
+    (let [w ((:open (droid/world {:frames (Path/join dir "f") :adb adb :adb-timeout-s 1})) nil)
+          t0 (erlang/monotonic_time :millisecond)
+          r (droid/adb! w ["shell" "uiautomator" "dump"])
+          s (droid/screen! w)
+          ms (- (erlang/monotonic_time :millisecond) t0)]
+      (is (= 124 (:code r)))
+      (is (= [] (:nodes s)))
+      (is (< ms 10000)))))
+
+(deftest the-dump-carries-a-device-side-timeout
+  (let [dir (tmp "dumpcap") adb (stub! dir false)
+        _ (droid/screen! ((:open (droid/world {:frames (Path/join dir "f") :adb adb :dump-timeout-s 7})) nil))]
+    (is (String/contains? (File/read! (Path/join dir "log")) "shell timeout 7 uiautomator dump"))))

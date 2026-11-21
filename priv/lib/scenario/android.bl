@@ -133,10 +133,17 @@
 (defn- now [] (erlang/monotonic_time :millisecond))
 
 (defn adb!
-  "Run adb with `args` against the world's device: {:out bytes :code n}."
-  [w args]
-  (let [argv (concat (if (:serial w) ["-s" (:serial w)] []) args)
-        r (System/cmd (:adb w) (to-list (map str argv)) (list (tuple :stderr_to_stdout true)))]
+  "Run adb with `args` against the world's device: {:out bytes :code n}.
+   No call outlives `secs` (default the world's :adb-timeout-s, 60): a wedged
+   adb or device command comes back as code 124 instead of hanging the run.
+   The cap needs coreutils' timeout on the host; without it adb runs uncapped."
+  [w args & [secs]]
+  (let [argv (map str (concat (if (:serial w) ["-s" (:serial w)] []) args))
+        cap (or secs (get w :adb-timeout-s 60))
+        t (:timeout w)
+        r (if t
+            (System/cmd t (to-list (concat ["-k" "5" (str cap) (:adb w)] argv)) (list (tuple :stderr_to_stdout true)))
+            (System/cmd (:adb w) (to-list argv) (list (tuple :stderr_to_stdout true))))]
     {:out (elem r 0) :code (elem r 1)}))
 
 (defn screen!
@@ -144,7 +151,7 @@
    UIAutomator could not dump (it can't during some transitions)."
   [w]
   (let [path (get w :dump-path "/sdcard/scenario-ui.xml")
-        d (adb! w ["shell" "uiautomator" "dump" path])]
+        d (adb! w ["shell" "timeout" (str (get w :dump-timeout-s 20)) "uiautomator" "dump" path])]
     (if (not= 0 (:code d))
       {:nodes [] :error (str (:out d))}
       (let [x (adb! w ["exec-out" "cat" path])]
@@ -223,7 +230,7 @@
         (when (not @stop)
           (let [path (str "/sdcard/scenario-rec-" k ".mp4")]
             (swap! segments conj path)
-            (adb! w ["shell" "screenrecord" "--time-limit" limit path])
+            (adb! w ["shell" "screenrecord" "--time-limit" limit path] (+ 20 (String/to_integer limit)))
             (recur (inc k))))))))
 
 (defn- stop-recording! [w stop segments directory]
@@ -241,12 +248,14 @@
 (defn world
   "A scenario world on one device, for actors who all hold that device.
    opts: {:frames dir (required) :serial \"emulator-5554\" :adb path
-          :wait-ms 20000 :record? false :record-limit 170}
+          :wait-ms 20000 :record? false :record-limit 170
+          :adb-timeout-s 60 :dump-timeout-s 20}
    Each step's basis is {:frame png :texts [...] :descs [...]}; a refuted
    claim keeps the screen it was judged on. :close! returns
    {:frames dir :recordings [mp4 …]}."
   [opts]
-  (let [w (merge {:adb (or (System/find_executable "adb") "adb")} opts)
+  (let [w (merge {:adb (or (System/find_executable "adb") "adb")
+                 :timeout (System/find_executable "timeout")} opts)
         dir (Path/expand (:frames w))
         index (atom 0)
         stop (atom false) segments (atom [])]
