@@ -53,11 +53,11 @@
       :else (normalize (elem req (- n 1))))))
 
 ;; handle one io_request body → {reply new-seq}
-(defn- handle-io [send-fn id seq req]
+(defn- handle-io [send-fn id seq req stream]
   (cond
     ;; {:put_chars, enc, chars} | {:put_chars, chars}
     (and (erlang/is_tuple req) (= :put_chars (elem req 0)))
-    (tuple :ok (send-chunks send-fn id :stdout seq (request-chars req)))
+    (tuple :ok (send-chunks send-fn id stream seq (request-chars req)))
 
     ;; setopts / getopts / geometry — benign replies
     (and (erlang/is_tuple req) (= :setopts (elem req 0))) (tuple :ok seq)
@@ -72,28 +72,128 @@
 
     :else (tuple (tuple :error :request) seq)))
 
+(declare drain-late-stderr unpublish-proxy!)
+
 (defn- io-loop [send-fn id seq]
   (receive
     [:io_request from reply-as req]
-    (let [r (handle-io send-fn id seq req)]
+    (let [r (handle-io send-fn id seq req :stdout)]
+      (erlang/send from (tuple :io_reply reply-as (elem r 0)))
+      (io-loop send-fn id (elem r 1)))
+
+    ;; a write to :standard_error by a process this proxy leads, routed here by
+    ;; the stderr router: same connection, same order as the stdout around it
+    [:bl_stderr_request from reply-as req]
+    (let [r (handle-io send-fn id seq req :stderr)]
       (erlang/send from (tuple :io_reply reply-as (elem r 0)))
       (io-loop send-fn id (elem r 1)))
 
     [:finish from ref]
-    (do (erlang/send from (tuple :finished ref seq)) :ok)
+    (do (erlang/send from (tuple :finished ref seq)) (drain-late-stderr))
 
-    (after 1800000 :ok)))
+    (after 1800000 (unpublish-proxy! (erlang/self)))))
+
+;; ── stderr: one router in front of the VM's :standard_error ────────────────
+;;
+;; `IO.puts(:stderr, …)`, `io:format(standard_error, …)` and every library that
+;; reports on stderr address ONE registered process for the whole VM. In a warm VM
+;; that is the VM's log, so a command's error — written by the CLI on stderr, as a
+;; cold run writes it — never reached the client that ran it. The router takes the
+;; registered name; a request from a process whose group leader is a live request
+;; proxy becomes that request's :stderr frames, and every other request goes to the
+;; original device untouched. Call sites stay as they are: a cold VM has no router
+;; and its :standard_error is the terminal.
+
+(def PROXIES :bl_vm_io_proxies)
+(def PT-ORIGINAL (tuple :vm_io :standard_error))
+(def PT-ROUTER (tuple :vm_io :stderr_router))
+
+(defn- original-stderr []
+  (erlang/apply :persistent_term :get (list PT-ORIGINAL :undefined)))
+
+(defn- publish-proxy! [pid]
+  (when (not (= :undefined (ets/whereis PROXIES)))
+    (ets/insert PROXIES (tuple pid)))
+  pid)
+
+(defn- unpublish-proxy! [pid]
+  (when (not (= :undefined (ets/whereis PROXIES)))
+    (ets/delete PROXIES pid))
+  :ok)
+
+(defn- drain-late-stderr
+  "After the flush marker, a stderr write the router forwarded before the proxy
+   left the table may still arrive. Its writer is blocked on the reply, so it goes
+   to the original device and is answered; nothing waits forever on a proxy that
+   is gone."
+  []
+  (receive
+    [:bl_stderr_request from reply-as req]
+    (let [device (original-stderr)]
+      (if (erlang/is_pid device)
+        (erlang/send device (tuple :io_request from reply-as req))
+        (erlang/send from (tuple :io_reply reply-as :ok)))
+      (drain-late-stderr))
+    (after 1000 :ok)))
+
+(defn- route-stderr [original msg]
+  (if (and (erlang/is_tuple msg) (= 4 (erlang/tuple_size msg)) (= :io_request (elem msg 0)))
+    (let [from (elem msg 1)
+          gl (if (erlang/is_pid from)
+               (let [info (erlang/process_info from :group_leader)]
+                 (if (erlang/is_tuple info) (elem info 1) :undefined))
+               :undefined)]
+      (if (and (erlang/is_pid gl) (ets/member PROXIES gl))
+        (erlang/send gl (tuple :bl_stderr_request from (elem msg 2) (elem msg 3)))
+        (erlang/send original msg)))
+    (erlang/send original msg)))
+
+(defn- router-loop [original]
+  (receive
+    msg (do (try (route-stderr original msg) (catch _ (erlang/send original msg)))
+            (router-loop original))))
+
+(defn install-stderr-router!
+  "Put the request-aware router in front of this VM's :standard_error. Idempotent;
+   call once when a warm VM starts serving. Returns the router pid."
+  []
+  (let [existing (erlang/apply :persistent_term :get (list PT-ROUTER :undefined))]
+    (if (and (erlang/is_pid existing) (erlang/is_process_alive existing)
+             (= existing (erlang/whereis :standard_error)))
+      existing
+      (let [original (erlang/whereis :standard_error)
+            parent (erlang/self)
+            router (spawn
+                     (fn []
+                       (ets/new PROXIES (list :named_table :public :set (tuple :read_concurrency true)))
+                       (erlang/send parent (tuple :bl_stderr_router_ready (erlang/self)))
+                       (router-loop original)))]
+        (receive
+          [:bl_stderr_router_ready r] :ok
+          (after 5000 :ok))
+        (erlang/apply :persistent_term :put (list PT-ORIGINAL original))
+        (erlang/apply :persistent_term :put (list PT-ROUTER router))
+        ;; a process holds one registered name, so the router is known by
+        ;; persistent_term and takes only :standard_error
+        (when (erlang/is_pid original)
+          (erlang/unregister :standard_error)
+          (erlang/register :standard_error router))
+        router))))
 
 (defn start-with-send
   "Spawn a group-leader proxy for request `id` that emits frames via `send-fn`
    (a 1-arg fn taking framed bytes). Returns the proxy pid; set a worker's group
-   leader to it with erlang/group_leader."
+   leader to it with erlang/group_leader. Under the stderr router, the stderr of
+   every process it leads streams back as :stderr frames."
   [send-fn id]
-  (spawn (fn [] (io-loop send-fn id 0))))
+  (publish-proxy! (spawn (fn [] (io-loop send-fn id 0)))))
 
 (defn finish
-  "Flush marker: tell the proxy no more output is coming; returns the final seq."
+  "Flush marker: tell the proxy no more output is coming; returns the final seq.
+   The proxy leaves the stderr table first, so later stderr writes by processes
+   it still leads go to the VM's own stderr."
   [proxy]
+  (unpublish-proxy! proxy)
   (let [ref (erlang/apply :erlang :make_ref (list))]
     (erlang/send proxy (tuple :finish (erlang/self) ref))
     (receive

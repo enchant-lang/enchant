@@ -229,3 +229,66 @@
         "at least six beats fit inside the client's patience, so one lost beat is not a stall")))
 
 (run-tests)
+
+;; ── a command's stderr is the client's stderr ───────────────────────────────
+;;
+;; The CLI reports a failure with `IO.puts(:stderr, …)`, as a cold run does. In a
+;; warm VM `:standard_error` is ONE registered process — the VM's log — so the
+;; error went there and the client printed "ended with exit 1 and no output". The
+;; session's stderr router sends a request's stderr back as :stderr frames.
+
+(defn- client-run-streams [root argv]
+  (let [ep (:ok (paths/endpoints root))
+        charlist (erlang/binary_to_list (:sock ep))
+        token (File/read! (:token ep))
+        conn (elem (gen_tcp/connect (tuple :local charlist) 0
+                     (list (tuple :inet_backend :inet) :local :binary (tuple :packet 4) (tuple :active false))) 1)]
+    (gen_tcp/send conn (erlang/apply :erlang :term_to_binary
+                         (list (tuple :bl 1 :hello {:tree (paths/fingerprint root) :token token}))))
+    (gen_tcp/recv conn 0 5000)
+    (let [id (erlang/apply :crypto :strong_rand_bytes (list 16))]
+      (gen_tcp/send conn (erlang/apply :erlang :term_to_binary
+                           (list (tuple :bl 1 :request id {:argv argv :cwd root :env {}}))))
+      (loop [outs [] errs [] order []]
+        (let [r (gen_tcp/recv conn 0 20000)]
+          (if (not= :ok (elem r 0))
+            {:out "" :err "" :code nil :order order}
+            (let [f (erlang/apply :erlang :binary_to_term (list (elem r 1)))
+                  tag (elem f 2)]
+              (cond
+                (= tag :stdout) (recur (conj outs (elem f 5)) errs (conj order :stdout))
+                (= tag :stderr) (recur outs (conj errs (elem f 5)) (conj order :stderr))
+                (= tag :exit) {:out (erlang/iolist_to_binary (to-list outs))
+                               :err (erlang/iolist_to_binary (to-list errs))
+                               :code (elem f 4) :order order}
+                :else (recur outs errs order)))))))))
+
+(deftest a-failing-command-reports-its-error-to-the-client
+  (testing "an undefined var, a badarg and an explicit stderr write all reach the client"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))]
+      (erlang/apply :timer :sleep (list 150))
+      (let [undef (client-run-streams root (list "eval" "(println undefined-thing-xyz)"))
+            badarg (client-run-streams root (list "eval" "(erlang/element 5 (tuple 1))"))
+            written (client-run-streams root (list "eval" "(do (println :before) (IO/puts :stderr \"to-stderr\") (println :after))"))
+            spawned (client-run-streams root (list "eval" "(let [me (erlang/self)] (spawn (fn [] (IO/puts :stderr \"from-child\") (erlang/send me :done))) (receive :done :ok))"))]
+        (session/stop listener)
+        (is (= 1 (:code undef)))
+        (is (clojure.string/includes? (:err undef) "undefined-thing-xyz"))
+        (is (= 1 (:code badarg)))
+        (is (clojure.string/includes? (:err badarg) "out of range"))
+        (is (= 0 (:code written)))
+        (is (= "to-stderr\n" (:err written)))
+        ;; stdout and stderr keep the order the command wrote them in
+        (is (= [:stdout :stderr :stdout] (vec (take 3 (:order written)))))
+        ;; a process the command spawned inherits its group leader, and its stderr
+        (is (clojure.string/includes? (:err spawned) "from-child"))))))
+
+(deftest a-write-outside-any-request-keeps-the-vms-own-stderr
+  (testing "the router passes a write with no request proxy to the original device"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))]
+      (erlang/apply :timer :sleep (list 150))
+      (is (= :ok (IO/puts :stderr "session-test: outside any request")))
+      (is (erlang/is_pid (erlang/whereis :standard_error)))
+      (session/stop listener))))
