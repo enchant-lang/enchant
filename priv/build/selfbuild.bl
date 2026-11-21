@@ -274,14 +274,11 @@
    The whole running code path is handed over (`-pa`, the parent's order
    preserved), with the staged ebin prepended last so `:code.priv_dir` answers
    the staged root. A crash is reported with the child's own output."
-  [root ebin scratch jobs env tag]
+  [root ebin scratch jobs env tag custody]
   (let [exe "elixir"
         result (Path/join scratch (str "library-result" tag ".term"))
         manifest (Path/join root (str "library-manifest" tag))
         logpath (Path/join root (str "library-build" tag ".log"))
-        custody (Base/encode64 (erlang/term_to_binary
-                  (tuple (BeamLisp.AOTCache/generation_lock_path (Path/expand (BeamLisp.AOTCache/dir))
-                            (BeamLisp.AOTCache/compiler_key)) (c/follower-context root))))
         ;; a shard installs the floor into its own copy of the staged ebin; the
         ;; copy's parent is still `root`, so :code.priv_dir answers root/priv
         shadow (if (= "" tag) (Path/join root "ebin")
@@ -365,16 +362,21 @@
    every source with the merged store as its previous store, so each unit is a
    verified reuse and assembly, verification and custody are unchanged."
   [root ebin scratch jobs]
-  (let [k (shard-count)]
+  (let [k (shard-count)
+        ;; The workspace claim belongs to this process: compute the custody the
+        ;; children follow here, before any shard task runs in another process.
+        custody (Base/encode64 (erlang/term_to_binary
+                  (tuple (BeamLisp.AOTCache/generation_lock_path (Path/expand (BeamLisp.AOTCache/dir))
+                            (BeamLisp.AOTCache/compiler_key)) (c/follower-context root))))]
     (if (= 1 k)
-      (run-library-child-once! root ebin scratch jobs (list) "")
+      (run-library-child-once! root ebin scratch jobs (list) "" custody)
       (let [previous (System/get_env "BL_PREVIOUS_UNIT_STORE")
             shard-outs (mapv (fn [i] (str ebin "-shard-" i)) (range k))
             results (mapv #(Task/await % :infinity)
                           (mapv (fn [i]
                                   (Task/async
                                     (fn [] (run-library-child-once! root (nth shard-outs i) scratch 1
-                                             (list (tuple "BL_SDK_SHARD" (str i "/" k))) (str "-shard-" i)))))
+                                             (list (tuple "BL_SDK_SHARD" (str i "/" k))) (str "-shard-" i) custody))))
                                 (range k)))
             failed (filter #(not (:ok? %)) results)]
         (if (seq failed)
@@ -386,7 +388,7 @@
                 ;; equal the shards' bytes.
                 verify? (= "1" (System/get_env "BL_SDK_SHARD_VERIFY"))
                 r (run-library-child-once! root ebin scratch jobs
-                    (if verify? (list) (list (tuple "BL_PREVIOUS_UNIT_STORE" merged))) "")
+                    (if verify? (list) (list (tuple "BL_PREVIOUS_UNIT_STORE" merged))) "" custody)
                 r (if (and verify? (:ok? r)) (verify-shard-units! r ebin merged) r)]
             (doseq [i (range k)] (File/rm_rf! (nth shard-outs i)) (File/rm_rf! (Path/join root (str "ebin-shard-" i))))
             (println (str "SDK-SHARDS " (Jason/encode! {:shards k :compiled (map :compiled results)})))
