@@ -1,12 +1,12 @@
 """Derive a candidate image directory by applying host-source edits to a qualified image.
 
-Usage: python3 derive-image.py QUALIFIED_IMAGE OUT_DIR
+Usage: python3 derive-image.py QUALIFIED_IMAGE OUT_DIR [BASE_REV]
 
 The host Scheme in research/native-seed/host/*.scm is copied verbatim into an
 image's host.scm, prelude.scm, stage1.scm and every self-emitted stageN.scm.
 For each run of top-level host forms that differs between HEAD and the working
-tree, replace that exact text in those files. The qualified image must have been
-built from HEAD's host sources; each replaced text must occur exactly once.
+tree (or BASE_REV, default HEAD), replace that exact text in those files. The qualified image must have been
+built from BASE_REV's host sources; each replaced text must occur exactly once.
 Every other input is symlinked. The derived directory records each replacement
 so the Chez qualification can check the candidate against it."""
 import difflib, hashlib, json, re, subprocess, sys
@@ -43,13 +43,14 @@ def top_level_forms(text):
 
 def main():
     image, out = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
+    base = sys.argv[3] if len(sys.argv) > 3 else 'HEAD'
     out.mkdir(parents=True)
     image_host = (image / 'host.scm').read_text()
     edits = []
     root = HOST.parents[2]
-    changed = subprocess.check_output(['git', 'diff', '--name-only', 'HEAD', '--', str(HOST)], cwd=root, text=True).split()
+    changed = subprocess.check_output(['git', 'diff', '--name-only', base, '--', str(HOST)], cwd=root, text=True).split()
     for rel in changed:
-        before = subprocess.check_output(['git', 'show', f'HEAD:{rel}'], cwd=root, text=True)
+        before = subprocess.check_output(['git', 'show', f'{base}:{rel}'], cwd=root, text=True)
         after = (root / rel).read_text()
         old_forms = [f for _, f in top_level_forms(before)]
         new_forms = [f for _, f in top_level_forms(after)]
@@ -64,7 +65,7 @@ def main():
     for e in edits:
         if image_host.count(e['old']) != 1:
             sys.exit(f"{e['name']}: qualified host text is not unique")
-    receipt = {'qualified_image': str(image), 'edits': [], 'files': {}}
+    receipt = {'qualified_image': str(image), 'base': subprocess.check_output(['git', 'rev-parse', base], cwd=root, text=True).strip(), 'edits': [], 'files': {}}
     for f in sorted(image.iterdir()):
         if f.name in TEXT_FILES:
             text = f.read_text()

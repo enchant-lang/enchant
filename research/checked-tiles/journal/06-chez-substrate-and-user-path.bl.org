@@ -112,3 +112,53 @@ Small-map search and text joining are already tuned at the host level. What rema
 Commit =60aede9b3= wakes a local-lock waiter when the holder releases the lock or exits, instead of letting it poll on a 1 ms timer. On the checkout SDK rebuilt with that change, the same tracer covered ten warm =now.bl= requests: 467 release-waits held 194 ms in total, and no =wait_for_local_lock_retry= sleep ran. Before the change, the ten requests made 1,910 retry sleeps holding 4,286 ms. [[file:../../substrate-ab/floor/wall-after-lock-wakeup.txt][Trace]]
 
 The checkout request now takes 400–470 ms of wall time, and the client uses 0.34 s of user CPU of it. The Rust client SHA-256s the 976 runtime source files (67 MB under =priv= and =native=) on every command, because =engine_inputs.rs= keeps no evidence between commands. The VM's share of a checkout request is therefore about 20–50 ms. The installed =bl= does not hash anything and was measured earlier at 100–170 ms on the old SDK. The lock change reaches it at the next release. The lease and custody tests pass on the changed SDK: =code_lease=, =code_lease_observation=, =eval_module_release=, =exact_member_lease= and =class_custody_entries=, 112 checks in all.
+
+* A warm command's errors reach its client
+A failing command in a warm VM printed only "the warm VM ended this command with exit 1 and no output". The CLI reports failures with =IO.puts(:stderr, …)=, as a cold run does, but =:standard_error= is one registered process per VM, and in a warm VM it writes to the VM's log. The request proxy (=vm.io=) carried only stdout. The session now puts a router in front of =:standard_error=. A write from a process whose group leader is a live request proxy becomes that request's =:stderr= frames, in order with its stdout. Every other write goes to the original device. No call site changed: the CLI, library code and =io:format(standard_error, …)= are all covered, and so are processes the command spawns. A cold VM has no router. =vm.session-test= covers an undefined var, a badarg, an explicit stderr write, stdout/stderr ordering, a spawned writer, and a write from outside any request. All 37 of its checks pass. Through the checkout client, =badarg=, undefined-var and =ex-info= failures now print the same text a cold run prints.
+
+* The checkout client stops rehashing the engine
+The Rust client now keeps a content digest per physical path, together with the complete stat stamp it was read under (device, inode, size, mode, mtime and ctime in nanoseconds), in =~/.cache/beam-lisp/checkout-digests-v1.bin=. It reuses a digest only for an identical stamp. A digest is recorded only if the file's newest timestamp was at least 2 s older than the start of its read. A write in the same clock tick is therefore read again, and ctime cannot be set from user space. =BL_CHECKOUT_DIGEST_CACHE=0= turns reuse off. The engine capture on this checkout goes from 0.15 s to 0.01 s with the same fingerprint, and a warm checkout =bl run= from about 410 ms to 60 ms. Edits made 0.1 s apart, a same-length edit, and an edit with its mtime set back to 2020 are each seen on the next command. A new Rust test covers reuse, the racy window and a same-length edit with its mtime restored. Run serially, 113 Rust tests pass. The one failure, =failed_metadata_prevents_real_native_publication_even_with_a_guessed_library=, needs =BL_ARTIFACT_PLATFORM= and also fails at HEAD.
+
+The SDK build for these checks failed at first because the build station's disk was full: 1.8 GB free of 476 GB. =nix-store --gc --max-freed 60G= removed 2,766 dead store paths. No GC roots or project files were touched.
+
+* Text and tuple leaves on Chez
+The profiler now also charges anonymous frames to the nearest named frame and records leaf ← caller pairs. 56% of leaf samples had been anonymous closures. With that attribution, the hot leaves are host primitives:
+| Leaf ← caller | Samples (of ~8,100) |
+|---|---|
+| =put-string= ← =native-join= | 482 |
+| =list-length= ← Chez =reverse= | 204 |
+| small-map search under =map-ref= / =has?= / =assoc= | ~490 |
+| =list->vector= and =list-length= under =list_to_tuple= | ~230 |
+
+The changes:
+- =native-join= sizes its result once and copies each piece into place.
+- UTF-8, UTF-16 and code-point conversion build their lists from the string's end instead of =string->list= plus =reverse=. For any scalar they do not accept, they fall back to the original walk and its errors.
+- iolist bytes are consed onto their tail instead of appended.
+- =list_to_tuple= validates, counts and fills in two walks.
+- Equality answers fixnum and symbol pairs before classifying either side.
+- On Chez, the shim's =map= builds forwards and =reverse= is a single pass.
+
+Paired runs on the reader job, 48 per arm and interleaved on a Work with load average 10, all emit =9b92b9f2…=:
+| | Median ms | Min ms | Read | Compile | Emit |
+|---|---|---|---|---|---|
+| Before | 155.6 | 150.0 | 10.5 | 103.6 | 41.2 |
+| After | 149.3 | 144.1 | 9.7 | 102.0 | 36.8 |
+[[file:../../substrate-ab/text-kernel-pair.txt][Pair log]]
+
+The image derived from those edits (=derive-image.py … HEAD~1=) passes every Chez gate. Both source corpora pass on both stages. Stage two equals stage three (=7b6c6ed7…=). The actor checks pass at three budgets: 461 checks each. Self-emission takes 6.7 s; the Gambit receipt records 33.4 s. [[file:../evidence/substrate-chez-fixpoint-text.json][Candidate qualification]]
+
+* Where compilation now goes, and what the IR has to change
+Compilation is now 102 of the reader job's 149 ms, and no host leaf above 3% remains. The time is in the compiler's own data path. A macro expansion is walked four times:
+1. =datum= turns each argument form into data.
+2. =check_first_order!= walks the result. For every node it allocates a budget tuple, and for every atom it builds a binary just to take its size.
+3. =data->form= turns the result back into reader nodes.
+4. =renumber= rebuilds it again for gensym canonicalization, threading a persistent map.
+
+Generic BL maps with keyword keys hold every node, so each field read is an ordered small-map search with keyword comparison.
+
+The private IR therefore has to change the compiler source (=priv/boot/compiler.bl=, =priv/host/compiler_data.bl=), not the host:
+- fixed-layout records for reader nodes and ANF, with field access by position;
+- one fused validate/convert/canonicalize pass for macro results, charging the same budget in the same order;
+- keyword fields resolved at compile time.
+
+The BEAM compiler compiles the same source, so its output has to stay byte-identical. The native image then has to be rebuilt from BL through the BEAM-seeded stage 1 and requalified (stage 2 = stage 3, corpus, actors). That is the next piece of work. Host-level tuning has reached its limit.
