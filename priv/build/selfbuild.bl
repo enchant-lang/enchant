@@ -370,11 +370,15 @@
 
 (defn- run-library-child!
   "The library producer. With BL_SDK_SHARDS=k > 1, k shard children first
-   compile disjoint thirds/quarters/… of the sources into their own unit stores
-   (in parallel; each reuses the previous store as usual); their stores are
-   merged with the previous one; then the ordinary single producer runs over
-   every source with the merged store as its previous store, so each unit is a
-   verified reuse and assembly, verification and custody are unchanged."
+   compile disjoint k-ths of the sources into their own unit stores, in
+   parallel, each reusing the previous store as usual; their stores are merged
+   with the previous one; then the ordinary single producer runs over every
+   source with the merged store as its previous store, so each unit is a
+   verified reuse, and assembly, verification and custody are unchanged.
+
+   BL_SDK_SHARD_VERIFY=1 qualifies sharding: the shards reuse nothing and
+   compile every unit, the producer restores the previous qualified store as
+   usual, and every unit the shards built must equal its bytes."
   [root ebin scratch jobs]
   (let [k (shard-count)
         ;; The workspace claim belongs to this process: compute the custody the
@@ -387,27 +391,27 @@
     (if (= 1 k)
       (run-library-child-once! root ebin scratch jobs (list) "" custody)
       (let [previous (System/get_env "BL_PREVIOUS_UNIT_STORE")
+            verify? (= "1" (System/get_env "BL_SDK_SHARD_VERIFY"))
             shard-outs (mapv (fn [i] (str ebin "-shard-" i)) (range k))
             results (mapv #(Task/await % :infinity)
                           (mapv (fn [i]
                                   (Task/async
                                     (fn [] (run-library-child-once! root (nth shard-outs i) scratch 1
-                                             (list (tuple "BL_SDK_SHARD" (str i "/" k))) (str "-shard-" i) custody))))
+                                             ;; a shard's own fresh store as its previous one: nothing to reuse
+                                             (cons (tuple "BL_SDK_SHARD" (str i "/" k))
+                                                   (if verify? (list (tuple "BL_PREVIOUS_UNIT_STORE" (nth shard-outs i))) (list)))
+                                             (str "-shard-" i) custody))))
                                 (range k)))
             failed (filter #(not (:ok? %)) results)]
         (if (seq failed)
           {:ok? false :errors (mapcat :errors failed)}
-          (let [merged (merge-unit-stores! (concat (if previous [previous] []) shard-outs)
+          (let [merged (merge-unit-stores! (concat (if (and previous (not verify?)) [previous] []) shard-outs)
                                            (Path/join scratch "merged-unit-store"))
-                ;; BL_SDK_SHARD_VERIFY=1: the producer compiles serially from the
-                ;; original previous store instead, and every unit's files must
-                ;; equal the shards' bytes.
-                verify? (= "1" (System/get_env "BL_SDK_SHARD_VERIFY"))
                 r (run-library-child-once! root ebin scratch jobs
                     (if verify? (list) (list (tuple "BL_PREVIOUS_UNIT_STORE" merged))) "" custody)
                 r (if (and verify? (:ok? r)) (verify-shard-units! r ebin merged) r)]
             (doseq [i (range k)] (File/rm_rf! (nth shard-outs i)) (File/rm_rf! (Path/dirname (shard-app-root root (str "-shard-" i)))))
-            (println (str "SDK-SHARDS " (Jason/encode! {:shards k :compiled (map :compiled results)})))
+            (println (str "SDK-SHARDS " (Jason/encode! {:shards k :verify verify? :compiled (map :compiled results)})))
             r))))))
 (defn complete-library-inventory
   "Include SDK library units already owned by the authenticated floor. They
