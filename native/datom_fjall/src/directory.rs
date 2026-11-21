@@ -45,8 +45,30 @@ pub(crate) struct Root {
     pub(crate) sealed: Mutex<Option<PathBuf>>,
     pub(crate) engines: Mutex<HashSet<PathBuf>>,
     pub(crate) pins: AtomicUsize,
+    // Root custody owns store flocks until explicit close, independently of
+    // BEAM resource GC. Duplicates share each child's open file description.
+    locked_children: Mutex<Vec<File>>,
 }
 impl Root {
+    fn close(&self) -> std::io::Result<()> {
+        let _write = self.write.lock().map_err(|_| failure("directory lock poisoned"))?;
+        if self.pins.load(Ordering::Acquire) != 0 {
+            return Err(failure("sealed or accepted publication still owns this job"));
+        }
+        let mut children = self.locked_children.lock().map_err(|_| failure("child lock list poisoned"))?;
+        let observed = self.check();
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            // Release every lock even when identity validation or one unlock
+            // fails. Retained derived handles are invalid after root close.
+            let mut release = Ok(());
+            for file in children.drain(..) {
+                if let Err(error) = file.unlock() { if release.is_ok() { release = Err(error); } }
+            }
+            if let Err(error) = self.file.unlock() { if release.is_ok() { release = Err(error); } }
+            release?;
+        }
+        observed
+    }
     pub(crate) fn check(&self) -> std::io::Result<()> {
         if self.closed.load(Ordering::Acquire) { return Err(failure("directory claim closed")); }
         let observed = fs::symlink_metadata(&self.path)?;
@@ -99,7 +121,11 @@ impl Directory {
         if !metadata.is_dir() || !identity(&metadata, &fs::symlink_metadata(pinned(&self.file, child))?) {
             return Err(failure("child directory identity changed"));
         }
-        if lock { file.try_lock().map_err(std::io::Error::other)?; }
+        if lock {
+            file.try_lock().map_err(std::io::Error::other)?;
+            self.root.locked_children.lock().map_err(|_| failure("child lock list poisoned"))?
+                .push(file.try_clone()?);
+        }
         self.check()?;
         if create { self.file.sync_all()?; }
         Ok(Arc::new(Self { file, path: self.path.join(child), metadata,
@@ -271,7 +297,8 @@ fn claim(path: &Path, readonly: bool, create: bool) -> std::io::Result<Arc<Direc
     file.try_lock().map_err(std::io::Error::other)?;
     let root = Arc::new(Root { file: file.try_clone()?, path: path.into(), metadata: metadata.clone(),
         readonly, closed: AtomicBool::new(false), write: Mutex::new(()),
-        sealed: Mutex::new(None), engines: Mutex::new(HashSet::new()), pins: AtomicUsize::new(0) });
+        sealed: Mutex::new(None), engines: Mutex::new(HashSet::new()), pins: AtomicUsize::new(0),
+        locked_children: Mutex::new(Vec::new()) });
     Ok(Arc::new(Directory { file, path: path.into(), metadata, root, parent: None }))
 }
 
@@ -288,12 +315,10 @@ fn fjall_directory_child(parent: ResourceArc<DirectoryHandle>, name: String, cre
 }
 #[rustler::nif(schedule = "DirtyIo")]
 fn fjall_directory_close(handle: ResourceArc<DirectoryHandle>) -> NifResult<bool> {
-    let _write = handle.0.root.write.lock().map_err(err)?;
-    if handle.0.root.pins.load(Ordering::Acquire) != 0 {
-        return Err(err("sealed or accepted publication still owns this job"));
-    }
+    // Validate the derived handle too, while root.close always performs
+    // release even if namespace validation fails.
     let observed = handle.0.check();
-    if !handle.0.root.closed.swap(true, Ordering::AcqRel) { handle.0.root.file.unlock().map_err(err)?; }
+    handle.0.root.close().map_err(err)?;
     observed.map_err(err)?;
     Ok(true)
 }
@@ -485,4 +510,60 @@ fn fjall_directory_sync(handle: ResourceArc<DirectoryHandle>) -> NifResult<bool>
     handle.0.file.sync_all().map_err(err)?;
     handle.0.check().map_err(err)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("datom-directory-close-{}-{}",
+                std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+            fs::create_dir(&path).unwrap(); fs::create_dir(path.join("store")).unwrap();
+            Self(path)
+        }
+        fn competitor(&self) -> File { File::open(self.0.join("store")).unwrap() }
+    }
+    impl Drop for Fixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+
+    #[test]
+    fn close_releases_store_flock_while_derived_handle_remains_reachable() {
+        let fixture = Fixture::new(); let directory = claim(&fixture.0, true, false).unwrap();
+        let child = directory.child("store", false, true).unwrap();
+        let competitor = fixture.competitor(); assert!(competitor.try_lock().is_err());
+        directory.root.close().unwrap();
+        competitor.try_lock().expect("explicit root close must release a live child flock");
+        assert!(directory.check().is_err()); assert!(child.check().is_err());
+    }
+
+    #[test]
+    fn root_custody_keeps_a_child_flock_after_derived_handle_is_dropped() {
+        let fixture = Fixture::new(); let directory = claim(&fixture.0, true, false).unwrap();
+        drop(directory.child("store", false, true).unwrap());
+        let competitor = fixture.competitor(); assert!(competitor.try_lock().is_err());
+        directory.root.close().unwrap(); competitor.try_lock().unwrap();
+    }
+
+    #[test]
+    fn pinned_publication_refuses_close_without_releasing_any_store_lock() {
+        let fixture = Fixture::new(); let directory = claim(&fixture.0, true, false).unwrap();
+        let child = directory.child("store", false, true).unwrap();
+        directory.root.pins.fetch_add(1, Ordering::AcqRel);
+        assert!(directory.root.close().is_err()); assert!(child.check().is_ok());
+        let competitor = fixture.competitor(); assert!(competitor.try_lock().is_err());
+        directory.root.pins.fetch_sub(1, Ordering::AcqRel);
+        directory.root.close().unwrap(); competitor.try_lock().unwrap();
+    }
+
+    #[test]
+    fn failed_identity_check_still_releases_child_locks_and_invalidates_handles() {
+        let fixture = Fixture::new(); let directory = claim(&fixture.0, true, false).unwrap();
+        let child = directory.child("store", false, true).unwrap();
+        fs::write(fixture.0.join("changed"), b"changed namespace").unwrap();
+        assert!(directory.root.close().is_err()); assert!(child.check().is_err());
+        fixture.competitor().try_lock().unwrap();
+    }
 }
