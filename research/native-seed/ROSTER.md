@@ -38,7 +38,7 @@ holds the reasoning.
 
 | | Prototype | Finding | Where |
 |---|---|---|---|
-| 🧪 | Macro answer per call head per form | 57% of 3,546 `macro?` calls hit; byte-identical 13/13; **no gain**: memo containers (atom, tuple-keyed map) cost what the lookup costs | detached worktree `d5a93cd58` (removed; commit kept in reflog until merged or dropped) |
+| 🧪 | Macro answer per call head per form | 57% of 3,546 `macro?` calls hit; byte-identical 13/13; **no gain**: memo containers (atom, tuple-keyed map) cost what the lookup costs | branch `proto/macro-head-memo` (`d5a93cd58`) |
 | 🧪 | Keyword call `(:k m)` as a direct get | 77 → 50 ns per call in isolation; 1,614 sites in the compiler | measured only |
 
 ## Scratch
