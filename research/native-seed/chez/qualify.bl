@@ -1,7 +1,7 @@
 ;; The native compiler on Chez Scheme: build, qualify, derive and time it.
 ;;
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- qualify   --image DIR --work DIR [--fresh] [--skip-actors]
-;;   ./bin/bl run research/native-seed/chez/qualify.bl -- candidate --image DIR --out DIR [--fresh]
+;;   ./bin/bl run research/native-seed/chez/qualify.bl -- candidate --image DIR --out DIR [--fresh] [--codegen]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- derive    --image DIR --out DIR [--base REV]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- pair      --base PRELUDE --cand PRELUDE --out DIR [--reps N] [--rounds N]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- profile   --prelude PRELUDE --out DIR [--reps N] [--ticks N]
@@ -27,7 +27,9 @@
 ;;   check with the oracle's labels and traces at each budget, on both stages.
 ;; `candidate` replaces the bundle's unit sources with this checkout's files, has
 ;; the image's stage 1 compile them (S2), qualifies S2 as stage 1 and stage 2, and
-;; checks that S2 compiles the ORIGINAL bundle into the image's stage2.scm.
+;; checks that S2 compiles the ORIGINAL bundle into the image's stage2.scm. With
+;; --codegen (a change that alters generated code) S2 → S3 → S4 must reach a
+;; fixpoint instead, and the fixpoint compiler is qualified as stages 1 and 2.
 ;; `derive` applies this checkout's host Scheme edits (against --base, default
 ;; HEAD) to a qualified image, by exact source span.
 ;; `pair` times the reader job on two preludes, interleaved, with byte equality.
@@ -384,8 +386,24 @@
          {:ns ns :path path :source source :start start :end end}))
        (binary/matches s "(bl-key \"ns\") ")))
 
+(defn- codegen-fixpoint!
+ "For a change that alters generated code: S2 compiles the bundle into S3, S3
+  into S4; S4 = S3 is the new fixpoint (S3 = S2 means codegen did not change).
+  [fixpoint-path generations-row]."
+ [bundle host s2 out fresh]
+ (loop [current s2 generation 3 rows []]
+  (let [next (Path/join out (str "S" generation ".scm"))
+        r (check! (str "S" (dec generation) "-builds-S" generation)
+                  (run-stage! (build! current) ["--compile" bundle host next]
+                              {:emits next :fresh fresh :label (str "S" (dec generation) "-builds-S" generation)}))
+        rows (conj rows {"generation" generation "sha256" (sha-file next) "ms" (:ms r) "reused" (:reused r)})]
+   (cond
+    (= (File/read! next) (File/read! current)) [current rows]
+    (>= generation 5) (throw (ex-info "codegen candidate does not reach a fixpoint by S5" {:rows rows}))
+    :else (recur next (inc generation) rows)))))
+
 (defn candidate!
- [image out {:keys [fresh]}]
+ [image out {:keys [fresh codegen]}]
  (when (File/exists? out) (throw (ex-info "candidate output exists" {:out out})))
  (File/mkdir_p! out)
  (let [started (now-ms)
@@ -406,28 +424,36 @@
         s2 (Path/join out "S2.scm")
         r (check! "stage1-builds-S2" (run-stage! s1 ["--compile" bundle (Path/join image "host.scm") s2]
                                                  {:emits s2 :fresh fresh :label "stage1-builds-S2"}))
+        [fix generations] (if codegen (codegen-fixpoint! bundle (Path/join image "host.scm") s2 out fresh) [s2 []])
         cand (Path/join out "image")]
    (File/mkdir_p! cand)
    (doseq [f (File/ls! image)
            :when (not (contains? #{"bundle.scm" "stage1.scm" "stage2.scm" "stage3.scm" "prelude.scm" "derived.json"} f))]
     (File/ln_s! (Path/expand (Path/join image f)) (Path/join cand f)))
    (File/ln_s! bundle (Path/join cand "bundle.scm"))
-   (File/ln_s! s2 (Path/join cand "stage1.scm"))
-   (File/ln_s! s2 (Path/join cand "stage2.scm"))
-   (let [s2-text (File/read! s2)]
+   (File/ln_s! fix (Path/join cand "stage1.scm"))
+   (File/ln_s! fix (Path/join cand "stage2.scm"))
+   (let [s2-text (File/read! fix)]
     (File/write! (Path/join cand "prelude.scm") (without-entry s2-text)))
    (let [q (qualify! cand (Path/join out "qualification") {:fresh fresh})
          old (Path/join out "S2-on-original-bundle.scm")
-         _ (check! "S2-builds-original-bundle"
-            (run-stage! (build! s2) ["--compile" (Path/join image "bundle.scm") (Path/join image "host.scm") old]
-                        {:emits old :fresh fresh :label "S2-builds-original-bundle"}))
-         same (= (File/read! old) (File/read! (Path/join image "stage2.scm")))
+         ;; Output-preserving changes must give the old compiler's output on the
+         ;; old input. A codegen candidate changes that output by design; its
+         ;; gates are the fixpoint and the qualification's behaviour gates.
+         same (or codegen
+                  (do (check! "S2-builds-original-bundle"
+                       (run-stage! (build! s2) ["--compile" (Path/join image "bundle.scm") (Path/join image "host.scm") old]
+                                   {:emits old :fresh fresh :label "S2-builds-original-bundle"}))
+                      (= (File/read! old) (File/read! (Path/join image "stage2.scm")))))
          receipt {"schema" "bl.native-chez.candidate.v1" "image" image "S2_sha256" (sha-file s2)
                   "units" (mapv (fn [u] {"ns" (:ns u) "path" (:path u) "old_sha256" (sha (:source u))
                                          "new_sha256" (sha-file (Path/join (root) (:path u)))}) changed)
                   "stage1_builds_S2" {"ms" (:ms r) "reused" (:reused r)}
-                  "gates" (assoc (get q "gates") "candidate-on-original-bundle-emits-image-stage2"
-                                 {"pass" same "detail" (sha-file old)})
+                  "codegen" (boolean codegen) "fixpoint_sha256" (sha-file fix) "generations" generations
+                  "gates" (if codegen
+                           (assoc (get q "gates") "codegen-fixpoint" {"pass" true "detail" (sha-file fix)})
+                           (assoc (get q "gates") "candidate-on-original-bundle-emits-image-stage2"
+                                  {"pass" same "detail" (sha-file old)}))
                   "elapsed_ms" (- (now-ms) started)}
          receipt (assoc receipt "status" (if (and same (= "qualified" (get q "status"))) "qualified" "failed"))]
     (write-atomic! (Path/join out "candidate.json") (json/encode receipt {:pretty 1}))
@@ -628,7 +654,7 @@
 (defn- options [args]
  (loop [xs args m {}]
   (cond (empty? xs) m
-        (contains? #{"--fresh" "--skip-actors" "--own"} (first xs)) (recur (rest xs) (assoc m (keyword (subs (first xs) 2)) true))
+        (contains? #{"--fresh" "--skip-actors" "--own" "--codegen"} (first xs)) (recur (rest xs) (assoc m (keyword (subs (first xs) 2)) true))
         :else (recur (drop 2 xs) (assoc m (keyword (subs (first xs) 2)) (second xs))))))
 
 (defn main [args]
