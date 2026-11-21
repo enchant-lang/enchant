@@ -102,8 +102,46 @@
  (let* ((xs (native-string-graphemes text)) (n (length xs)) (start (if (< start 0) (max 0 (+ n start)) start)))
   (native-join "" (native-take (native-drop xs (min n start)) (max 0 (min count (- n start)))))))
 (define (native-binary-match text pattern)
- (let ((i (native-string-index text pattern)))
-  (if i (bl-tuple (list (native-utf8-span-size text 0 i) (native-utf8-size pattern))) (bl-key "nomatch"))))
+ (if (pair? pattern)
+  (native-binary-match-any text pattern)
+  (let ((i (native-string-index text pattern)))
+   (if i (bl-tuple (list (native-utf8-span-size text 0 i) (native-utf8-size pattern))) (bl-key "nomatch")))))
+;; binary:match/2 with a pattern list: the leftmost match, and at one position
+;; the longest pattern. An empty or non-text pattern is refused, as on BEAM.
+;; One-character patterns (escape sets) are answered by one scan.
+(define (native-binary-match-any text patterns)
+ (if (not (and (native-list? patterns)
+               (let all ((ps patterns)) (or (null? ps) (and (string? (car ps)) (fx> (string-length (car ps)) 0) (all (cdr ps)))))))
+  (native-badarg "binary:match pattern list"))
+ (cond
+  ((not (string? text)) (native-binary-match-units (native-utf16-units text) patterns))
+  ((let all ((ps patterns)) (or (null? ps) (and (fx= 1 (string-length (car ps))) (all (cdr ps)))))
+   (let ((chars (map (lambda (p) (string-ref p 0)) patterns)) (n (string-length text)))
+    (let scan ((i 0))
+     (cond ((fx= i n) (bl-key "nomatch"))
+      ((memv (string-ref text i) chars)
+       (bl-tuple (list (native-utf8-span-size text 0 i) (native-utf8-size (string (string-ref text i))))))
+      (else (scan (fx+ i 1)))))))
+  (else
+   (let loop ((ps patterns) (best #f) (best-size 0))
+    (if (null? ps)
+     (if best (bl-tuple (list (native-utf8-span-size text 0 best) best-size)) (bl-key "nomatch"))
+     (let ((i (native-string-index text (car ps))) (size (native-utf8-size (car ps))))
+      (if (and i (or (not best) (fx< i best) (and (fx= i best) (fx> size best-size))))
+       (loop (cdr ps) i size) (loop (cdr ps) best best-size))))))))
+;; The same over a UTF16 fragment's units, for one-character ASCII patterns
+;; (escape sets); offsets count bytes as the fragment's binary holds them: a
+;; surrogate pair is one 4-byte scalar, a lone surrogate 3 bytes.
+(define (native-binary-match-units units patterns)
+ (if (not (let all ((ps patterns)) (or (null? ps) (and (fx= 1 (string-length (car ps))) (fx< (char->integer (string-ref (car ps) 0)) 128) (all (cdr ps))))))
+  (native-badarg "binary:match on a UTF16 fragment supports one-character ASCII patterns"))
+ (let ((codes (map (lambda (p) (char->integer (string-ref p 0))) patterns)))
+  (let scan ((us units) (bytes 0))
+   (cond ((null? us) (bl-key "nomatch"))
+    ((memv (car us) codes) (bl-tuple (list bytes 1)))
+    ((and (fx>= (car us) 55296) (fx< (car us) 56320) (pair? (cdr us)) (fx>= (cadr us) 56320) (fx< (cadr us) 57344))
+     (scan (cddr us) (fx+ bytes 4)))
+    (else (scan (cdr us) (fx+ bytes (cond ((fx< (car us) 128) 1) ((fx< (car us) 2048) 2) (else 3)))))))))
 (define (native-binary-matches text pattern)
  (let ((scalars (string-length pattern)))
   (if (fx= scalars 0) (native-badarg "empty binary pattern"))

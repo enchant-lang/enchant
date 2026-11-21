@@ -336,7 +336,38 @@
 (native-add-leaf! "maps/iterator/1" (lambda (m) (vector 'map-iterator (native-map-pairs (native-assert-map m)))))
 (native-add-leaf! "maps/next/1" (lambda (i) (let ((ps (vector-ref i 1))) (if (null? ps) (bl-key "none") (bl-tuple (list (bl-nth (car ps) 0) (bl-nth (car ps) 1) (vector 'map-iterator (cdr ps))))))))
 (native-add-leaf! "maps/filter/2" native-map-filter)
-(native-add-leaf! "maps/without/2" (lambda (ks m) (let loop ((ks ks) (m (native-assert-map m))) (if (null? ks) m (loop (cdr ks) (native-raw-remove m (car ks)))))))
+;; Removing interned-keyword keys from a flat map is one filtering pass. That is
+;; exactly the successive removals when every key is an identity-exact symbol
+;; (the native-small-map-find rule) and no stored key needs the ordered
+;; comparison; the result has the layout those removals leave (or is the same
+;; map when nothing is removed). Anything else removes key by key.
+(define (native-without-exact-key? k)
+ (and (symbol? k) (not (uninterned-symbol? k)) (not (memq k '(|:true| |:false| |:nil|)))))
+(define (native-without ks m)
+ (let ((m (native-assert-map m)))
+  (if (and (bl-tag? m 'map) (native-map-small? (vector-ref m 1)) (native-list? ks)
+           (let all ((ks ks)) (or (null? ks) (and (native-without-exact-key? (car ks)) (all (cdr ks))))))
+   (let* ((storage (vector-ref m 1)) (entries (vector-ref storage 1)) (count (vector-ref storage 2)))
+    (if (let any ((i 0)) (and (fx< i count)
+                              (or (let ((k (vector-ref entries (fx* 2 i))))
+                                   (or (and (symbol? k) (uninterned-symbol? k)) (bl-tag? k 'utf16-keyword)))
+                                  (any (fx+ i 1)))))
+     (native-without-each ks m)
+     (let ((kept (let count-kept ((i 0) (n 0))
+                  (if (fx= i count) n
+                   (count-kept (fx+ i 1) (if (memq (vector-ref entries (fx* 2 i)) ks) n (fx+ n 1)))))))
+      (if (fx= kept count) m
+       (let ((copy (make-vector (fx* 2 kept))))
+        (let fill ((i 0) (j 0))
+         (if (fx= i count) (vector 'map (vector 'pmap-small-v1 copy kept))
+          (let ((k (vector-ref entries (fx* 2 i))))
+           (if (memq k ks) (fill (fx+ i 1) j)
+            (begin (vector-set! copy (fx* 2 j) k) (vector-set! copy (fx+ 1 (fx* 2 j)) (vector-ref entries (fx+ 1 (fx* 2 i))))
+                   (fill (fx+ i 1) (fx+ j 1))))))))))))
+   (native-without-each ks m))))
+(define (native-without-each ks m)
+ (let loop ((ks ks) (m m)) (if (null? ks) m (loop (cdr ks) (native-raw-remove m (car ks))))))
+(native-add-leaf! "maps/without/2" native-without)
 (native-add-leaf! "maps/with/2"
  (lambda (ks m)
   (let loop ((ks ks) (out (bl-empty-map)))
