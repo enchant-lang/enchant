@@ -49,7 +49,7 @@ fn fjall_offline_bind_source(scope: ResourceArc<OfflineScope>, source: ResourceA
     for path in &declared {
         let parts = relative(path).map_err(err)?; let mut current = source.0.clone();
         for (i, part) in parts.iter().enumerate() {
-            current = current.child(part, false, i + 1 == parts.len()).map_err(err)?;
+            current = current.custody_child(part, i + 1 == parts.len()).map_err(err)?;
         }
         // Reading format markers is permitted; Config::open is never called.
         super::require_existing_engine(&current.path).map_err(err)?;

@@ -67,13 +67,13 @@ fn fjall_offline_seal(scope: ResourceArc<OfflineScope>, paths: Vec<String>)
     let _guard = scope.directory.root.write.lock().map_err(err)?;
     scope.directory.writable().map_err(err)?; scope.marker.check().map_err(err)?;
     if paths.is_empty() || paths.len() > 256 { return Err(err("invalid sealed store inventory")); }
-    let target = scope.directory.child("target", false, true).map_err(err)?;
+    let target = scope.directory.custody_child("target", true).map_err(err)?;
     target.writable().map_err(err)?;
     let mut stores = Vec::new(); let mut canonical = Vec::new();
     for path in paths {
         let mut current = target.clone(); let parts = relative(&path).map_err(err)?;
         for (index, part) in parts.iter().enumerate() {
-            current = current.child(part, false, index + 1 == parts.len()).map_err(err)?;
+            current = current.custody_child(part, index + 1 == parts.len()).map_err(err)?;
         }
         if canonical.iter().any(|old: &PathBuf| old.starts_with(&current.path) || current.path.starts_with(old)) {
             return Err(err("overlapping sealed stores"));
@@ -119,7 +119,7 @@ fn fjall_offline_adopt(scope: ResourceArc<OfflineScope>, published: ResourceArc<
     for path in paths {
         let parts = relative(&path).map_err(err)?; let mut current = published.0.clone();
         for (index, part) in parts.iter().enumerate() {
-            current = current.child(part, false, index + 1 == parts.len()).map_err(err)?;
+            current = current.custody_child(part, index + 1 == parts.len()).map_err(err)?;
         }
         if canonical.iter().any(|old: &PathBuf| old.starts_with(&current.path) || current.path.starts_with(old)) {
             return Err(err("overlapping published stores"));

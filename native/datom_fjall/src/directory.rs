@@ -108,6 +108,15 @@ impl Directory {
         Ok(())
     }
     pub(crate) fn child(self: &Arc<Self>, child: &str, create: bool, lock: bool) -> std::io::Result<Arc<Self>> {
+        self.child_with_custody(child, create, lock, true)
+    }
+    /// Native source/publication guards own these descriptors themselves. Their
+    /// explicit release must free the flock without closing the enclosing root.
+    /// Unlike BEAM directory handles, they do not need root custody against GC.
+    pub(crate) fn custody_child(self: &Arc<Self>, child: &str, lock: bool) -> std::io::Result<Arc<Self>> {
+        self.child_with_custody(child, false, lock, false)
+    }
+    fn child_with_custody(self: &Arc<Self>, child: &str, create: bool, lock: bool, root_owned: bool) -> std::io::Result<Arc<Self>> {
         self.check()?; let cname = name(child)?;
         if create {
             self.writable()?; self.writable_path(&self.path.join(child))?;
@@ -123,8 +132,10 @@ impl Directory {
         }
         if lock {
             file.try_lock().map_err(std::io::Error::other)?;
-            self.root.locked_children.lock().map_err(|_| failure("child lock list poisoned"))?
-                .push(file.try_clone()?);
+            if root_owned {
+                self.root.locked_children.lock().map_err(|_| failure("child lock list poisoned"))?
+                    .push(file.try_clone()?);
+            }
         }
         self.check()?;
         if create { self.file.sync_all()?; }
@@ -543,6 +554,25 @@ mod close_tests {
         drop(directory.child("store", false, true).unwrap());
         let competitor = fixture.competitor(); assert!(competitor.try_lock().is_err());
         directory.root.close(&directory).unwrap(); competitor.try_lock().unwrap();
+    }
+
+    #[test]
+    fn native_custody_releases_store_lock_without_closing_the_source_root() {
+        let fixture = Fixture::new(); let directory = claim(&fixture.0, true, false).unwrap();
+        directory.root.pins.fetch_add(1, Ordering::AcqRel);
+        let custody = super::super::sealing::Custody(directory.root.clone());
+        let child = directory.custody_child("store", true).unwrap();
+        let retained = child.clone(); drop(child);
+        let competitor = fixture.competitor(); assert!(competitor.try_lock().is_err());
+        assert!(directory.root.close(&directory).is_err());
+        drop(retained);
+        competitor.try_lock().expect("last native guard must release its own flock");
+        assert!(directory.check().is_ok());
+        competitor.unlock().unwrap();
+        let again = directory.custody_child("store", true).unwrap();
+        assert!(competitor.try_lock().is_err()); drop(again);
+        competitor.try_lock().unwrap();
+        drop(custody); directory.root.close(&directory).unwrap();
     }
 
     #[test]
