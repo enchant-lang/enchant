@@ -109,17 +109,31 @@
 ;; binary:match/2 with a pattern list: the leftmost match, and at one position
 ;; the longest pattern. An empty or non-text pattern is refused, as on BEAM.
 ;; One-character patterns (escape sets) are answered by one scan.
+(define native-match-table-patterns #f)
+(define native-match-table #f)
 (define (native-binary-match-any text patterns)
- (if (not (and (native-list? patterns)
-               (let all ((ps patterns)) (or (null? ps) (and (string? (car ps)) (fx> (string-length (car ps)) 0) (all (cdr ps)))))))
+ ;; the cached list was validated when its table was built
+ (if (not (or (eq? patterns native-match-table-patterns) (and (native-list? patterns)
+               (let all ((ps patterns)) (or (null? ps) (and (string? (car ps)) (fx> (string-length (car ps)) 0) (all (cdr ps))))))))
   (native-badarg "binary:match pattern list"))
  (cond
   ((not (string? text)) (native-binary-match-units (native-utf16-units text) patterns))
-  ((let all ((ps patterns)) (or (null? ps) (and (fx= 1 (string-length (car ps))) (all (cdr ps)))))
-   (let ((chars (map (lambda (p) (string-ref p 0)) patterns)) (n (string-length text)))
+  ((or (eq? patterns native-match-table-patterns)
+       (let all ((ps patterns)) (or (null? ps) (and (fx= 1 (string-length (car ps))) (all (cdr ps))))))
+   (let* ((n (string-length text))
+          ;; an ASCII set is a 128-entry table: one test per scanned code. The
+          ;; last pattern list's table is kept (callers pass one constant list).
+          (table (if (eq? patterns native-match-table-patterns) native-match-table
+                  (let* ((chars (map (lambda (p) (string-ref p 0)) patterns))
+                         (t (and (let all ((cs chars)) (or (null? cs) (and (fx< (char->integer (car cs)) 128) (all (cdr cs)))))
+                                (let ((t (make-vector 128 #f))) (for-each (lambda (c) (vector-set! t (char->integer c) #t)) chars) t))))
+                   (set! native-match-table-patterns patterns) (set! native-match-table t) t)))
+          (hit? (if table
+                 (lambda (c) (let ((code (char->integer c))) (and (fx< code 128) (vector-ref table code))))
+                 (let ((chars (map (lambda (p) (string-ref p 0)) patterns))) (lambda (c) (memv c chars))))))
     (let scan ((i 0))
      (cond ((fx= i n) (bl-key "nomatch"))
-      ((memv (string-ref text i) chars)
+      ((hit? (string-ref text i))
        (bl-tuple (list (native-utf8-span-size text 0 i) (native-utf8-size (string (string-ref text i))))))
       (else (scan (fx+ i 1)))))))
   (else
