@@ -50,13 +50,13 @@ pub(crate) struct Root {
     locked_children: Mutex<Vec<File>>,
 }
 impl Root {
-    fn close(&self) -> std::io::Result<()> {
+    fn close(&self, directory: &Directory) -> std::io::Result<()> {
         let _write = self.write.lock().map_err(|_| failure("directory lock poisoned"))?;
         if self.pins.load(Ordering::Acquire) != 0 {
             return Err(failure("sealed or accepted publication still owns this job"));
         }
         let mut children = self.locked_children.lock().map_err(|_| failure("child lock list poisoned"))?;
-        let observed = self.check();
+        let observed = directory.check();
         if !self.closed.swap(true, Ordering::AcqRel) {
             // Release every lock even when identity validation or one unlock
             // fails. Retained derived handles are invalid after root close.
@@ -315,11 +315,9 @@ fn fjall_directory_child(parent: ResourceArc<DirectoryHandle>, name: String, cre
 }
 #[rustler::nif(schedule = "DirtyIo")]
 fn fjall_directory_close(handle: ResourceArc<DirectoryHandle>) -> NifResult<bool> {
-    // Validate the derived handle too, while root.close always performs
-    // release even if namespace validation fails.
-    let observed = handle.0.check();
-    handle.0.root.close().map_err(err)?;
-    observed.map_err(err)?;
+    // Validate the derived handle under the root write guard, and release
+    // custody even when namespace validation fails.
+    handle.0.root.close(&handle.0).map_err(err)?;
     Ok(true)
 }
 #[rustler::nif(schedule = "DirtyIo")]
@@ -534,7 +532,7 @@ mod close_tests {
         let fixture = Fixture::new(); let directory = claim(&fixture.0, true, false).unwrap();
         let child = directory.child("store", false, true).unwrap();
         let competitor = fixture.competitor(); assert!(competitor.try_lock().is_err());
-        directory.root.close().unwrap();
+        directory.root.close(&directory).unwrap();
         competitor.try_lock().expect("explicit root close must release a live child flock");
         assert!(directory.check().is_err()); assert!(child.check().is_err());
     }
@@ -544,7 +542,7 @@ mod close_tests {
         let fixture = Fixture::new(); let directory = claim(&fixture.0, true, false).unwrap();
         drop(directory.child("store", false, true).unwrap());
         let competitor = fixture.competitor(); assert!(competitor.try_lock().is_err());
-        directory.root.close().unwrap(); competitor.try_lock().unwrap();
+        directory.root.close(&directory).unwrap(); competitor.try_lock().unwrap();
     }
 
     #[test]
@@ -552,10 +550,10 @@ mod close_tests {
         let fixture = Fixture::new(); let directory = claim(&fixture.0, true, false).unwrap();
         let child = directory.child("store", false, true).unwrap();
         directory.root.pins.fetch_add(1, Ordering::AcqRel);
-        assert!(directory.root.close().is_err()); assert!(child.check().is_ok());
+        assert!(directory.root.close(&directory).is_err()); assert!(child.check().is_ok());
         let competitor = fixture.competitor(); assert!(competitor.try_lock().is_err());
         directory.root.pins.fetch_sub(1, Ordering::AcqRel);
-        directory.root.close().unwrap(); competitor.try_lock().unwrap();
+        directory.root.close(&directory).unwrap(); competitor.try_lock().unwrap();
     }
 
     #[test]
@@ -563,7 +561,7 @@ mod close_tests {
         let fixture = Fixture::new(); let directory = claim(&fixture.0, true, false).unwrap();
         let child = directory.child("store", false, true).unwrap();
         fs::write(fixture.0.join("changed"), b"changed namespace").unwrap();
-        assert!(directory.root.close().is_err()); assert!(child.check().is_err());
+        assert!(directory.root.close(&directory).is_err()); assert!(child.check().is_err());
         fixture.competitor().try_lock().unwrap();
     }
 }
