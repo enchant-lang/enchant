@@ -318,9 +318,25 @@
        :errors (list (str "library build failed (child exit " (elem r 1) "); see child output above"))})))
 
 
-(defn- shard-count []
-  (let [v (System/get_env "BL_SDK_SHARDS")]
-    (if (and (string? v) (Regex/match? (Regex/compile! "^[1-9][0-9]?$") v)) (String/to_integer v) 1)))
+(defn- previous-store-current?
+  "Whether the previous unit store was produced by this compiler for this
+   runtime, so its units are reusable and shard children would only restore."
+  []
+  (let [previous (System/get_env "BL_PREVIOUS_UNIT_STORE")
+        f (when previous (Path/join previous "unit-index.json"))
+        index (when (and f (File/regular? f)) (Jason/decode! (File/read! f)))]
+    (and index
+         (= (get index "compiler") (BeamLisp.AOTCache/compiler_key))
+         (= (get index "runtime") (Base/encode16 (BeamLisp.AOT/runtime_image_key) (list (tuple :case :lower)))))))
+
+(defn- shard-count
+  "BL_SDK_SHARDS when there is compilation to share: a store this compiler
+   produced is restored by the single producer alone, since shard children
+   would only boot and restore their slices. BL_SDK_SHARD_VERIFY always shards."
+  []
+  (let [v (System/get_env "BL_SDK_SHARDS")
+        k (if (and (string? v) (Regex/match? (Regex/compile! "^[1-9][0-9]?$") v)) (String/to_integer v) 1)]
+    (if (and (> k 1) (not= "1" (System/get_env "BL_SDK_SHARD_VERIFY")) (previous-store-current?)) 1 k)))
 
 (defn- merge-unit-stores!
   "One unit store holding the previous store's units and every shard's, a
