@@ -162,3 +162,35 @@ The private IR therefore has to change the compiler source (=priv/boot/compiler.
 - keyword fields resolved at compile time.
 
 The BEAM compiler compiles the same source, so its output has to stay byte-identical. The native image then has to be rebuilt from BL through the BEAM-seeded stage 1 and requalified (stage 2 = stage 3, corpus, actors). That is the next piece of work. Host-level tuning has reached its limit.
+
+* Compiler-source candidates without BEAM
+Each of the 34 units in the qualified native bundle carries its BL source, and every one of them is byte-identical to its file in this checkout. =native.bootstrap/prepare= compiles a unit from that text. So a compiler change can be built and qualified on Chez alone:
+- =bundle-src.py= extracts or replaces unit sources.
+- =compiler-candidate.py= injects the checkout's sources, has the qualified Chez stage 1 compile the new bundle (S2), and runs =chez-fixpoint.py= on S2 as both stage 1 and expected stage 2. The checks are: both corpora; S2 compiles the new bundle into S2 again, meaning the changed compiler emits what the qualified one did; stage two equals stage three; and the actor corpus at all budgets.
+- It adds one gate: S2 compiles the original bundle into the qualified image's =stage2.scm=, byte for byte.
+A candidate takes about three minutes. =derive-image.py= now diffs every top-level form (it had silently skipped =native-add-leaf!= registrations), replaces exact source spans and anchors insertions.
+
+The first compiler-source change makes =renumber= return whether a subtree changed. It hands an unchanged node back only where a rebuild would give an equal node: 3-element =:meta= wrappers, 2-element composites and 2-tuple map pairs. =gensym-base= rejects any name without the =__auto= suffix before measuring it. That candidate passes 13 of 13 gates. On BEAM, the gensym and macro tests pass (=compiler.gensym-binary-test= 18,949 checks, positioned macroexpand, contextual datum macros, core aliases, macro literals, AOT reproducibility). =test.seed-macro-abi= refuses the checkout's stale =build/= directory (dated 2026-10-25), and =js.macro-build-test= fails copying a read-only Nix store file; neither involves gensym renaming.
+
+* Host lookups and text
+A count over one reader-job round made the costs concrete:
+- Lookup-only small-map searches made 217,507 symbol-key misses against 201,010 hits. An identity miss on an interned symbol is now definitive unless the key is =:true=, =:false= or =:nil=, or the map holds an uninterned symbol or a UTF-16 keyword (=native-field-slot='s rule).
+- Every var, alias, refer and link resolution searched one AVL map keyed by tuples. Rows whose keys are strings, interned symbols or tuples of those now also sit in an =equal?= hash table. Writing any other key switches the index off.
+- =str= (=h-str-cat=) turned every piece into UTF-16 units and decoded them back; =iolist_to_binary= went through UTF-8 bytes. Both now concatenate when every piece is a scalar string.
+- =bl-key= remembers each literal name string's atom by identity.
+
+| Change | Min ms, before → after | Compile min ms |
+|---|---|---|
+| Small-map find | 144.3 → 140.7 | 99.0 → 97.0 |
+| Env hash index | 139.6 → 132.8 | 96.7 → 90.3 |
+| =str=, iolist, =bl-key= | 132.8 → 125.9 | 90.7 → 85.6 |
+
+Each row is a paired run, 32 per arm, emitting =9b92b9f2…=. Each host image passes the full Chez fixpoint, and the renumber compiler candidate passes on top of it. The reader job now takes about 126–134 ms on Chez; warm BEAM's measured figure is 158 ms. [[file:../evidence/substrate-chez-fixpoint-env-index.json][Env-index image]] · [[file:../evidence/substrate-compiler-candidate-env-index.json][Its compiler candidate]]
+
+* What the lookup census says about the IR
+One round makes 316,280 small-map lookups over 1,093 key shapes:
+- The compile env =(:file :js-interop :line :locals :ns :recur :tail :target)= takes 56,443 (18%).
+- Source-position maps in seven shapes take about 70,000 (22%).
+- =let= / =fn= ANF nodes take 25,000.
+- The emitter's resolver options maps take about 25,000.
+A host field layout would save only the identity scan over at most eight keys. The cost is in the layers each lookup passes through and in how often the compiler reads the same field. The next step is compiler source: read env fields once per node, carry positions as one tuple instead of nested maps, and resolve emitter options once per unit. Each step now runs through =compiler-candidate.py=.
