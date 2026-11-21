@@ -194,3 +194,39 @@ One round makes 316,280 small-map lookups over 1,093 key shapes:
 - =let= / =fn= ANF nodes take 25,000.
 - The emitter's resolver options maps take about 25,000.
 A host field layout would save only the identity scan over at most eight keys. The cost is in the layers each lookup passes through and in how often the compiler reads the same field. The next step is compiler source: read env fields once per node, carry positions as one tuple instead of nested maps, and resolve emitter options once per unit. Each step now runs through =compiler-candidate.py=.
+
+* The native compiler builds and qualifies itself with BL alone
+=research/native-seed/chez/qualify.bl= replaces every Python and shell driver of the native route: qualification, compiler-source candidates, host derivation, paired timing and profiling. Chez Scheme and gcc come from the repository's locked nixpkgs (=nix build --inputs-from=), recorded per =flake.lock=; no tool comes from =PATH=.
+
+Parity with the retired drivers:
+- =derive= writes identical image files.
+- =candidate= produces the identical S2 and passes 13 of 13 gates.
+- =qualify= passes every gate with the same stage 2 = stage 3 hash.
+
+Builds and runs are content-addressed. A stage and its actor overlay share one build, the translated prelude compiles as 12 parallel chunks, and independent gates run together. Every receipt row says whether it was reused.
+
+| Qualifying the current image | Inside the run | Wall |
+|---|---|---|
+| Cold, empty cache | 20.8 s | 24 s |
+| Nothing changed | 0.4 s | 3.5 s |
+| Candidate, nothing changed | 0.8 s | 5.6 s |
+
+The Python driver took about 3 minutes cold; on Gambit, each self-emission alone took 200 s. Of a cold run, about 13 s is the two self-emissions, the compiler compiling itself.
+
+Retired with the Gambit route: every =.py= under =research/native-seed= and =research/substrate-ab=, the shell scripts that ran them, and the BL drivers that only invoked them, including the Gambit object transport of the incremental AOT prototype. =research/native-seed/run= checks its SDK pin with coreutils.
+
+* Escapes, map filters and the current reader job
+The profiler now charges each host leaf to the first compiled BL frame above it, and it can focus on one function. That showed the emitter's =text= testing every code of every string literal and remote key through a closure, about 5% of samples. A text is plain exactly when it holds none of the one-byte escapes, so =binary:match= with that pattern list decides it; the native leaf now takes pattern lists. Its first version tested codes with =memv= against 34 patterns (3.4%); a 128-entry table, cached by the list's identity, replaced it. =maps/without= filters a flat map in one pass when every key is an identity-exact keyword.
+
+| Step | Median ms | Emit ms |
+|---|---|---|
+| Before (renumber candidate on the str/iolist image) | 133.5 | 33.1 |
+| Escape scan, one-pass =maps/without= | 124.1 | 30.4 |
+| Cached escape table | 121.2 | 28.2 |
+
+Each step was qualified with =qualify.bl=, and the bytes are identical throughout. Warm BEAM's figure is 158 ms.
+
+What remains, with its cost:
+- Compiling =(erlang/list_to_tuple (list …))= and =(tuple …)= to direct tuple construction, and reading env fields once per node, both change generated code. They need a candidate mode that iterates to a new fixpoint and checks the corpora and actors instead of byte identity, followed by an SDK rebuild and its tests. Measured potential: 2–5% each.
+- The bundle's link metadata (modules, leaves, resolution ledger) is still the pinned BEAM SDK's export. A change that adds a namespace or a host leaf needs a new export.
+- The checkout SDK preparation takes about 6 minutes for a runtime edit and about 22 for a compiler edit, because a compiler edit rotates the compiler key and recompiles all 659 units. Making that fast needs early cutoff on output equivalence. That is a foundry design change I have not made.
