@@ -9,11 +9,10 @@ holds the reasoning.
 
 | | Work | Why | Done when |
 |---|---|---|---|
-| 🔨 | Structural: direct tuple construction | `(tuple …)` / `(erlang/list_to_tuple (list …))` build a list and convert it | Codegen candidate at a fixpoint, paired; BEAM SDK tests |
+| 🔨 | Structural: direct tuple construction | `(tuple …)` / `(erlang/list_to_tuple (list …))` build a list and convert it | Codegen candidate: fixpoint at S3 = S4, 13/13 gates ✅; pairing, then `main` and BEAM SDK tests |
 | 🅿️ | Disk: daemon `min-free`/`max-free` | This account is not a trusted Nix user, and the daemon runs with `min-free = 0` | Root sets `nix.settings.min-free` / `nix.gc.automatic` on Work |
-| ⏳ | Foundry: sharded unit compilation | A compiler edit recompiles 659 units on 4 cores (575 s) | Compiler-edit SDK under 1 minute |
+| 🔨 | Foundry: sharded unit compilation | A compiler edit recompiles 659 units **serially** (575 s); "jobs 4" covered only restoration | Implemented, off by default (`26a7e6fee`); a `sdkShardVerify` build must show byte-identical units before `sdkShards` is raised |
 | ⏳ | Foundry: incremental SDK for runtime edits | 6.4 min for about 1 s of compilation | Runtime-edit SDK under 30 s |
-| ⏳ | Codegen candidates in `qualify.bl` | Code-changing compiler work needs a fixpoint and behaviour gates | `candidate --codegen` iterates to a fixpoint and checks corpus and actors |
 | ⏳ | Structural compiler work | Env reads 18%, positions 22% of lookups; macro walks about 7% | Each step qualified and paired |
 
 ## Done
