@@ -1,0 +1,264 @@
+; priv/lib/scenario/android.bl — a scenario world on an Android device.
+;
+; The desk drives a phone or an emulator over adb, the way a person would:
+; it reads the screen (UIAutomator's tree), taps what a label names, types,
+; long-presses, swipes, goes back. Claims read a fresh screen. Every step
+; keeps a frame (PNG and the screen's texts), so a run is evidence that can be
+; looked at, and the world can record the whole run as video.
+;
+;   (require '[scenario :as s] '[scenario.android :as droid])
+;   (s/run-world
+;     (s/scenario "approve from the inbox" {:you {}}
+;       [(s/does :you [:wait "Needs you"])
+;        (s/does :you [:tap {:desc "^Approve$"}])
+;        (s/sees :you (droid/shows "^Approved") "The card says it was approved")])
+;     (droid/world {:frames "/tmp/run" :serial "emulator-5554"}))
+;
+; Terms (each returns :ok, or {:ok false :refused why}, which refutes the step):
+;   [:tap Q]               tap the first node Q names (waits for it)
+;   [:tap Q {:until R}]    tap, then wait for R; taps again if the screen
+;                          did not move (a tap lost to a re-render)
+;   [:tap-at X Y]          tap a point
+;   [:long-press Q]        press and hold (ms in an optional third element)
+;   [:type TEXT]           type into the focused field
+;   [:key K]               :back :enter :home :tab :del, or a keycode number
+;   [:swipe :up|:down]     scroll the screen by a swipe
+;   [:wait Q ms]           wait until Q is on screen
+;   [:gone Q ms]           wait until Q is not on screen
+;   [:scroll-to Q]         swipe up until Q shows (up to 8 times)
+;   [:pause ms]            let time pass
+;   [:shell & args]        adb shell, for setup (outcome {:ok true :out …})
+;
+; Q is a regex string (matched against text, then content-desc), or a map
+; {:text re} / {:desc re} / {:id re}, optionally with :nth.
+;
+; Claims are (fn [screen ctx] bool); `screen` is {:nodes [...]} read after the
+; step. `shows`, `lacks` and `texts` make the common ones.
+
+(ns scenario.android)
+
+;; ── reading the screen (pure) ───────────────────────────────────────
+
+(def ^:private entities
+  [["&lt;" "<"] ["&gt;" ">"] ["&quot;" "\""] ["&apos;" "'"] ["&#10;" "\n"] ["&#13;" "\r"] ["&amp;" "&"]])
+
+(defn unescape
+  "XML attribute text → plain text (the five entities and newlines)."
+  [s]
+  (reduce (fn [acc [k v]] (String/replace acc k v)) (str s) entities))
+
+(defn- attrs [tag]
+  (into {} (map (fn [m] [(nth m 1) (unescape (nth m 2))])
+                (Regex/scan (Regex/compile! "([a-zA-Z][a-zA-Z-]*)=\"([^\"]*)\"") tag))))
+
+(defn- ints [s] (vec (map (fn [m] (erlang/binary_to_integer (first m))) (Regex/scan (Regex/compile! "-?[0-9]+") (str s)))))
+
+(defn parse-dump
+  "A UIAutomator dump (XML) → {:nodes [{:text :desc :id :class :bounds [x1 y1 x2 y2]
+   :clickable :long-clickable :enabled :checked :selected :focused :scrollable :editable}]},
+   in document order."
+  [xml]
+  {:nodes
+   (vec (for [m (Regex/scan (Regex/compile! "<node ([^>]*)>") (str xml))
+              :let [a (attrs (nth m 1)) b (ints (get a "bounds"))]]
+          {:text (get a "text" "") :desc (get a "content-desc" "") :id (get a "resource-id" "")
+           :class (get a "class" "")
+           :bounds (if (= 4 (count b)) b [0 0 0 0])
+           :clickable (= "true" (get a "clickable")) :long-clickable (= "true" (get a "long-clickable"))
+           :enabled (not= "false" (get a "enabled")) :checked (= "true" (get a "checked"))
+           :selected (= "true" (get a "selected")) :focused (= "true" (get a "focused"))
+           :scrollable (= "true" (get a "scrollable"))
+           :editable (or (String/ends_with? (get a "class" "") "EditText") (= "true" (get a "editable")))}))})
+
+(defn texts "Every non-empty text on `screen`, in order." [screen]
+  (vec (keep (fn [n] (when (not= "" (:text n)) (:text n))) (:nodes screen))))
+
+(defn descs "Every non-empty content description on `screen`, in order." [screen]
+  (vec (keep (fn [n] (when (not= "" (:desc n)) (:desc n))) (:nodes screen))))
+
+(defn- re-of [x] (if (string? x) (Regex/compile! x) x))
+(defn- hit? [re s] (and (not= "" s) (some? (Regex/run (re-of re) s))))
+
+(defn matches?
+  "Does node `n` match query `q` (see the namespace doc)?"
+  [q n]
+  (cond
+    (string? q) (or (hit? q (:text n)) (hit? q (:desc n)))
+    (:text q) (hit? (:text q) (:text n))
+    (:desc q) (hit? (:desc q) (:desc n))
+    (:id q) (hit? (:id q) (:id n))
+    :else false))
+
+(defn find-node
+  "The node `q` names on `screen` (the :nth match, first by default), or nil.
+   A node with no size (off screen, collapsed) never matches."
+  [screen q]
+  (let [visible (fn [n] (let [[x1 y1 x2 y2] (:bounds n)] (and (> x2 x1) (> y2 y1))))
+        hits (filter (fn [n] (and (visible n) (matches? q n))) (:nodes screen))]
+    (nth (vec hits) (or (and (map? q) (:nth q)) 0) nil)))
+
+(defn centre [n] (let [[x1 y1 x2 y2] (:bounds n)] [(quot (+ x1 x2) 2) (quot (+ y1 y2) 2)]))
+
+(defn on-screen? "Is something `q` names on `screen`?" [screen q] (some? (find-node screen q)))
+
+(defn shows
+  "A claim: something matching `q` is on screen."
+  [q] (fn [screen _ctx] (on-screen? screen q)))
+
+(defn lacks
+  "A claim: nothing matching `q` is on screen."
+  [q] (fn [screen _ctx] (not (on-screen? screen q))))
+
+(defn words
+  "`text` as `adb shell input text` arguments, one per word: spaces become
+   separate key presses (input text's %s is unreliable in Compose fields), and
+   characters the device shell would read are escaped."
+  [text]
+  (vec (for [w (String/split (str text) " ")]
+         (reduce (fn [acc c] (if (some? (Regex/run (Regex/compile! "[\\\\'\"`$&|;<>()*?#~!{}\\[\\]%]") c))
+                               (str acc "\\" c) (str acc c)))
+                 "" (String/graphemes w)))))
+
+(def keycodes {:back 4 :home 3 :enter 66 :tab 61 :del 67 :space 62 :escape 111 :menu 82})
+
+;; ── the device (effects) ────────────────────────────────────────────
+
+(defn- now [] (erlang/monotonic_time :millisecond))
+
+(defn adb!
+  "Run adb with `args` against the world's device: {:out bytes :code n}."
+  [w args]
+  (let [argv (concat (if (:serial w) ["-s" (:serial w)] []) args)
+        r (System/cmd (:adb w) (to-list (map str argv)) (list (tuple :stderr_to_stdout true)))]
+    {:out (elem r 0) :code (elem r 1)}))
+
+(defn screen!
+  "Read the device's screen now: {:nodes […]}, or {:nodes [] :error …} when
+   UIAutomator could not dump (it can't during some transitions)."
+  [w]
+  (let [path (get w :dump-path "/sdcard/scenario-ui.xml")
+        d (adb! w ["shell" "uiautomator" "dump" path])]
+    (if (not= 0 (:code d))
+      {:nodes [] :error (str (:out d))}
+      (let [x (adb! w ["exec-out" "cat" path])]
+        (if (= 0 (:code x)) (parse-dump (:out x)) {:nodes [] :error (str (:out x))})))))
+
+(defn- poll [w ms ok?]
+  (let [deadline (+ (now) ms)]
+    (loop []
+      (let [s (screen! w)]
+        (cond (ok? s) s
+              (> (now) deadline) nil
+              :else (do (Process/sleep (get w :poll-ms 700)) (recur)))))))
+
+(defn- tap-node! [w n] (let [[x y] (centre n)] (adb! w ["shell" "input" "tap" x y])))
+
+(defn- swipe! [w dir]
+  (let [[sx sy ex ey] (if (= dir :down) [540 700 540 1700] [540 1700 540 700])]
+    (adb! w ["shell" "input" "swipe" sx sy ex ey 300])))
+
+(defn- refused [why] {:ok false :refused why})
+
+(defn act!
+  "Perform one term on the device (see the namespace doc)."
+  [w term]
+  (let [verb (first term) arg (nth term 1 nil) wait-ms (get w :wait-ms 20000)]
+    (case verb
+      :tap
+      (let [opts (nth term 2 {})]
+        (if-let [s (poll w (get opts :within wait-ms) (fn [s] (on-screen? s arg)))]
+          (if-let [until (:until opts)]
+            (loop [k 0 s s]
+              (tap-node! w (find-node s arg))
+              (cond (poll w (get opts :settle 6000) (fn [s] (on-screen? s until))) :ok
+                    (>= k 2) (refused (str "tapped " (pr-str arg) " three times; never saw " (pr-str until)))
+                    :else (if-let [s2 (poll w 3000 (fn [s] (on-screen? s arg)))] (recur (inc k) s2)
+                            (refused (str "after tapping " (pr-str arg) " neither it nor " (pr-str until) " is on screen")))))
+            (do (tap-node! w (find-node s arg)) :ok))
+          (refused (str "nothing on screen matches " (pr-str arg)))))
+      :tap-at (do (adb! w ["shell" "input" "tap" arg (nth term 2)]) :ok)
+      :long-press
+      (if-let [s (poll w wait-ms (fn [s] (on-screen? s arg)))]
+        (let [[x y] (centre (find-node s arg))]
+          (adb! w ["shell" "input" "swipe" x y x y (nth term 2 900)]) :ok)
+        (refused (str "nothing to long-press matches " (pr-str arg))))
+      :type
+      (let [ws (words arg)]
+        (doseq [[i wd] (map-indexed (fn [i x] [i x]) ws)]
+          (when (pos? i) (adb! w ["shell" "input" "keyevent" (:space keycodes)]))
+          (when (not= "" wd) (adb! w ["shell" "input" "text" wd])))
+        :ok)
+      :key (do (adb! w ["shell" "input" "keyevent" (if (keyword? arg) (get keycodes arg) arg)]) :ok)
+      :swipe (do (swipe! w arg) (Process/sleep 400) :ok)
+      :wait (if (poll w (nth term 2 wait-ms) (fn [s] (on-screen? s arg))) :ok
+              (refused (str "never saw " (pr-str arg))))
+      :gone (if (poll w (nth term 2 wait-ms) (fn [s] (not (on-screen? s arg)))) :ok
+              (refused (str "still on screen: " (pr-str arg))))
+      :scroll-to
+      (loop [k 0]
+        (cond (on-screen? (screen! w) arg) :ok
+              (>= k 8) (refused (str "scrolled 8 times; no " (pr-str arg)))
+              :else (do (swipe! w :up) (Process/sleep 500) (recur (inc k)))))
+      :pause (do (Process/sleep arg) :ok)
+      :shell (let [r (adb! w (concat ["shell"] (rest term)))]
+               (if (= 0 (:code r)) {:ok true :out (:out r)} (refused (str (:out r)))))
+      (throw (ex-info "scenario.android: unknown term" {:term term})))))
+
+;; ── recording ───────────────────────────────────────────────────────
+
+(defn- record-loop!
+  "Record the screen in segments of at most `limit` s (screenrecord's own cap)
+   until `stop` is set; each segment is /sdcard/scenario-rec-N.mp4."
+  [w stop segments limit]
+  (spawn
+    (fn []
+      (loop [k 0]
+        (when (not @stop)
+          (let [path (str "/sdcard/scenario-rec-" k ".mp4")]
+            (swap! segments conj path)
+            (adb! w ["shell" "screenrecord" "--time-limit" limit path])
+            (recur (inc k))))))))
+
+(defn- stop-recording! [w stop segments directory]
+  (reset! stop true)
+  (adb! w ["shell" "pkill" "-INT" "screenrecord"])
+  (Process/sleep 1500)
+  (vec (for [[i p] (map-indexed (fn [i x] [i x]) @segments)
+             :let [local (str directory "/recording-" i ".mp4")
+                   r (adb! w ["pull" p local])]
+             :when (= 0 (:code r))]
+         local)))
+
+;; ── the world ───────────────────────────────────────────────────────
+
+(defn world
+  "A scenario world on one device, for actors who all hold that device.
+   opts: {:frames dir (required) :serial \"emulator-5554\" :adb path
+          :wait-ms 20000 :record? false :record-limit 170}
+   Each step's basis is {:frame png :texts [...] :descs [...]}; a refuted
+   claim keeps the screen it was judged on. :close! returns
+   {:frames dir :recordings [mp4 …]}."
+  [opts]
+  (let [w (merge {:adb (or (System/find_executable "adb") "adb")} opts)
+        dir (Path/expand (:frames w))
+        index (atom 0)
+        stop (atom false) segments (atom [])]
+    (File/mkdir_p! dir)
+    {:kind :android :live? true
+     :open (fn [_scen]
+             (when (:record? w) (record-loop! w stop segments (str (get w :record-limit 170))))
+             w)
+     :step! (fn [h ev] (act! h (nth ev 2)))
+     :claim! (fn [h _actor claim ctx] (claim (screen! h) ctx))
+     :observe (fn [h _actor lens] (lens (screen! h)))
+     :liveness (fn [_] nil)
+     :basis (fn [h]
+              (let [i (swap! index inc)
+                    png (str dir "/frame-" i ".png")
+                    shot (adb! h ["exec-out" "screencap" "-p"])
+                    s (screen! h)]
+                (when (= 0 (:code shot)) (File/write! png (:out shot)))
+                (File/write! (str dir "/frame-" i ".txt") (join "\n" (concat (texts s) (map (fn [d] (str "@" d)) (descs s)))))
+                {:frame png :texts (texts s) :descs (descs s)}))
+     :close! (fn [h] {:frames dir :recordings (if (:record? w) (stop-recording! h stop segments dir) [])})
+     :views-fn (fn [basis _] basis)}))

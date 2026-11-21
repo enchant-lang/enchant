@@ -1,0 +1,94 @@
+(ns scenario.android-world-test
+  (:require [scenario :as s] [scenario.android :as droid]))
+
+;; A stub adb: two screens. Tapping Approve's centre moves to the second; the
+;; first tap on it is "lost" when LOSE_FIRST is set (a re-render ate it).
+(def screen-a
+  (str "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">"
+       "<node index=\"0\" text=\"Needs you\" resource-id=\"\" class=\"android.widget.TextView\" content-desc=\"\" clickable=\"false\" enabled=\"true\" bounds=\"[0,100][1080,180]\" />"
+       "<node index=\"1\" text=\"omega · Codex &amp; friends\" resource-id=\"\" class=\"android.widget.TextView\" content-desc=\"\" clickable=\"false\" enabled=\"true\" bounds=\"[0,200][1080,260]\" />"
+       "<node index=\"2\" text=\"\" resource-id=\"\" class=\"android.view.View\" content-desc=\"Approve\" clickable=\"true\" enabled=\"true\" bounds=\"[100,300][200,400]\" />"
+       "<node index=\"3\" text=\"Hidden\" resource-id=\"\" class=\"android.widget.TextView\" content-desc=\"\" clickable=\"false\" enabled=\"true\" bounds=\"[0,0][0,0]\" />"
+       "</hierarchy>"))
+
+(def screen-b
+  (str "<hierarchy rotation=\"0\">"
+       "<node index=\"0\" text=\"Approved · omega\" resource-id=\"\" class=\"android.widget.TextView\" content-desc=\"\" clickable=\"false\" enabled=\"true\" bounds=\"[0,100][1080,180]\" />"
+       "<node index=\"1\" text=\"\" resource-id=\"\" class=\"android.widget.EditText\" content-desc=\"Reply\" clickable=\"true\" enabled=\"true\" focused=\"true\" bounds=\"[0,900][1080,1000]\" />"
+       "</hierarchy>"))
+
+(defn- stub! [dir lose-first?]
+  (File/mkdir_p! dir)
+  (File/write! (Path/join dir "a.xml") screen-a)
+  (File/write! (Path/join dir "b.xml") screen-b)
+  (File/write! (Path/join dir "state") "a")
+  (when lose-first? (File/write! (Path/join dir "lose") "1"))
+  (let [adb (Path/join dir "adb")]
+    (File/write! adb
+      (str "#!/bin/sh\nD=" dir "\n"
+           "[ \"$1\" = -s ] && shift 2\n"
+           "echo \"$*\" >> $D/log\n"
+           "case \"$1 $2\" in\n"
+           "  'shell uiautomator') exit 0 ;;\n"
+           "  'exec-out cat') cat $D/$(cat $D/state).xml ;;\n"
+           "  'exec-out screencap') printf 'PNG' ;;\n"
+           "  'shell input')\n"
+           "    if [ \"$3 $4 $5\" = 'tap 150 350' ]; then\n"
+           "      if [ -f $D/lose ]; then rm $D/lose; else echo b > $D/state; fi\n"
+           "    fi ;;\n"
+           "  'shell missing') echo 'no such thing' ; exit 1 ;;\n"
+           "esac\n"))
+    (System/cmd "chmod" (list "+x" adb))
+    adb))
+
+(defn- tmp [tag] (Path/join (System/tmp_dir!) (str "scenario-android-" tag "-" (erlang/unique_integer (list :positive)))))
+
+(deftest reads-the-screen
+  (let [sc (droid/parse-dump screen-a)]
+    (is (= ["Needs you" "omega · Codex & friends" "Hidden"] (droid/texts sc)))
+    (is (= ["Approve"] (droid/descs sc)))
+    (is (= [150 350] (droid/centre (droid/find-node sc {:desc "^Approve$"}))))
+    (is (= [150 350] (droid/centre (droid/find-node sc "Approve"))))
+    (is (nil? (droid/find-node sc "Hidden")) "a node with no size never matches")
+    (is ((droid/shows "Codex & friends") sc nil))
+    (is ((droid/lacks "Approved") sc nil))))
+
+(deftest escapes-typed-words
+  (is (= ["Keep" "it" "\\(for" "now\\)\\?"] (droid/words "Keep it (for now)?")))
+  (is (= ["a\\&b" "\\$HOME"] (droid/words "a&b $HOME"))))
+
+(deftest a-run-on-the-device-is-witnessed-with-frames
+  (let [dir (tmp "run") adb (stub! dir false) frames (Path/join dir "frames")
+        r (s/run-world
+            (s/scenario "approve from the inbox" {:you {}}
+              [(s/does :you [:wait "Needs you"])
+               (s/does :you [:tap {:desc "^Approve$"}])
+               (s/sees :you (droid/shows "^Approved") "The card says it was approved")
+               (s/does :you [:type "ok (go)"])])
+            (droid/world {:frames frames :adb adb :serial "emulator-5554" :poll-ms 10 :wait-ms 500}))
+        log (File/read! (Path/join dir "log"))]
+    (is (:ok r))
+    (is (= :witnessed (:verdict (first (:verdicts r)))))
+    (is (File/exists? (Path/join frames "frame-4.png")))
+    (is (String/contains? (File/read! (Path/join frames "frame-3.txt")) "Approved · omega"))
+    (is (String/contains? log "shell input tap 150 350"))
+    (is (String/contains? log "shell input text \\(go\\)") "typed words are escaped")
+    (is (String/contains? log "shell input keyevent 62") "a space is its own key")))
+
+(deftest a-missing-label-refutes-its-step
+  (let [dir (tmp "missing") adb (stub! dir false)
+        r (s/run-world
+            (s/scenario "nothing to tap" {:you {}} [(s/does :you [:tap "^Decline$"])])
+            (droid/world {:frames (Path/join dir "f") :adb adb :poll-ms 10 :wait-ms 100}))]
+    (is (= false (:ok r)))
+    (is (= :refuted (:verdict (first (:trace r)))))
+    (is (String/contains? (:refused (:outcome (first (:trace r)))) "Decline"))))
+
+(deftest a-lost-tap-is-tapped-again
+  (let [dir (tmp "lost") adb (stub! dir true)
+        r (s/run-world
+            (s/scenario "lost tap" {:you {}} [(s/does :you [:tap {:desc "^Approve$"} {:until "^Approved" :settle 200}])])
+            (droid/world {:frames (Path/join dir "f") :adb adb :poll-ms 10 :wait-ms 300}))
+        taps (count (filter (fn [l] (= l "shell input tap 150 350")) (String/split (File/read! (Path/join dir "log")) "\n")))]
+    (is (:ok r))
+    (is (= 2 taps))))
