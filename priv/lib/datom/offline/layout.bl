@@ -143,8 +143,27 @@
            (starts? key (bytes [0 120]))) {:kind :cache}
        :else (refuse! :offline-unknown-namespace)))
 
+(defn- digest-value [value]
+ ;; Equal persistent vectors can have different internal trie/tail layouts
+ ;; (literal, conj, slice, JSON decoding). Deterministic ETF orders maps, but
+ ;; does not erase those implementation details. Rebuild logical vector
+ ;; contents, including nested keys/values, before hashing. Ordinary lists
+ ;; remain lists; this does not conflate a vector with a protocol list.
+ (cond
+  (vector? value) (BeamLisp.Vector/new (Enum/map (to-list value) digest-value))
+  (erlang/is_map value)
+   (maps/from_list (Enum/map (maps/to_list value)
+                    (fn [pair] (tuple (digest-value (elem pair 0))
+                                      (digest-value (elem pair 1))))))
+  (erlang/is_tuple value)
+   (erlang/list_to_tuple (Enum/map (erlang/tuple_to_list value) digest-value))
+  (erlang/is_list value) (Enum/map value digest-value)
+  :else value))
+
 (defn digest [value]
- ;; Offline protocol identities must survive a fresh VM. This is separate
- ;; from the explicitly frozen application identity-v1 encoder.
+ ;; Offline protocol identities must survive a fresh VM and JSON inventory
+ ;; transport. This is separate from frozen application identity-v1. Jobs
+ ;; remain bound to their exact tool/runtime; do not reinterpret old receipts
+ ;; with another runtime or accept alternate hashes after an integrity error.
  (String/downcase (binary/encode_hex
-  (crypto/hash :sha256 (erlang/term_to_binary value (list :deterministic))))))
+  (crypto/hash :sha256 (erlang/term_to_binary (digest-value value) (list :deterministic))))))

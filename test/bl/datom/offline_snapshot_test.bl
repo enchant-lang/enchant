@@ -1,5 +1,6 @@
 (ns datom.offline-snapshot-test
  (:require [datom.offline.manifest :as manifest] [datom.offline.snapshot :as snapshot]
+           [datom.offline.layout :as layout] [bl.json :as json]
            [datom.offline.fs :as fs] [datom.store :as s] [datom.store-fjall :as fj]))
 
 (def spec
@@ -103,3 +104,17 @@
     (is (= "orphan bytes" (File/read! (str root "/target/control.fjall.blobs/ab/cd/orphan"))))
     (is (= "{\"version\":1}" (File/read! (str root "/target/config.json"))))
     (finally (close source) (close extraction) (close target))))))
+
+(deftest manifest-identities-survive-json-and-persistent-vector-construction-boundaries
+ ;; More than 32 entries crossed from a literal/concat vector into a trie on
+ ;; JSON decode and made an intact Backdesk capture fail backup-integrity.
+ (doseq [n [0 1 31 32 33 63 64 65 1024 1025]]
+  (let [files (vec (concat (map #(str "file-" %) (range n)) ["private.json"]))
+        inventory (assoc spec :files files)
+        decoded (manifest/from-document! (json/decode (json/encode (manifest/to-document inventory))))]
+   (is (= inventory decoded))
+   (is (= (layout/digest inventory) (layout/digest decoded)))
+   (is (= (layout/digest {:nested (tuple files (list files))})
+          (layout/digest {:nested (tuple (:files decoded) (list (:files decoded)))})))
+   (is (not= (layout/digest inventory) (layout/digest (assoc inventory :data-version 2))))
+   (is (not= (layout/digest files) (layout/digest (to-list files)))))))
