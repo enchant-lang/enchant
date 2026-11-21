@@ -1,0 +1,48 @@
+(ns android.foreground
+  "Keep a beam-lisp app working with the screen off: a foreground service
+   (io.beamlisp.android.BlForegroundService, priv/android/kotlin/BlForeground.kt)
+   with one quiet ongoing notification. Android 14+ freezes a background app
+   within seconds; while this runs, its BEAM keeps going.
+
+     (foreground/start! {:title \"Pocket Harness\" :text \"Watching work\"})
+     (foreground/update! {:text \"Watching work, interface\"})
+     (foreground/stop!)
+
+   Start it from a screen (Android refuses to start a foreground service from
+   the background), and keep the text about what the user gets from it.
+   Every call returns true, or false when the platform refused."
+  (:require [android.jvm :as jvm]))
+
+(def service-class "io.beamlisp.android.BlForegroundService")
+
+(defn intent-extras
+  "The extras the service reads: title and text, the ones given."
+  [opts]
+  (vec (for [k [:title :text] :when (some? (get opts k))] [(name k) (str (get opts k))])))
+
+(defn- with-intent [f]
+  (try
+    (let [ctx (jvm/ctx) i (jvm/new "android.content.Intent")]
+      (try
+        (jvm/call i :set-class-name (jvm/call ctx :get-package-name) service-class)
+        (f ctx i)
+        true
+        (finally (jvm/release i))))
+    (catch _ false)))
+
+(defn start!
+  "Start (or keep) the foreground service, with this title and text."
+  [opts]
+  (with-intent (fn [ctx i]
+                 (doseq [[k v] (intent-extras opts)] (jvm/call i :put-extra k v))
+                 (jvm/call ctx :start-foreground-service i))))
+
+(defn update!
+  "Change what the ongoing notification says (the service restarts in place)."
+  [opts]
+  (start! opts))
+
+(defn stop!
+  "Stop the foreground service; the notification goes with it."
+  []
+  (with-intent (fn [ctx i] (jvm/call ctx :stop-service i))))
