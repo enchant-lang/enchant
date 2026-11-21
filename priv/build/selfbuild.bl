@@ -256,6 +256,9 @@
           ":persistent_term.put(:bl_sdk_producer_custody, {generation_lease, workspace_lease})"
           "timed.(\"child-install-floor\", fn -> BeamLisp.Bootstrap.install!(shadow) end)"
           "timed.(\"child-boot\", fn -> BeamLisp.AOT.boot() end)"
+          ;; The producer refuses any root but the one this VM's code path
+          ;; names; say which two disagree, here, before any compilation.
+          "if BeamLisp.AOT.physical_sdk_path(BeamLisp.Tiers.priv_root()) != BeamLisp.AOT.physical_sdk_path(stage), do: raise(\"SDK child's code path names priv \" <> inspect(BeamLisp.Tiers.priv_root()) <> \", not the staged root \" <> stage)"
           ":ok = timed.(\"child-load-build\", fn -> BeamLisp.Loader.ensure_loaded(\"build\") end)"
           "run = BeamLisp.Env.fetch!(\"build\", \"produce!\")"
           "select = BeamLisp.Env.fetch!(\"build\", \"namespace-sources\")"
@@ -268,6 +271,11 @@
           "System.halt(if Enum.count(r[:errors]) == 0, do: 0, else: 1)")
     "\n"))
 
+(defn- shard-app-root
+  "A shard's application root, a sibling of `root` with `root`'s own name."
+  [root tag]
+  (Path/join (Path/join (Path/dirname root) (str "shard" tag)) (Path/basename root)))
+
 (defn- run-library-child-once!
   "Run `library-program` in a CHILD VM, answering its result map.
 
@@ -279,12 +287,14 @@
         result (Path/join scratch (str "library-result" tag ".term"))
         manifest (Path/join root (str "library-manifest" tag))
         logpath (Path/join root (str "library-build" tag ".log"))
-        ;; a shard installs the floor into its own copy of the staged ebin. The
-        ;; copy is named ebin, beside a priv link to root/priv, so
-        ;; :code.priv_dir resolves to the same physical SDK source root.
+        ;; A shard installs the floor into its own copy of the staged ebin.
+        ;; OTP finds :code.priv_dir only through an ebin whose PARENT is named
+        ;; like the application (`beam_lisp-0.1.0`), so the shard is that same
+        ;; application shape: its own ebin beside a priv link to root/priv,
+        ;; which resolves to the same physical SDK source root.
         shadow (if (= "" tag) (Path/join root "ebin")
-                 (let [dir (Path/join root (str "shard" tag))]
-                   (File/rm_rf! dir) (File/mkdir_p! dir)
+                 (let [dir (shard-app-root root tag)]
+                   (File/rm_rf! (Path/dirname dir)) (File/mkdir_p! dir)
                    (File/cp_r! (Path/join root "ebin") (Path/join dir "ebin"))
                    (File/ln_s! (Path/join root "priv") (Path/join dir "priv"))
                    (Path/join dir "ebin")))
@@ -396,7 +406,7 @@
                 r (run-library-child-once! root ebin scratch jobs
                     (if verify? (list) (list (tuple "BL_PREVIOUS_UNIT_STORE" merged))) "" custody)
                 r (if (and verify? (:ok? r)) (verify-shard-units! r ebin merged) r)]
-            (doseq [i (range k)] (File/rm_rf! (nth shard-outs i)) (File/rm_rf! (Path/join root (str "shard-shard-" i))))
+            (doseq [i (range k)] (File/rm_rf! (nth shard-outs i)) (File/rm_rf! (Path/dirname (shard-app-root root (str "-shard-" i)))))
             (println (str "SDK-SHARDS " (Jason/encode! {:shards k :compiled (map :compiled results)})))
             r))))))
 (defn complete-library-inventory
