@@ -260,33 +260,41 @@
           "run = BeamLisp.Env.fetch!(\"build\", \"produce!\")"
           "select = BeamLisp.Env.fetch!(\"build\", \"namespace-sources\")"
           "sources = :erlang.apply(select, [stage]) |> Enum.reject(&BeamLisp.AOT.floor_file?/1) |> Enum.reject(fn p -> String.ends_with?(p, \"-fixture.bl\") end)"
+          ;; A shard (BL_SDK_SHARD="i/k") compiles every k-th source of the sorted
+          ;; selection into its own unit store; see run-library-child!.
+          "sources = case System.get_env(\"BL_SDK_SHARD\") do nil -> sources; spec -> [i, k] = spec |> String.split(\"/\") |> Enum.map(&String.to_integer/1); sources |> Enum.sort() |> Enum.with_index() |> Enum.filter(fn {_, n} -> rem(n, k) == i end) |> Enum.map(&elem(&1, 0)) end"
           "r = timed.(\"child-produce\", fn -> :erlang.apply(run, [%{:\"log-path\" => lpath, :\"sdk-artifacts?\" => true, sources: sources, root: stage, out: ebin, manifest: mpath, jobs: String.to_integer(jobs), log: &IO.puts/1}]) end)"
           "File.write!(result, :erlang.term_to_binary(Map.put(r, :sources, length(sources))))"
           "System.halt(if Enum.count(r[:errors]) == 0, do: 0, else: 1)")
     "\n"))
 
-(defn- run-library-child!
+(defn- run-library-child-once!
   "Run `library-program` in a CHILD VM, answering its result map.
 
    The whole running code path is handed over (`-pa`, the parent's order
    preserved), with the staged ebin prepended last so `:code.priv_dir` answers
    the staged root. A crash is reported with the child's own output."
-  [root ebin scratch jobs]
+  [root ebin scratch jobs env tag]
   (let [exe "elixir"
-        result (Path/join scratch "library-result.term")
-        manifest (Path/join root "library-manifest")
-        logpath (Path/join root "library-build.log")
+        result (Path/join scratch (str "library-result" tag ".term"))
+        manifest (Path/join root (str "library-manifest" tag))
+        logpath (Path/join root (str "library-build" tag ".log"))
         custody (Base/encode64 (erlang/term_to_binary
                   (tuple (BeamLisp.AOTCache/generation_lock_path (Path/expand (BeamLisp.AOTCache/dir))
                             (BeamLisp.AOTCache/compiler_key)) (c/follower-context root))))
+        ;; a shard installs the floor into its own copy of the staged ebin; the
+        ;; copy's parent is still `root`, so :code.priv_dir answers root/priv
+        shadow (if (= "" tag) (Path/join root "ebin")
+                 (let [dir (Path/join root (str "ebin" tag))]
+                   (File/rm_rf! dir) (File/cp_r! (Path/join root "ebin") dir) dir))
         pa (erlang/++ (Enum/flat_map (Enum/reverse (code/get_path))
                         (fn [p] (list "-pa" (path-string p))))
-                      (list "-pa" (Path/join root "ebin")))
+                      (list "-pa" shadow))
         args (erlang/++ (list "-e" (library-program) "--")
-                      (list (Path/join root "priv") ebin manifest logpath (Integer/to_string jobs) (Path/join root "ebin") result custody))
+                      (list (Path/join root "priv") ebin manifest logpath (Integer/to_string jobs) shadow result custody))
         _ (File/rm result)
         r (c/command! root exe (erlang/++ pa args)
-             {:cd root :into (IO/stream :stdio :line)
+             {:cd root :into (IO/stream :stdio :line) :env env
               :read-locks [(BeamLisp.AOTCache/generation_lock_path
                             (Path/expand (BeamLisp.AOTCache/dir)) (BeamLisp.AOTCache/compiler_key))]})]
     (if (File/exists? result)
@@ -298,6 +306,91 @@
       {:ok? false
        :errors (list (str "library build failed (child exit " (elem r 1) "); see child output above"))})))
 
+
+(defn- shard-count []
+  (let [v (System/get_env "BL_SDK_SHARDS")]
+    (if (and (string? v) (Regex/match? (Regex/compile! "^[1-9][0-9]?$") v)) (String/to_integer v) 1)))
+
+(defn- merge-unit-stores!
+  "One unit store holding the previous store's units and every shard's, a
+   shard's unit replacing an older one. The index fields that decide reuse
+   (version, compiler, runtime) must agree across the shards."
+  [stores merged]
+  (File/rm_rf! merged)
+  (File/mkdir_p! (Path/join merged ".units"))
+  (let [indexes (keep (fn [store] (let [f (Path/join store "unit-index.json")]
+                                    (when (File/regular? f) [store (Jason/decode! (File/read! f))])))
+                      stores)
+        shard-heads (set (map (fn [[_ i]] [(get i "version") (get i "compiler") (get i "runtime")]) (rest indexes)))]
+    (when (> (count shard-heads) 1)
+      (throw (ex-info "SDK shards disagree on their unit index identity" {:heads shard-heads})))
+    (let [units (reduce (fn [acc [store index]]
+                          (doseq [ns (keys (get index "units"))]
+                            (let [src (Path/join (Path/join store ".units") ns)
+                                  dst (Path/join (Path/join merged ".units") ns)]
+                              (when (File/dir? src) (File/rm_rf! dst) (File/cp_r! src dst))))
+                          (merge acc (get index "units")))
+                        {} indexes)
+          [_ head] (last indexes)]
+      (File/write! (Path/join merged "unit-index.json")
+        (Jason/encode! {"version" (get head "version") "compiler" (get head "compiler")
+                        "runtime" (get head "runtime") "units" units}))
+      merged)))
+
+(defn- tree-bytes
+  "Relative path → bytes of every regular file under `dir`."
+  [dir]
+  (into {} (map (fn [f] [(Path/relative_to f dir) (File/read! f)])
+                (filter File/regular? (Path/wildcard (Path/join dir "**/*") (list (tuple :match_dot true)))))))
+
+(defn- verify-shard-units!
+  "The serial producer's units against the shards' merged store: each unit the
+   shards built must have exactly the serial build's files and bytes."
+  [r ebin merged]
+  (let [mine (Path/join ebin ".units") theirs (Path/join merged ".units")
+        differing (vec (keep (fn [ns]
+                               (when (File/dir? (Path/join mine ns))
+                                 (when-not (= (tree-bytes (Path/join mine ns)) (tree-bytes (Path/join theirs ns))) ns)))
+                             (sort (File/ls! theirs))))]
+    (println (str "SDK-SHARD-VERIFY " (Jason/encode! {:units (count (File/ls! theirs)) :differing differing})))
+    (if (seq differing)
+      {:ok? false :errors [(str "sharded units differ from the serial build: " (Enum/join (take 20 differing) ", "))]}
+      r)))
+
+(defn- run-library-child!
+  "The library producer. With BL_SDK_SHARDS=k > 1, k shard children first
+   compile disjoint thirds/quarters/… of the sources into their own unit stores
+   (in parallel; each reuses the previous store as usual); their stores are
+   merged with the previous one; then the ordinary single producer runs over
+   every source with the merged store as its previous store, so each unit is a
+   verified reuse and assembly, verification and custody are unchanged."
+  [root ebin scratch jobs]
+  (let [k (shard-count)]
+    (if (= 1 k)
+      (run-library-child-once! root ebin scratch jobs (list) "")
+      (let [previous (System/get_env "BL_PREVIOUS_UNIT_STORE")
+            shard-outs (mapv (fn [i] (str ebin "-shard-" i)) (range k))
+            results (mapv #(Task/await % :infinity)
+                          (mapv (fn [i]
+                                  (Task/async
+                                    (fn [] (run-library-child-once! root (nth shard-outs i) scratch 1
+                                             (list (tuple "BL_SDK_SHARD" (str i "/" k))) (str "-shard-" i)))))
+                                (range k)))
+            failed (filter #(not (:ok? %)) results)]
+        (if (seq failed)
+          {:ok? false :errors (mapcat :errors failed)}
+          (let [merged (merge-unit-stores! (concat (if previous [previous] []) shard-outs)
+                                           (Path/join scratch "merged-unit-store"))
+                ;; BL_SDK_SHARD_VERIFY=1: the producer compiles serially from the
+                ;; original previous store instead, and every unit's files must
+                ;; equal the shards' bytes.
+                verify? (= "1" (System/get_env "BL_SDK_SHARD_VERIFY"))
+                r (run-library-child-once! root ebin scratch jobs
+                    (if verify? (list) (list (tuple "BL_PREVIOUS_UNIT_STORE" merged))) "")
+                r (if (and verify? (:ok? r)) (verify-shard-units! r ebin merged) r)]
+            (doseq [i (range k)] (File/rm_rf! (nth shard-outs i)) (File/rm_rf! (Path/join root (str "ebin-shard-" i))))
+            (println (str "SDK-SHARDS " (Jason/encode! {:shards k :compiled (map :compiled results)})))
+            r))))))
 (defn complete-library-inventory
   "Include SDK library units already owned by the authenticated floor. They
    are deliberately excluded from recompilation, but still belong to the SDK

@@ -11,7 +11,11 @@
 # with no RUNPATH, so the drop does not depend on /nix/store paths existing on
 # the target. On NixOS that loader is nix-ld's, which resolves libc from the HOST:
 # the host's glibc must therefore be >= the drop's symbol floor, which is the point.
-{ pkgs, rustPkgs, erlang, elixir, includeDesktop ? false, previousSdk ? null, previousPreparation ? null }:
+# sdkShards > 1 splits library unit compilation across that many producer VMs
+# (selfbuild/run-library-child!); sdkShardVerify additionally compiles serially
+# and requires identical unit bytes.
+{ pkgs, rustPkgs, erlang, elixir, includeDesktop ? false, previousSdk ? null, previousPreparation ? null,
+  sdkShards ? 1, sdkShardVerify ? false }:
 let
   inherit (pkgs) lib;
 
@@ -294,6 +298,8 @@ let
       ''}
       # Preparation, floor validation and assembly share one producer VM.
       sdk_phase_start producer
+      export BL_SDK_SHARDS=${toString sdkShards}
+      ${lib.optionalString sdkShardVerify "export BL_SDK_SHARD_VERIFY=1"}
       ./bin/bl --cold run scripts/produce-sdk.bl
       sdk_phase_end
 
