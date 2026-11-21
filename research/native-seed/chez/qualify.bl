@@ -1,0 +1,627 @@
+;; The native compiler on Chez Scheme: build, qualify, derive and time it.
+;;
+;;   ./bin/bl run research/native-seed/chez/qualify.bl -- qualify   --image DIR --work DIR [--fresh] [--skip-actors]
+;;   ./bin/bl run research/native-seed/chez/qualify.bl -- candidate --image DIR --out DIR [--fresh]
+;;   ./bin/bl run research/native-seed/chez/qualify.bl -- derive    --image DIR --out DIR [--base REV]
+;;   ./bin/bl run research/native-seed/chez/qualify.bl -- pair      --base PRELUDE --cand PRELUDE --out DIR [--reps N] [--rounds N]
+;;   ./bin/bl run research/native-seed/chez/qualify.bl -- profile   --prelude PRELUDE --out DIR [--reps N] [--ticks N]
+;;
+;; Tools come from Nix: Chez Scheme and the C compiler for the host's text FFI are
+;; this repository's locked nixpkgs (`nix build --inputs-from`), recorded per
+;; flake.lock. No tool is taken from PATH.
+;;
+;; Everything expensive is content-addressed under ~/.cache/beam-lisp/native-chez:
+;;   builds/KEY  one translated, compiled stage; KEY hashes the stage source, the
+;;               translator, the shim, the optimize level and the tool store paths.
+;;   runs/KEY    one stage run's exit code and output (and its emitted file); KEY
+;;               hashes the build key, every argument (files by content) and the
+;;               environment overlay. Every receipt row records whether it was reused;
+;;               --fresh ignores reused runs (builds stay content-addressed).
+;; Independent gates run concurrently.
+;;
+;; `qualify` checks an image against its recorded Gambit receipt:
+;;   stage 1 runs both source corpora with the recorded output; stage 1 emits the
+;;   image's stage2.scm byte for byte; stage 2 runs both corpora; stage 2 emits
+;;   stage 2 again (fixpoint); and the original actor corpus overlay passes every
+;;   check with the oracle's labels and traces at each budget, on both stages.
+;; `candidate` replaces the bundle's unit sources with this checkout's files, has
+;; the image's stage 1 compile them (S2), qualifies S2 as stage 1 and stage 2, and
+;; checks that S2 compiles the ORIGINAL bundle into the image's stage2.scm.
+;; `derive` applies this checkout's host Scheme edits (against --base, default
+;; HEAD) to a qualified image, by exact source span.
+;; `pair` times the reader job on two preludes, interleaved, with byte equality.
+;; `profile` samples the reader job's frames (chez-profile.ss) and spells the
+;; emitted binding names as BL names.
+(ns native-chez.qualify
+ (:require [bl.json :as json] [clojure.string :as string]))
+
+(def ENTRY "(native-main (native-command-line))\n")
+(def BUDGETS ["default" "17" "41"])
+(def CLEANUP-ZERO {"procs" 0 "monitors" 0 "tables" 0 "names" 0 "table_names" 0
+                   "runnable" 0 "input_sink" nil "critical" 0 "errors" 0})
+
+;; ── files, hashes, processes ────────────────────────────────────────────────
+
+(defn- root [] (Path/expand (or (not-empty (System/get_env "BL_CHECKOUT_ROOT")) (BeamLisp/cwd))))
+(defn- here [] (Path/join (root) "research/native-seed/chez"))
+(defn- hex [bytes] (String/downcase (Base/encode16 bytes)))
+(defn- sha [data] (hex (crypto/hash :sha256 data)))
+(defn- sha-file [path] (sha (File/read! path)))
+(defn- now-ms [] (erlang/monotonic_time :millisecond))
+(defn- cache-dir []
+ (let [base (or (not-empty (System/get_env "XDG_CACHE_HOME")) (Path/join (System/fetch_env! "HOME") ".cache"))]
+  (Path/join base "beam-lisp/native-chez")))
+(defn- say [& parts] (println (apply str parts)))
+(defn- unique [] (str (erlang/unique_integer (list :positive))))
+
+(defn- write-atomic! [path data]
+ (File/mkdir_p! (Path/dirname path))
+ (let [tmp (str path ".tmp-" (unique))]
+  (File/write! tmp data) (File/rename! tmp path)))
+
+(defn- cmd!
+ "Run `exe` with `args`; {:exit :out :ms}. Output combines stdout and stderr."
+ [exe args {:keys [cwd env timeout]}]
+ (let [started (now-ms)
+       argv (if timeout (concat [(str timeout) exe] args) args)
+       program (if timeout "timeout" exe)
+       r (System/cmd program (to-list (map str argv))
+          (list (tuple :stderr_to_stdout true) (tuple :cd (or cwd (root)))
+                (tuple :env (to-list (map (fn [[k v]] (tuple k v)) (or env {}))))))]
+  {:exit (elem r 1) :out (elem r 0) :ms (- (now-ms) started)}))
+
+(defn- check! [label r]
+ (when-not (= 0 (:exit r))
+  (throw (ex-info (str label " failed (exit " (:exit r) ")\n" (String/slice (:out r) -4000 4000)) {:label label})))
+ r)
+
+(defn- without-entry [text]
+ (when-not (String/ends_with? text ENTRY) (throw (ex-info "stage source lacks its entry form" {})))
+ (binary/part text 0 (- (erlang/byte_size text) (erlang/byte_size ENTRY))))
+
+;; ── tools from Nix ──────────────────────────────────────────────────────────
+
+(def ^:private tool-memo (atom nil))
+(defn- tools
+ "{:scheme :gcc} store paths from the locked nixpkgs, cached per flake.lock."
+ []
+ (or @tool-memo
+  (let [lock (sha-file (Path/join (root) "flake.lock"))
+        record (Path/join (cache-dir) (str "tools-" lock ".json"))
+        cached (when (File/exists? record) (json/decode (File/read! record)))
+        ok? (fn [t] (and t (File/exists? (get t "scheme")) (File/exists? (get t "gcc"))))
+        t (if (ok? cached) cached
+           (let [out (fn [pkg] (string/trim (:out (check! (str "nix build " pkg)
+                                 (cmd! "nix" ["build" "--no-link" "--print-out-paths" "--inputs-from" (root) pkg] {})))))
+                 chez (out "nixpkgs#chez") gcc (out "nixpkgs#gcc")
+                 t {"scheme" (str (last (string/split-lines chez)) "/bin/scheme")
+                    "gcc" (str (last (string/split-lines gcc)) "/bin/gcc")}]
+            (write-atomic! record (json/encode t)) t))]
+   (reset! tool-memo {:scheme (get t "scheme") :gcc (get t "gcc")}))))
+
+(defn- chez-env [] {"BL_CHEZ_HOST_DIR" (here)})
+
+;; ── content-addressed builds ────────────────────────────────────────────────
+
+(defn- support-digest []
+ (sha (string/join "\n" (map #(sha-file (Path/join (here) %)) ["translate.ss" "gambit-forms.ss" "chez-shim.ss"]))))
+
+(defn- host-so!
+ "The host's text FFI as a shared object, keyed by its C source. Gambit's
+  c-lambda keeps the functions static; Chez needs them exported."
+ [host-c]
+ (let [c (File/read! host-c) dir (Path/join (cache-dir) (str "hosts/" (sha c) "-" (sha (:gcc (tools)))))
+       so (Path/join dir "host.so")]
+  (when-not (File/exists? so)
+   (let [tmp (str dir ".tmp-" (unique))]
+    (File/mkdir_p! tmp)
+    (File/write! (Path/join tmp "host.c")
+     (Regex/replace (Regex/compile! "^static (.*bl_text_[a-z]+\\()" "m") c "\\1"))
+    (check! "host.so" (cmd! (:gcc (tools)) ["-O2" "-shared" "-fPIC" "-o" (Path/join tmp "host.so") (Path/join tmp "host.c") "-ldl"] {}))
+    (if (File/exists? so) (File/rm_rf! tmp) (File/rename! tmp dir))))
+  so))
+
+(defn- parallel
+ "Run thunks concurrently and return their results in order. Each task binds
+  this request's env first: a warm VM's script definitions live in it."
+ [thunks]
+ (let [token (BeamLisp.Env/capture)]
+  (mapv #(Task/await % :infinity)
+        (mapv (fn [thunk] (Task/async (fn [] (BeamLisp.Env/bind token) (thunk)))) thunks))))
+
+;; Chunks compiled concurrently. The translator writes one top-level form per
+;; line, the stage defines no syntax, and at optimize level 2 Chez compiles each
+;; top-level form on its own, so chunks loaded in order are the whole stage.
+(def CHUNKS 12)
+
+(defn- chunk-lines
+ "`text` split at line boundaries into at most `k` pieces of similar size."
+ [text k]
+ (let [lines (string/split text "\n")
+       target (max 1 (quot (erlang/byte_size text) k))]
+  (loop [xs lines current [] size 0 out []]
+   (cond
+    (empty? xs) (filterv #(not= "" %) (conj out (string/join "\n" current)))
+    (and (>= size target) (< (inc (count out)) k))
+     (recur xs [] 0 (conj out (string/join "\n" current)))
+    :else (recur (rest xs) (conj current (first xs)) (+ size (erlang/byte_size (first xs)) 1) out)))))
+
+(defn- compile-chunks!
+ "Translate `scheme-text` and compile it as ordered chunks in `dir`; the
+  ordered .so paths."
+ [scheme-text dir level host-so-fn]
+ (let [t (tools) src (Path/join dir "source.scm") ss (Path/join dir "translated.ss") c (Path/join dir "host.c")]
+  (File/write! src scheme-text)
+  (check! "translate" (cmd! (:scheme t) ["--script" (Path/join (here) "translate.ss") src ss c] {:env (chez-env)}))
+  (let [so (host-so-fn c)
+        chunks (chunk-lines (File/read! ss) CHUNKS)
+        names (mapv #(Path/join dir (str "chunk-" % ".so")) (range (count chunks)))]
+   (parallel (mapv (fn [i]
+                    (fn [] (let [chunk-ss (Path/join dir (str "chunk-" i ".ss")) compile (Path/join dir (str "compile-" i ".ss"))]
+                            (File/write! chunk-ss (str (nth chunks i) "\n"))
+                            (File/write! compile (str "(optimize-level " level ") (load-shared-object \"" so "\") (load \""
+                                                      (here) "/chez-shim.ss\") (compile-file \"" chunk-ss "\" \"" (names i) "\")\n"))
+                            (check! (str "compile chunk " i) (cmd! (:scheme t) ["--script" compile] {:env (chez-env)}))
+                            (File/rm! chunk-ss) (File/rm! compile))))
+                   (range (count chunks))))
+   (File/rm! src) (File/rm! ss)
+   {:so so :chunks names})))
+
+(defn- loads [paths] (apply str (map #(str "(load \"" % "\")\n") paths)))
+
+(defn build!
+ "Translate and compile one stage. The entry form, when present, is left out
+  of the compiled prelude and run by the launcher, so a stage and its actor
+  overlay share one build. {:launcher :load :key :cached :ms}: `:launcher`
+  runs the stage, `:load` only loads its prelude."
+ ([source] (build! source 2))
+ ([source level]
+  (let [started (now-ms) t (tools) text (File/read! source)
+        entry? (String/ends_with? text ENTRY)
+        prelude (if entry? (without-entry text) text)
+        key (sha (string/join "\0" ["native-chez-build-v2" (str level) (sha prelude) (support-digest) (:scheme t) (:gcc t)]))
+        dir (Path/join (cache-dir) (str "builds/" key))
+        result (fn [cached] {:launcher (Path/join dir (if entry? "run.ss" "load.ss")) :load (Path/join dir "load.ss")
+                             :key (if entry? (sha (str key "\0entry")) key) :prelude-key key
+                             :cached cached :ms (- (now-ms) started)})]
+   (if (File/exists? (Path/join dir "load.ss"))
+    (result true)
+    (let [tmp (str dir ".tmp-" (unique))]
+     (File/mkdir_p! tmp)
+     (let [{:keys [so chunks]} (compile-chunks! prelude tmp level host-so!)
+           final (mapv #(Path/join dir (Path/basename %)) chunks)
+           preamble (str "(load-shared-object \"" so "\")\n(load \"" (here) "/chez-shim.ss\")\n" (loads final))]
+      (File/write! (Path/join tmp "load.ss") preamble)
+      (File/write! (Path/join tmp "run.ss") (str preamble ENTRY))
+      (if (File/exists? (Path/join dir "load.ss")) (File/rm_rf! tmp) (File/rename! tmp dir))
+      (result false)))))))
+
+(defn build-overlay!
+ "A stage's prelude with `body` (Scheme) compiled on top, run in order."
+ [stage body-path]
+ (let [started (now-ms) body (File/read! body-path)
+       key (sha (string/join "\0" ["native-chez-overlay-v1" (:prelude-key stage) (sha body)]))
+       dir (Path/join (cache-dir) (str "builds/" key))
+       launcher (Path/join dir "run.ss")
+       result (fn [cached] {:launcher launcher :key key :cached cached :ms (- (now-ms) started)})]
+  (if (File/exists? launcher)
+   (result true)
+   (let [tmp (str dir ".tmp-" (unique))]
+    (File/mkdir_p! tmp)
+    (let [{:keys [chunks]} (compile-chunks! body tmp 2 (fn [_] nil))]
+     (File/write! (Path/join tmp "run.ss")
+      (str (File/read! (:load stage)) (loads (mapv #(Path/join dir (Path/basename %)) chunks))))
+     (if (File/exists? launcher) (File/rm_rf! tmp) (File/rename! tmp dir))
+     (result false))))))
+
+;; ── content-addressed stage runs ────────────────────────────────────────────
+
+(defn- arg-identity [a]
+ (if (and (string? a) (File/regular? a)) (str "file:" (sha-file a)) (str "arg:" a)))
+
+(defn run-stage!
+ "Run a built stage. `emits` names an output file the run writes (the
+  --compile target); it is part of the reusable result."
+ [build args {:keys [env emits fresh label timeout] :or {timeout 1200}}]
+ (let [inputs (if emits (butlast args) args)
+       key (sha (string/join "\0" (concat ["native-chez-run-v1" (:key build)] (map arg-identity inputs)
+                                          (map (fn [[k v]] (str k "=" v)) (sort env)))))
+       dir (Path/join (cache-dir) (str "runs/" key))
+       record (Path/join dir "run.json")]
+  (if (and (not fresh) (File/exists? record))
+   (let [row (json/decode (File/read! record))]
+    (when emits (File/cp! (Path/join dir "emitted.scm") emits))
+    {:label label :exit (get row "exit") :out (File/read! (Path/join dir "out.log")) :ms 0 :reused true
+     :first-ms (get row "ms")})
+   (let [r (cmd! (:scheme (tools)) (concat ["--script" (:launcher build)] args)
+                 {:env (merge (chez-env) env) :timeout timeout})
+         tmp (str dir ".tmp-" (unique))]
+    (when (= 0 (:exit r))
+     (File/mkdir_p! tmp)
+     (File/write! (Path/join tmp "out.log") (:out r))
+     (when emits (File/cp! emits (Path/join tmp "emitted.scm")))
+     (File/write! (Path/join tmp "run.json") (json/encode {"exit" (:exit r) "ms" (:ms r)}))
+     (if (File/exists? record) (File/rm_rf! tmp) (File/rename! tmp dir)))
+    (assoc r :label label :reused false)))))
+
+;; ── the actor corpus witness (fixpoint-full's observe) ──────────────────────
+
+(defn- clock-ok? [witness]
+ (let [clock (get witness "clock") pos? (fn [k] (and (integer? (get clock k)) (> (get clock k) 0)))]
+  (and (= "virtual-turn-ms-v1" (get clock "model")) (= 1 (get clock "tick_ms"))
+       (every? pos? ["completed_turns" "yield_turns" "turn_ms" "elapsed_ms"])
+       (<= (get clock "yield_turns") (get clock "completed_turns"))
+       (= (get clock "turn_ms") (* (get clock "completed_turns") (get clock "tick_ms")))
+       (>= (get clock "elapsed_ms") (get clock "turn_ms")))))
+
+(defn observe
+ "Labels and traces of one actor corpus run, after its structural checks."
+ [text budget]
+ (let [lines (string/split-lines text)
+       marker "NATIVE_CORPUS_WITNESS "
+       starts (fn [p] (filter #(String/starts_with? % p) lines))
+       labels (mapv #(subs % 5) (starts "PASS "))
+       traces (vec (filter (fn [l] (some #(String/starts_with? l %) ["EXIT-PARITY " "SUP-PARITY " "SUP-TRACE "])) lines))
+       witnesses (mapv #(json/decode (subs % (count marker))) (starts marker))
+       witness (first witnesses)
+       fail (fn [why] (throw (ex-info why {:budget budget})))]
+  (when-not (and (= 1 (count (filter #(= "js-actors: ALL PASS" %) lines))) (empty? (starts "FAIL ")))
+   (fail "actor executable did not pass the original complete source"))
+  (when-not (and (>= (count labels) 461) (= (count labels) (count (distinct labels))))
+   (fail "original actor acceptance checks omitted or duplicated"))
+  (when-not (= [11 10 2] (mapv (fn [p] (count (filter #(String/starts_with? % p) traces))) ["EXIT-PARITY " "SUP-PARITY " "SUP-TRACE "]))
+   (fail "original actor lifecycle/supervision trace omitted"))
+  (when-not (and (= 1 (count witnesses)) (String/starts_with? (last lines) marker))
+   (fail "actor executable lacks its unique final boundary witness"))
+  (when-not (and (= budget (get witness "budget")) (= CLEANUP-ZERO (get witness "cleanup")))
+   (fail "actor budget/cleanup differs"))
+  (when-not (clock-ok? witness) (fail "native corpus clock is inconsistent"))
+  (when-not (every? #(and (integer? (get witness %)) (> (get witness %) 0))
+                    ["samples" "deaths" "max_procs" "max_monitors" "max_tables" "max_links"])
+   (fail "actor execution lacks actual lifecycle observations"))
+  {:labels labels :traces traces}))
+
+;; ── qualify ─────────────────────────────────────────────────────────────────
+
+(defn qualify!
+ "Qualify IMAGE (stage1.scm, stage2.scm, bundle.scm, host.scm, eval-prepared.scm,
+  full-fixpoint.json, actor-check/) into WORK/chez-qualification.json."
+ [image work {:keys [fresh skip-actors]}]
+ (File/mkdir_p! work)
+ (let [started (now-ms)
+       receipt (json/decode (File/read! (Path/join image "full-fixpoint.json")))
+       expected (get-in receipt ["source_results" "stage1" "output_sha256"])
+       corpus (Path/join (root) "research/native-seed/fixtures/compiler-source.bl")
+       body (get-in receipt ["actor_capture" "body" "path"])
+       oracle (when-not skip-actors (json/decode (File/read! (Path/join image "actor-check/paired/oracle.json"))))
+       result (atom {"schema" "bl.native-chez.qualification.v1" "image" image "tools" (tools)
+                     "gambit_receipt_sha256" (sha-file (Path/join image "full-fixpoint.json"))
+                     "builds" {} "runs" [] "gates" {}})
+       save! (fn [] (write-atomic! (Path/join work "chez-qualification.json") (json/encode @result {:pretty 1})))
+       record-build! (fn [name b] (swap! result assoc-in ["builds" name] {"key" (:key b) "cached" (:cached b) "ms" (:ms b)}) b)
+       record-run! (fn [r] (swap! result update "runs" conj {"label" (:label r) "exit" (:exit r) "ms" (:ms r)
+                                                             "reused" (:reused r) "output_sha256" (sha (:out r))})
+                     (say (:label r) " exit " (:exit r) " " (:ms r) "ms" (if (:reused r) " (reused)" "")) r)
+       gate! (fn [name ok detail]
+              (swap! result assoc-in ["gates" name] (if detail {"pass" (boolean ok) "detail" detail} {"pass" (boolean ok)}))
+              (say "GATE " name (if ok " PASS " " FAIL ") (or detail ""))
+              (save!)
+              (when-not ok (throw (ex-info (str "gate failed: " name) {:gate name}))))
+       run! (fn [b args label & [opts]]
+             (let [r (record-run! (run-stage! b args (merge {:fresh fresh :label label} opts)))]
+              (check! label r)))
+       corpora (fn [stage b]
+                (fn [] (doseq [[kind bundle] [["source-corpus" "bundle.scm"] ["prepared-source-corpus" "eval-prepared.scm"]]]
+                        (let [r (run! b ["--eval" (Path/join image bundle) corpus] (str stage "-" kind))]
+                         (gate! (str stage "-" kind) (= expected (sha (:out r))) nil)))))
+       actors (fn [stage build]
+               (fn [] (when-not skip-actors
+                       (do
+                        (let [b (record-build! (str stage "-actors") (build-overlay! build body))]
+                         (parallel (mapv (fn [budget]
+                                          (fn [] (let [r (run! b [] (str stage "-actors-" budget) {:env {"NATIVE_ACTOR_BUDGET" budget}})
+                                                       seen (observe (:out r) budget)
+                                                       want (get-in oracle ["budgets" budget])]
+                                                  (gate! (str stage "-actors-" budget)
+                                                         (and (= (:labels seen) (vec (get want "labels")))
+                                                              (= (:traces seen) (vec (get want "traces"))))
+                                                         (str (count (:labels seen)) " checks")))))
+                                         BUDGETS)))))))
+       emit (fn [stage b out]
+             (fn [] (run! b ["--compile" (Path/join image "bundle.scm") (Path/join image "host.scm") out]
+                          (str stage "-builds-next") {:emits out})))
+       stage2-src (Path/join work "stage2.scm") stage3-src (Path/join work "stage3.scm")]
+  (let [s1 (record-build! "stage1" (build! (Path/join image "stage1.scm")))]
+   (parallel [(corpora "stage1" s1) (actors "stage1" s1)
+              (fn [] ((emit "stage1" s1 stage2-src))
+                     (gate! "stage1-emits-image-stage2" (= (File/read! stage2-src) (File/read! (Path/join image "stage2.scm")))
+                            (sha-file stage2-src))
+                     (let [s2 (record-build! "stage2" (build! stage2-src))]
+                      (parallel [(corpora "stage2" s2) (actors "stage2" s2)
+                                 (fn [] ((emit "stage2" s2 stage3-src))
+                                        (gate! "stage2-stage3-byte-equal" (= (File/read! stage3-src) (File/read! stage2-src))
+                                               (sha-file stage3-src)))])))]))
+  (swap! result assoc "status" (if (every? #(get % "pass") (vals (get @result "gates"))) "qualified" "failed")
+                      "elapsed_ms" (- (now-ms) started))
+  (save!)
+  (say "STATUS " (get @result "status") " in " (- (now-ms) started) "ms")
+  @result))
+
+;; ── bundle unit sources (native.scheme/text's literal encoding) ─────────────
+
+(defn- decode-literal
+ "The Scheme string literal starting at byte `at` of `s`: [text end]."
+ [s at]
+ (loop [i (inc at) parts []]
+  (let [m (binary/match s (list "\"" "\\") (list (tuple :scope (tuple i (- (erlang/byte_size s) i)))))
+        j (elem m 0) piece (binary/part s i (- j i))]
+   (if (= 34 (binary/at s j))
+    [(erlang/iolist_to_binary (to-list (conj parts piece))) (inc j)]
+    (let [c (binary/at s (inc j))]
+     (if (= 120 c)
+      (let [semi (elem (binary/match s ";" (list (tuple :scope (tuple j (- (erlang/byte_size s) j))))) 0)
+            code (String/to_integer (binary/part s (+ j 2) (- semi j 2)) 16)]
+       (recur (inc semi) (conj parts piece (unicode/characters_to_binary (list code)))))
+      (recur (+ j 2) (conj parts piece (case c 34 "\"" 92 "\\" 110 "\n" 114 "\r" 116 "\t")))))))))
+
+(defn- encode-literal [text]
+ (str "\""
+  (Regex/replace (Regex/compile! "[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]")
+   (-> text (string/replace "\\" "\\\\") (string/replace "\"" "\\\"")
+       (string/replace "\n" "\\n") (string/replace "\r" "\\r") (string/replace "\t" "\\t"))
+   (fn [c] (str "\\x" (String/downcase (Integer/to_string (binary/at c 0) 16)) ";")))
+  "\""))
+
+(defn bundle-units
+ "Each unit's {:ns :path :source :start :end} (source literal byte span)."
+ [s]
+ (mapv (fn [m]
+        (let [at (+ (elem m 0) (elem m 1))
+              [ns after-ns] (decode-literal s at)
+              k (elem (binary/match s "(bl-key \"source\") " (list (tuple :scope (tuple after-ns (- (erlang/byte_size s) after-ns))))) 0)
+              between (binary/part s after-ns (- k after-ns))
+              path (second (Regex/run (Regex/compile! "\\(bl-key \"path\"\\) \"([^\"]*)\"") between))
+              start (+ k (count "(bl-key \"source\") "))
+              [source end] (decode-literal s start)]
+         {:ns ns :path path :source source :start start :end end}))
+       (binary/matches s "(bl-key \"ns\") ")))
+
+(defn candidate!
+ [image out {:keys [fresh]}]
+ (when (File/exists? out) (throw (ex-info "candidate output exists" {:out out})))
+ (File/mkdir_p! out)
+ (let [started (now-ms)
+       text (File/read! (Path/join image "bundle.scm"))
+       units (bundle-units text)
+       changed (filterv (fn [u] (not= (:source u) (File/read! (Path/join (root) (:path u))))) units)
+       bundle (Path/join out "bundle.scm")]
+  (write-atomic! bundle
+   (erlang/iolist_to_binary
+    (to-list (let [[parts at] (reduce (fn [[parts at] u]
+                                       [(conj parts (binary/part text at (- (:start u) at))
+                                              (encode-literal (File/read! (Path/join (root) (:path u)))))
+                                        (:end u)])
+                                      [[] 0] changed)]
+              (conj parts (binary/part text at (- (erlang/byte_size text) at)))))))
+  (say "changed units " (mapv :ns changed))
+  (let [s1 (build! (Path/join image "stage1.scm"))
+        s2 (Path/join out "S2.scm")
+        r (check! "stage1-builds-S2" (run-stage! s1 ["--compile" bundle (Path/join image "host.scm") s2]
+                                                 {:emits s2 :fresh fresh :label "stage1-builds-S2"}))
+        cand (Path/join out "image")]
+   (File/mkdir_p! cand)
+   (doseq [f (File/ls! image)
+           :when (not (contains? #{"bundle.scm" "stage1.scm" "stage2.scm" "stage3.scm" "prelude.scm" "derived.json"} f))]
+    (File/ln_s! (Path/expand (Path/join image f)) (Path/join cand f)))
+   (File/ln_s! bundle (Path/join cand "bundle.scm"))
+   (File/ln_s! s2 (Path/join cand "stage1.scm"))
+   (File/ln_s! s2 (Path/join cand "stage2.scm"))
+   (let [s2-text (File/read! s2)]
+    (File/write! (Path/join cand "prelude.scm") (without-entry s2-text)))
+   (let [q (qualify! cand (Path/join out "qualification") {:fresh fresh})
+         old (Path/join out "S2-on-original-bundle.scm")
+         _ (check! "S2-builds-original-bundle"
+            (run-stage! (build! s2) ["--compile" (Path/join image "bundle.scm") (Path/join image "host.scm") old]
+                        {:emits old :fresh fresh :label "S2-builds-original-bundle"}))
+         same (= (File/read! old) (File/read! (Path/join image "stage2.scm")))
+         receipt {"schema" "bl.native-chez.candidate.v1" "image" image "S2_sha256" (sha-file s2)
+                  "units" (mapv (fn [u] {"ns" (:ns u) "path" (:path u) "old_sha256" (sha (:source u))
+                                         "new_sha256" (sha-file (Path/join (root) (:path u)))}) changed)
+                  "stage1_builds_S2" {"ms" (:ms r) "reused" (:reused r)}
+                  "gates" (assoc (get q "gates") "candidate-on-original-bundle-emits-image-stage2"
+                                 {"pass" same "detail" (sha-file old)})
+                  "elapsed_ms" (- (now-ms) started)}
+         receipt (assoc receipt "status" (if (and same (= "qualified" (get q "status"))) "qualified" "failed"))]
+    (write-atomic! (Path/join out "candidate.json") (json/encode receipt {:pretty 1}))
+    (say "STATUS " (get receipt "status") " in " (- (now-ms) started) "ms")
+    receipt))))
+
+;; ── derive: host Scheme edits applied to a qualified image ──────────────────
+
+(defn top-level-forms
+ "[label text start end] of every top-level form beginning with '(' at column 0."
+ [text]
+ (let [n (erlang/byte_size text)
+       starts (conj (mapv #(elem % 0) (filter #(or (= 0 (elem % 0)) (= 10 (binary/at text (dec (elem % 0)))))
+                                              (binary/matches text "(")))
+                    n)]
+  (vec (keep (fn [[a b]]
+               (let [end (loop [i a depth 0 in-str false]
+                          (if (>= i b) nil
+                           (let [c (binary/at text i)]
+                            (cond
+                             in-str (cond (= c 92) (recur (+ i 2) depth true) (= c 34) (recur (inc i) depth false)
+                                          :else (recur (inc i) depth true))
+                             (= c 34) (recur (inc i) depth true)
+                             (= c 59) (let [m (binary/match text "\n" (list (tuple :scope (tuple i (- n i)))))]
+                                       (recur (if (= :nomatch m) n (elem m 0)) depth false))
+                             (and (= c 35) (< (inc i) n) (= 92 (binary/at text (inc i)))) (recur (+ i 3) depth false)
+                             (= c 40) (recur (inc i) (inc depth) false)
+                             (= c 41) (if (= 1 depth) (inc i) (recur (inc i) (dec depth) false))
+                             :else (recur (inc i) depth false)))))]
+                (when end
+                 (let [form (binary/part text a (- end a))
+                       label (or (second (Regex/run (Regex/compile! "^\\(define \\(?([^\\s()]+)") form))
+                                 (second (Regex/run (Regex/compile! "^\\((\\S+(?: \"[^\"]*\")?)") form)))]
+                  [label form a end]))))
+             (map vector starts (rest starts))))))
+
+(defn- diff-runs
+ "Changed runs between two vectors as [i1 i2 j1 j2], after trimming the common
+  prefix and suffix and aligning the middle by longest common subsequence."
+ [a b]
+ (let [p (count (take-while true? (map = a b)))
+       s (count (take-while true? (map = (reverse (subvec a p)) (reverse (subvec b p)))))
+       am (subvec a p (- (count a) s)) bm (subvec b p (- (count b) s))
+       n (count am) m (count bm)
+       table (reduce (fn [t i] (reduce (fn [t j] (assoc t [i j] (if (= (am i) (bm j)) (inc (get t [(inc i) (inc j)] 0))
+                                                                     (max (get t [(inc i) j] 0) (get t [i (inc j)] 0)))))
+                                       t (reverse (range m))))
+                     {} (reverse (range n)))]
+  (loop [i 0 j 0 runs [] open nil]
+   (cond
+    (and (< i n) (< j m) (= (am i) (bm j)))
+     (recur (inc i) (inc j) (if open (conj runs (conj open (+ p i) (+ p j))) runs) nil)
+    (or (< i n) (< j m))
+     (let [open (or open [(+ p i) (+ p j)])]
+      (if (and (< i n) (or (>= j m) (>= (get table [(inc i) j] 0) (get table [i (inc j)] 0))))
+       (recur (inc i) j runs open) (recur i (inc j) runs open)))
+    :else (mapv (fn [[i1 j1 i2 j2]] [i1 i2 j1 j2]) (if open (conj runs (conj open (+ p i) (+ p j))) runs))))))
+
+(defn derive!
+ [image out base]
+ (when (File/exists? out) (throw (ex-info "derive output exists" {:out out})))
+ (let [git (fn [& args] (:out (check! "git" (cmd! "git" args {}))))
+       changed (string/split-lines (string/trim (git "diff" "--name-only" base "--" "research/native-seed/host")))
+       edits (vec (mapcat (fn [rel]
+                    (let [before (git "show" (str base ":" rel)) after (File/read! (Path/join (root) rel))
+                          old (top-level-forms before) new (top-level-forms after)]
+                     (map (fn [[i1 i2 j1 j2]]
+                           (let [[i1 j1] (if (or (= i1 i2) (= j1 j2))
+                                          (if (or (= 0 i1) (= 0 j1)) (throw (ex-info "insertion before the first form" {:file rel}))
+                                           [(dec i1) (dec j1)])
+                                          [i1 j1])
+                                 span (fn [text rows lo hi] (let [hi (max hi (inc lo))]
+                                                              (binary/part text (nth (rows lo) 2) (- (nth (rows (dec hi)) 3) (nth (rows lo) 2)))))]
+                            {:name (first (old i1)) :file rel :old (span before old i1 i2) :new (span after new j1 j2)}))
+                          (diff-runs (mapv second old) (mapv second new)))))
+                  (remove empty? changed)))]
+  (File/mkdir_p! out)
+  (let [files (doall (for [f (sort (File/ls! image))]
+               (if (contains? #{"host.scm" "prelude.scm" "stage1.scm" "stage2.scm" "stage3.scm"} f)
+                (let [text (reduce (fn [text e]
+                                    (when-not (= 1 (count (binary/matches text (:old e))))
+                                     (throw (ex-info (str (:name e) ": " f " does not hold the qualified text exactly once") {})))
+                                    (string/replace text (:old e) (:new e)))
+                                   (File/read! (Path/join image f)) edits)]
+                 (File/write! (Path/join out f) text) [f (sha text)])
+                (do (File/ln_s! (Path/expand (Path/join image f)) (Path/join out f)) nil))))]
+   (File/write! (Path/join out "derived.json")
+    (json/encode {"qualified_image" image "base" (string/trim (git "rev-parse" base))
+                  "edits" (mapv (fn [e] {"name" (:name e) "file" (:file e) "old_sha256" (sha (:old e)) "new_sha256" (sha (:new e))}) edits)
+                  "files" (into {} (remove nil? files))} {:pretty 1}))
+   (say (json/encode {"edits" (mapv :name edits)}))
+   edits)))
+
+;; ── pair: the reader job, interleaved, on two preludes ──────────────────────
+
+(defn- observer-script [b reader prepared out reps]
+ (let [path (Path/join out "run.ss")]
+  (File/mkdir_p! out)
+  (File/write! path (str "(load \"" (:load b) "\")\n"
+   "(define ab-source \"" reader "\")\n(define ab-bundle \"" prepared "\")\n"
+   "(define ab-out \"" out "\")\n(define ab-reps " reps ")\n"
+   "(define (ab-now) (let ((t (current-time 'time-monotonic))) (+ (* 1000. (time-second t)) (/ (time-nanosecond t) 1e6))))\n"
+   "(define ab-catch with-exception-catcher)\n(define ab-report display-exception)\n"
+   "(load \"" (here) "/observer.scm\")\n"))
+  path))
+
+(defn- median [xs] (let [v (vec (sort xs))] (if (empty? v) 0 (v (quot (count v) 2)))))
+
+(defn pair!
+ "The reader job: the committed reader.bl fixture, compiled by each prelude with
+  the qualified image's prepared macro bundle."
+ [base cand out {:keys [reps rounds prepared] :or {reps 8 rounds 2}}]
+ (let [reader (Path/join (root) "research/native-seed/chez/reader-job/reader.bl")
+       prepared (or prepared (Path/join (root) "research/native-seed/out/cutover-core-build-v3/eval-prepared.scm"))
+       arms {"base" (build! base) "cand" (build! cand)}
+       order (vec (take (* 4 rounds) (cycle ["base" "cand" "cand" "base"])))
+       rows (atom {"base" [] "cand" []}) shas (atom {"base" #{} "cand" #{}})]
+  (doseq [[i arm] (map-indexed vector order)]
+   (let [dir (Path/join out (str arm "-" i))
+         r (check! arm (cmd! (:scheme (tools)) ["--script" (observer-script (arms arm) reader prepared dir reps)] {:env (chez-env)}))]
+    (doseq [line (string/split-lines (:out r)) :when (String/starts_with? line "AB_TIMING_MS ")]
+     (swap! rows update arm conj (mapv #(String/to_float %) (rest (String/split line " ")))))
+    (swap! shas update arm conj (sha-file (Path/join dir "emitted.scm")))))
+  (let [summary (into {} (map (fn [[arm xs]]
+                               (let [totals (mapv #(reduce + %) xs)]
+                                [arm {"n" (count xs) "median_ms" (median totals) "min_ms" (apply min totals)
+                                      "read_ms" (median (map #(nth % 0) xs)) "compile_ms" (median (map #(nth % 1) xs))
+                                      "compile_min_ms" (apply min (map #(nth % 1) xs)) "emit_ms" (median (map #(nth % 2) xs))
+                                      "emitted_sha256" (vec (get @shas arm))}]))
+                             @rows))
+        same (= 1 (count (into (get @shas "base") (get @shas "cand"))))]
+   (write-atomic! (Path/join out "pair.json") (json/encode (assoc summary "same_bytes" same) {:pretty 1}))
+   (doseq [[arm s] (sort summary)]
+    (say arm ": n " (get s "n") " median " (get s "median_ms") " min " (get s "min_ms")
+         " | compile " (get s "compile_ms") " (min " (get s "compile_min_ms") ") emit " (get s "emit_ms")))
+   (say "same bytes " same)
+   summary)))
+
+;; ── profile: sampled frames of the reader job ──────────────────────────────
+
+(defn decode-names
+ "Emitted binding names `v_<code>_<code>…$arity` spelled as their BL names."
+ [text]
+ (Regex/replace (Regex/compile! "v((?:_\\d+)+)(\\$\\d+)?") text
+  (fn [_ codes arity]
+   (str (erlang/iolist_to_binary (to-list (map #(unicode/characters_to_binary (list (String/to_integer %)))
+                                               (rest (String/split codes "_")))))
+        arity))))
+
+(defn profile!
+ [prelude out {:keys [reps ticks prepared] :or {reps 10 ticks 20000}}]
+ (let [b (build! prelude)
+       reader (Path/join (root) "research/native-seed/chez/reader-job/reader.bl")
+       prepared (or prepared (Path/join (root) "research/native-seed/out/cutover-core-build-v3/eval-prepared.scm"))
+       script (Path/join out "profile.ss") raw (Path/join out "profile.txt")]
+  (File/mkdir_p! out)
+  (File/write! script
+   (str "(load \"" (:load b) "\")\n(load \"" (here) "/chez-profile.ss\")\n"
+        "(define ab-source \"" reader "\")\n(define ab-bundle \"" prepared "\")\n"
+        "(define ab-out \"" out "\")\n(define ab-reps " reps ")\n"
+        "(define (ab-now) (let ((t (current-time 'time-monotonic))) (+ (* 1000. (time-second t)) (/ (time-nanosecond t) 1e6))))\n"
+        "(define ab-catch with-exception-catcher)\n(define ab-report display-exception)\n"
+        "(let ((old (exit-handler))) (exit-handler (lambda args (ab-profile-stop! \"" raw "\") (apply old args))))\n"
+        "(ab-profile-start!)\n(load \"" (here) "/observer.scm\")\n"))
+  (check! "profile" (cmd! (:scheme (tools)) ["--script" script] {:env (assoc (chez-env) "AB_TICKS" (str ticks))}))
+  (let [decoded (decode-names (File/read! raw))]
+   (File/write! (Path/join out "decoded.txt") decoded)
+   (say (string/join "\n" (take 40 (string/split-lines decoded))))
+   nil)))
+
+;; ── command line ────────────────────────────────────────────────────────────
+
+(defn- options [args]
+ (loop [xs args m {}]
+  (cond (empty? xs) m
+        (contains? #{"--fresh" "--skip-actors"} (first xs)) (recur (rest xs) (assoc m (keyword (subs (first xs) 2)) true))
+        :else (recur (drop 2 xs) (assoc m (keyword (subs (first xs) 2)) (second xs))))))
+
+(defn main [args]
+ (let [[command & rest] args o (options rest) abs #(when % (Path/expand %))]
+  (case command
+   "qualify" (let [r (qualify! (abs (:image o)) (abs (:work o)) o)]
+              (when-not (= "qualified" (get r "status")) (throw (ex-info "image did not qualify" {}))))
+   "candidate" (let [r (candidate! (abs (:image o)) (abs (:out o)) o)]
+                (when-not (= "qualified" (get r "status")) (throw (ex-info "candidate did not qualify" {}))))
+   "derive" (derive! (abs (:image o)) (abs (:out o)) (or (:base o) "HEAD"))
+   "pair" (pair! (abs (:base o)) (abs (:cand o)) (abs (:out o))
+                 {:reps (String/to_integer (or (:reps o) "8")) :rounds (String/to_integer (or (:rounds o) "2"))
+                  :prepared (abs (:prepared o))})
+   "profile" (profile! (abs (:prelude o)) (abs (:out o))
+                       {:reps (String/to_integer (or (:reps o) "10")) :ticks (String/to_integer (or (:ticks o) "20000"))
+                        :prepared (abs (:prepared o))})
+   (throw (ex-info "usage: qualify | candidate | derive | pair | profile (see the file header)" {:args args})))))
+
+(when (seq (BeamLisp/argv)) (main (vec (BeamLisp/argv))) nil)

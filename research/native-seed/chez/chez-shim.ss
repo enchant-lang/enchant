@@ -64,7 +64,7 @@
 (define (ab-getenv name . default)
   (or (getenv name) (if (pair? default) (car default) (ab-error "Unbound OS environment variable" name))))
 (define (ab-call-with-output-file path proc) (call-with-output-file path proc '(replace)))
-(load (string-append (getenv "AB_HERE") "/gambit-forms.ss"))
+(load (string-append (getenv "BL_CHEZ_HOST_DIR") "/gambit-forms.ss"))
 (define (ab-eval form . env) (eval (xform form) (if (pair? env) (car env) (interaction-environment))))
 ;; Gambit's map applies its procedure left to right; Chez leaves the order
 ;; unspecified. The compiler's fresh-name counters depend on that order.

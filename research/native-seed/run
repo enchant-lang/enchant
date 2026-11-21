@@ -7,19 +7,12 @@ if [[ "${1:-}" = --sdk-pin ]]; then
   sdk_pin=$2
   shift 2
 fi
-pin_selection=$(python3 - "$sdk_pin" <<'PY'
-import hashlib,json,pathlib,sys
-p=json.loads(pathlib.Path(sys.argv[1]).read_text())
-b=(pathlib.Path(p['sdk'])/'artifact.json').read_bytes()
-assert hashlib.sha256(b).hexdigest()==p['descriptor_sha256'], 'SDK descriptor changed'
-assert json.loads(b)['source']==p['source'], 'SDK Source changed'
-assert (pathlib.Path(p['sdk'])/'bin/bl').is_file(), 'pinned SDK launcher missing'
-print(p['sdk'])
-print(p['source'])
-PY
-)
-pinned_sdk=${pin_selection%%$'\n'*}
-pinned_source=${pin_selection#*$'\n'}
+# The pin is a flat JSON object of strings; read each field without a parser.
+field() { sed -n "s/^ *\"$1\": *\"\([^\"]*\)\".*/\1/p" "$sdk_pin"; }
+pinned_sdk=$(field sdk); pinned_source=$(field source); descriptor=$(field descriptor_sha256)
+[[ $(sha256sum "$pinned_sdk/artifact.json" | cut -d' ' -f1) = "$descriptor" ]] || { echo 'SDK descriptor changed' >&2; exit 1; }
+grep -q "\"source\": *\"$pinned_source\"" "$pinned_sdk/artifact.json" || { echo 'SDK Source changed' >&2; exit 1; }
+[[ -f "$pinned_sdk/bin/bl" ]] || { echo 'pinned SDK launcher missing' >&2; exit 1; }
 mkdir -p "$prototype/.runtime"
 if [[ -f "$prototype/.runtime/path" ]]; then
   runtime=$(cat "$prototype/.runtime/path")

@@ -1,127 +1,109 @@
-# BL → Scheme → Gambit → C
+# BL → Scheme → Chez
 
-[Live development review](https://work.tailcb5318.ts.net:18138/) · [Snapshot](evidence/native-seed.html) · [Complete compiler fixpoint](evidence/scheme-fixpoint/qualification.json)
-
-The agreed wider direction is a **native BL development tool first** for the
-compiler and proc/actor work: edit, diagnose, test, run and reload in one warm
-native host, with deployment following the same pipeline. Ordinary use should
-require no BEAM. Speed must be established against equivalent warm BEAM work;
-the current native prototype does not establish that comparison.
-
-The dossier separates the checked bootstrap from the next delivery work:
-fair baselines, measured frontend optimization, a usable native project loop,
-incremental native self-emission, then a packaged daily tool. Initial targets
-(3× frontend throughput over warm BEAM, <100ms unchanged requests, <1s small
-edit-to-test) are provisional engineering goals to ratify against the baseline.
+The native compiler is BL source compiled to Scheme by its own BL-owned
+emitter and run on Chez Scheme. It builds and qualifies itself with BL and
+Scheme only: no Python, and no tool taken from `PATH`.
 
 ```text
-BL Source → existing reader / macros / bl-ANF → BL-owned Scheme emitter
-                                                   ↓
-Native compiler ← native executable ← Gambit-generated C
-       └── stage 2 → stage 3: identical bytes
+BL Source → reader / macros / bl-ANF → native.scheme emitter → Scheme
+                                                                 ↓
+native compiler ← Chez compile-file (chunked, parallel) ← translate.ss
+      └── stage 2 → stage 3: identical bytes
 ```
 
-The canonical route is self-hosted. A qualified BEAM SDK seeds stage 1;
-three native compiler generations pass the original Source corpus and all
-461 actor checks at default / 17 / 41 turn budgets. Self-emission takes
-200.642 and 211.299 seconds with the 240-second limit unchanged.
-Gambit supplies the native runtime, collector and continuations.
-
-| Gate | Retained evidence |
-| --- | --- |
-| Values + control | [377 shared BEAM / JavaScript / native observations; 52 original BEAM protocol fields](evidence/values-parity/qualification.json) |
-| Actors | [461 unchanged checks × 3 budgets](evidence/original-actor-corpus/qualification.json) |
-| Real clock + readiness + blocking FFI | [14 actor checks × 3 budgets](evidence/real-actors/qualification.json) |
-| Native self-hosting | [Stage 2 = stage 3; all three executables qualified](evidence/scheme-fixpoint/qualification.json) |
-
-Native incrementality uses BL's existing owners:
-
-```text
-build-plan / Source interfaces → AOT workspace → original Source ANF
-                                                     ↓
-unit-store/artifact-target! ← Scheme → Gambit C → loadable native module
-```
-
-`native.aot-scheme` emits the existing constructor's plans and publication
-operations before BEAM rewriting. `native.aot-target` connects it to the
-existing unit store; `native_module.py` transports Scheme bytes to C/native
-objects. Namespace products retain exact Source, phase, emitter, ABI and tool
-identities. The existing session/realm transport keeps the compiler warm.
-No Chez dependency or additional incremental compiler policy is introduced.
-
-`aot-prepare.bl` checks cold/warm/copy/edit behavior and independent native
-bytes. `aot-probe.bl` uses the existing artifact process owner for native
-ownership, replacement and retained-closure/GC checks. The
-[qualified prototype](evidence/incremental-aot/qualification.json) passes
-154 focused owner assertions and 18 native checks. Cold native emission takes
-3.752 s; warm verification takes 1.570 s with zero staging/emission/compiler
-jobs. Independent native products match byte for byte.
-The cross-namespace planner check is separate from this one-namespace native
-prototype; incremental rebuilding of the complete self-hosted compiler remains
-future work.
-
-Reproduce the namespace prototype with the separately qualified AOT SDK pin
-(both output directories must be fresh):
+## Build and qualify
 
 ```sh
-research/native-seed/run --sdk-pin research/native-seed/incremental-sdk-pin.json \
-  run research/native-seed/aot-prepare.bl -- research/native-seed/out/my-aot
-research/native-seed/run --sdk-pin research/native-seed/incremental-sdk-pin.json \
-  run research/native-seed/aot-probe.bl -- \
-  research/native-seed/out/my-aot/proof.json research/native-seed/out/my-probe
+./bin/bl run research/native-seed/chez/qualify.bl -- qualify   --image IMG --work DIR
+./bin/bl run research/native-seed/chez/qualify.bl -- candidate --image IMG --out DIR
+./bin/bl run research/native-seed/chez/qualify.bl -- derive    --image IMG --out DIR [--base REV]
+./bin/bl run research/native-seed/chez/qualify.bl -- pair      --base PRELUDE --cand PRELUDE --out DIR
+./bin/bl run research/native-seed/chez/qualify.bl -- profile   --prelude PRELUDE --out DIR
 ```
 
-`native.chunks` caches checked ANF / resolution emission chunks;
-`native_elf.py` caches exact Gambit C and native objects. Both preserve Source,
-SDK, host, tool and compiler-option identities. Source corpus execution in the
-qualified generations takes 12.8–13.6 seconds.
+Run these under `work run` with a memory cap. `chez/qualify.bl`'s header
+documents each gate.
 
-GVM remains an isolated native-procedure experiment. Tail-call and captured-
-closure pilots passed; full compiler emission reached the 3 GiB bound before
-full Source / self-build qualification. Its [tail-call](https://github.com/undefine-org/enchant/commit/9927a07bbb470a1836b7efbf0c1da329221e923a)
-and [capture](https://github.com/undefine-org/enchant/commit/515a3123dedf9a2c758653646a0225fd1ab1883a)
-receipts remain in Git. The raw C stepper and duplicate explicit IR routes
-are retired from the working tree.
+- **Tools.** Chez Scheme and the C compiler for the host's text FFI come from
+  this repository's locked nixpkgs (`nix build --inputs-from`). Their store
+  paths are recorded per `flake.lock`.
+- **`qualify`** checks an image against its recorded receipt:
+  - both source corpora on stage 1 and stage 2;
+  - stage 1 emits the image's stage 2 byte for byte;
+  - stage 2 emits itself (the fixpoint);
+  - the original actor corpus, 461 checks at default, 17 and 41 turn budgets,
+    on both stages, with the oracle's labels and traces.
+- **`candidate`** qualifies a compiler-source change without BEAM. Every unit
+  of the qualified bundle carries its BL source, and each equals its checkout
+  file.
+  1. The candidate bundle takes the checkout's sources.
+  2. The image's stage 1 compiles it (S2).
+  3. S2 is qualified as both stage 1 and stage 2.
+  4. S2 must also compile the original bundle into the image's stage 2, byte for
+     byte.
+- **`derive`** applies host Scheme edits (`host/*.scm`, against `--base`) to a
+  qualified image, by exact source span.
+- **`pair`** times the reader job on two preludes, interleaved, and checks byte
+  equality.
+- **`profile`** samples the reader job's frames and spells emitted names as BL
+  names.
 
-The managed tailnet service is `native-bl-dev`. It reads `native-seed.bl.org`
-on every request; document edits refresh automatically and authenticated
-review comments save to that file. Host code changes need a restart:
+Work is content-addressed under `~/.cache/beam-lisp/native-chez`:
+- **A stage build** is keyed by its prelude, the translator, the shim, the
+  optimize level and the tool paths. A stage and its actor overlay share one
+  build. The translated prelude compiles as 12 chunks in parallel; the
+  translator writes one top-level form per line and the stage defines no
+  syntax.
+- **A stage run** is keyed by its build, every argument (files by content) and
+  its environment overlay. Each receipt row records whether it was reused, and
+  `--fresh` ignores reused runs.
 
-```sh
-WORK_BL="$PWD/bin/bl" work restart native-bl-dev
-WORK_BL="$PWD/bin/bl" work stop native-bl-dev
-```
+Independent gates run concurrently. Measured on Work (16 cores), qualifying the
+current image:
 
-The service uses the pinned SDK, listens on loopback behind the tailnet
-publisher, and has a 2 GiB memory limit with swap disabled. Stop it when the
-requested development review is retired.
+| Case | Inside the run | Wall |
+|---|---|---|
+| Cold, empty cache | 20.8 s | 24 s |
+| Repeat | 0.4 s | 3.5 s, mostly the VM request |
+| Compiler-source candidate, repeat | 0.8 s | |
 
-`run` verifies `sdk-pin.json` and invokes that retained SDK directly. Its
-`--sdk-pin FILE` option selects another explicit immutable SDK receipt. It does
-not build another SDK when unrelated integration edits change the checkout's
-selection. Each bounded snapshot command exits its VM. `toolchain-pin.json`
-records the immutable Gambit and Clang products.
+The Gambit qualification took 200–211 s for each self-emission alone. The two
+remaining long steps of a cold run are the self-emissions, about 6.4 s each:
+that is the native compiler compiling itself.
 
-Refresh the dossier's actual cells and rendered source cards:
+## Images
 
-```sh
-research/native-seed/run \
-  -p ~/projects/enchanted-skills/bl-org-dossier/kit \
-  -p ~/projects/enchanted-skills/codebase-review/kit \
-  run research/native-seed/review-build.bl
-node research/native-seed/browser-check.mjs
-```
+`out/` (not tracked) holds images: `stage1.scm`, `stage2.scm`, `bundle.scm`,
+`host.scm`, `eval-prepared.scm`, `full-fixpoint.json` (the recorded corpus and
+actor receipt) and `actor-check/`. `out/cutover-core-build-v3` is the image
+seeded from the pinned BEAM SDK (`sdk-pin.json`, used through `./run`).
+Images derived from it carry `derived.json`. Their qualification receipts are
+in `research/checked-tiles/evidence/substrate-*.json`, and the journal
+`research/checked-tiles/journal/06-chez-substrate-and-user-path.bl.org`
+records each step.
 
-Run one substantive check at a time under the existing memory and time limits.
-`fixpoint-full.py` is the complete Scheme qualification driver;
-`check-compiler.py` is a focused preflight and does not establish self-hosting.
+## What still depends on BEAM
 
-The round-three final driver produces `eval-prepared.scm` alongside the
-macro-only Source bundle. Each of the three compiled stages prepares it
-independently, and the Source gate requires identical bundle bytes and
-results. Use the prepared bundle with the stage image recorded in its
-qualification receipt.
+The bundle's link metadata is the pinned BEAM SDK's export: namespace modules,
+leaves and the resolution ledger. `candidate` replaces unit sources inside
+that metadata, so it covers any edit to existing namespaces. A change that
+adds a namespace or a host leaf needs a new export.
 
-```sh
-./stage1 --eval eval-prepared.scm source.bl
-```
+Incremental per-namespace native products used the Gambit object transport,
+retired below. On Chez they become chunked `compile-file` products. That port
+has not been made.
+
+## Retired
+
+The Gambit route and its Python drivers are no longer in the tree; they remain
+in Git history before this change:
+- `fixpoint-full.py`, the `check-*.py` drivers, `native_elf.py` and
+  `native_module.py`;
+- the GVM, benchmark, cutover, scan, values, proc, real and corpus qualifiers;
+- the BL drivers that only invoked them: `aot-prepare.bl`, `aot-probe.bl`,
+  `linked-prepare.bl`, `src/native/aot-target.bl`, `cutover/build.bl`,
+  `scan/build.bl`, `gvm/prepare-generation.bl`, `values/prepare.bl` and
+  `benchmark/build-equality-shortcut.bl`.
+
+Their receipts under `evidence/` stay as records. The emitter, host Scheme,
+fixtures and corpus sources are unchanged.
