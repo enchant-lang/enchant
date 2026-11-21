@@ -19,8 +19,32 @@
  (and (bl-tag? key 'tuple) (= (bl-count key) 2) (string? (bl-nth key 0)) (string? (bl-nth key 1))
       (table-ref native-sealed-slots (string-append (bl-nth key 0) "/" (bl-nth key 1)) #f)))
 (define (native-row . parts) (bl-tuple parts))
+;; native-env-rows stays the persistent record (iteration, epochs). Lookups of
+;; rows whose key is a string, a symbol, or a tuple of strings and symbols go
+;; through this hash index instead of the AVL search: for those keys `equal?` is
+;; exactly BL key equality and canonicalization changes nothing. The two row
+;; writers below keep it equal to the map for every such key. Writing any other
+;; key turns the index off for good, since that row might equal an indexed key.
+(define native-env-index (make-table test: equal?))
+;; Excluded symbols are those BL equality can identify with another term: an
+;; uninterned symbol (by spelling) and :true/:false/:nil (with the atoms).
+(define (native-env-index-part? x)
+ (or (string? x)
+     (and (symbol? x) (not (uninterned-symbol? x)) (not (memq x '(|:true| |:false| |:nil|))))))
+(define (native-env-index-key? key)
+ (or (native-env-index-part? key)
+     (and (vector? key) (fx= (vector-length key) 2) (eq? (vector-ref key 0) 'tuple)
+          (vector? (vector-ref key 1))
+          (let ((items (vector-ref key 1)))
+           (let loop ((i 0))
+            (or (fx= i (vector-length items))
+                (and (native-env-index-part? (vector-ref items i)) (loop (fx+ i 1)))))))))
+(define native-env-index-exact? #t)
+(define (native-env-row key default)
+ (if (and native-env-index-exact? (native-env-index-key? key)) (table-ref native-env-index key default)
+  (bl-get native-env-rows key default)))
 (define (native-env-value key)
- (bl-get native-env-rows key native-missing))
+ (native-env-row key native-missing))
 ;; Explicit debugging only: never print a macro value, body or source text.
 ;; Gambit's public current-time/time->seconds supplies wall-clock seconds;
 ;; this does not change the actor runtime's separately selected clock.
@@ -31,6 +55,9 @@
  (if (and native-image-sealed? (native-sealed-row? key))
   (native-sealed-refuse! (string-append (bl-nth key 0) "/" (bl-nth key 1))))
  (set! native-env-rows (bl-assoc native-env-rows key value))
+ (if (native-env-index-key? key) (table-set! native-env-index key value)
+  ;; a row the index cannot hold might equal an indexed key: stop using it
+  (set! native-env-index-exact? #f))
  (native-env-row-changed! key)
  (if (and native-macro-trace-enabled?
           (bl-tag? value 'tuple) (= (bl-count value) 2)
@@ -134,7 +161,7 @@
 (define (native-local-var? ns name)
  ;; A present nil/false value is a binding too. Compiled definitions and live
  ;; interns share local_var?'s Source-visible value domain.
- (or (native-map-has? native-env-rows (native-row ns name))
+ (or (not (eq? (native-env-value (native-row ns name)) native-missing))
      (native-map-has? native-global-registry (string-append ns "/" name))))
 (define (native-env-link ns name owner?)
  (if owner?
@@ -160,7 +187,7 @@
   (native-env-result v)))
 (define (native-put-meta ns name value)
  (let* ((key (native-row (bl-key "meta") ns name))
-        (previous (bl-get native-env-rows key (bl-empty-map))))
+        (previous (native-env-row key (bl-empty-map))))
   (native-env-put! key
    (let loop ((pairs (native-map-pairs value)) (m previous))
     (if (null? pairs) m
@@ -447,7 +474,9 @@
 (native-env-leaf! "delete_key" 1 (lambda (key)
  (if (and native-image-sealed? (native-sealed-row? key))
   (native-sealed-refuse! (string-append (bl-nth key 0) "/" (bl-nth key 1))))
- (set! native-env-rows (native-map-remove native-env-rows key)) (native-env-row-changed! key) (bl-key "ok")))
+ (set! native-env-rows (native-map-remove native-env-rows key))
+ (if (native-env-index-key? key) (table-set! native-env-index key))
+ (native-env-row-changed! key) (bl-key "ok")))
 (native-env-leaf! "intern" 3 native-intern)
 (native-env-leaf! "fetch" 2 native-fetch)
 (native-env-leaf! "fetch!" 2 native-fetch!)
@@ -475,7 +504,7 @@
  (if (not (native-list? names)) (error "core excludes must be a proper list")
   (native-env-put! (native-row (bl-key "refer_clojure_exclude") ns) names))))
 (native-env-leaf! "core_excludes" 1 (lambda (ns)
- (bl-get native-env-rows (native-row (bl-key "refer_clojure_exclude") ns) '())))
+ (native-env-row (native-row (bl-key "refer_clojure_exclude") ns) '())))
 (native-env-leaf! "caps" 0 (lambda () (bl-key "all")))
 ;; N3. The compile-time seal (env.bl sealed_value) is BEAM build state: the
 ;; native compiler answers like an unsealed BEAM build, so compiled ANF stays
