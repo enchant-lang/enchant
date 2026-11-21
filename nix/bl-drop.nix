@@ -15,7 +15,7 @@
 # (selfbuild/run-library-child!); sdkShardVerify additionally compiles serially
 # and requires identical unit bytes.
 { pkgs, rustPkgs, erlang, elixir, includeDesktop ? false, previousSdk ? null, previousPreparation ? null,
-  sdkShards ? 4, sdkShardVerify ? true }:
+  sdkShards ? 1, sdkShardVerify ? false }:
 let
   inherit (pkgs) lib;
 
