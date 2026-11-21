@@ -601,6 +601,7 @@ fn main() {
         if argv.len() != 2 { fail("usage: --engine-inputs ROOT"); }
         let snapshot = engine_inputs::Snapshot::capture(Path::new(&argv[1]))
             .unwrap_or_else(|error| fail(&format!("checkout engine inventory: {error}")));
+        engine_inputs::save_digest_cache();
         println!("{}", snapshot.fingerprint);
         return;
     }

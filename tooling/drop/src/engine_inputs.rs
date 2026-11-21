@@ -1,6 +1,9 @@
 //! A single command's checked engine bytes. The format and policy are the
 //! existing scripts/sdk-inputs protocol; Python remains its independent verifier
-//! during immutable source capture. Evidence is never retained between commands.
+//! during immutable source capture. A capture's evidence is never reused by a
+//! later command. A file's content DIGEST may be: see `DigestCache`, which keys a
+//! digest by the file's complete stat stamp and refuses any stamp that was not
+//! already in the past when the file was read.
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -25,6 +28,7 @@ impl Stamp {
         Self { device: meta.dev(), inode: meta.ino(), size: meta.size(), mode: meta.mode(),
             mtime: (meta.mtime(), meta.mtime_nsec()), ctime: (meta.ctime(), meta.ctime_nsec()) }
     }
+    fn newest(&self) -> (i64, i64) { self.mtime.max(self.ctime) }
     fn directory(meta: &Metadata) -> Self {
         let mut value = Self::file(meta);
         value.size = 0;
@@ -126,6 +130,174 @@ fn json_name(name: &[u32]) -> String {
     }
     out.push('"');
     out
+}
+
+
+// ── content digests across commands ─────────────────────────────────────────
+//
+// Every checkout command used to read and SHA-256 the whole engine tree (about a
+// thousand files, 67 MB): 0.34 s of CPU before the warm VM saw the request. The
+// cache keeps, per physical path, the digest with the complete stat stamp it was
+// read under (device, inode, size, mode, mtime and ctime in nanoseconds). A later
+// command reuses the digest only for an identical stamp.
+//
+// The racy case is a write in the same clock tick as the read: the stamp would
+// not change. A digest is therefore recorded only when the file's newest
+// timestamp was at least RACY_SECONDS older than the moment its read began; any
+// later write moves mtime and ctime past that moment, and ctime cannot be set
+// from user space. A clock stepped backwards is the residual risk, as for git's
+// index; BL_CHECKOUT_DIGEST_CACHE=0 disables reuse.
+#[cfg(target_os = "linux")]
+mod digest_cache {
+    use super::Stamp;
+    use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    const MAGIC: &[u8; 16] = b"bl-digests-v1\0\0\0";
+    const RACY_SECONDS: i64 = 2;
+    const MAX_ENTRIES: usize = 200_000;
+
+    struct Cache { path: Option<PathBuf>, rows: HashMap<Vec<u8>, (Stamp, [u8; 32])>, dirty: bool }
+
+    static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+
+    fn enabled() -> bool { std::env::var_os("BL_CHECKOUT_DIGEST_CACHE").is_none_or(|v| v != "0") }
+
+    fn location() -> Option<PathBuf> {
+        let base = std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+        Some(base.join("beam-lisp/checkout-digests-v1.bin"))
+    }
+
+    fn take_i64(bytes: &[u8], at: &mut usize) -> Option<i64> {
+        let v = i64::from_le_bytes(bytes.get(*at..*at + 8)?.try_into().ok()?); *at += 8; Some(v)
+    }
+
+    fn load(path: &Path) -> HashMap<Vec<u8>, (Stamp, [u8; 32])> {
+        let mut rows = HashMap::new();
+        let mut bytes = Vec::new();
+        if std::fs::File::open(path).and_then(|mut f| f.read_to_end(&mut bytes)).is_err()
+            || bytes.len() < 16 || &bytes[..16] != MAGIC { return rows; }
+        let mut at = 16;
+        while at < bytes.len() && rows.len() < MAX_ENTRIES {
+            let Some(row) = (|| {
+                let len = take_i64(&bytes, &mut at)? as usize;
+                let name = bytes.get(at..at.checked_add(len)?)?.to_vec(); at += len;
+                let device = take_i64(&bytes, &mut at)? as u64; let inode = take_i64(&bytes, &mut at)? as u64;
+                let size = take_i64(&bytes, &mut at)? as u64; let mode = take_i64(&bytes, &mut at)? as u32;
+                let mtime = (take_i64(&bytes, &mut at)?, take_i64(&bytes, &mut at)?);
+                let ctime = (take_i64(&bytes, &mut at)?, take_i64(&bytes, &mut at)?);
+                let digest: [u8; 32] = bytes.get(at..at + 32)?.try_into().ok()?; at += 32;
+                Some((name, (Stamp { device, inode, size, mode, mtime, ctime }, digest)))
+            })() else { return HashMap::new() };
+            rows.insert(row.0, row.1);
+        }
+        rows
+    }
+
+    fn with<T>(f: impl FnOnce(&mut Cache) -> T) -> Option<T> {
+        if !enabled() { return None; }
+        let mut guard = CACHE.lock().ok()?;
+        let cache = guard.get_or_insert_with(|| {
+            let path = location();
+            let rows = path.as_deref().map(load).unwrap_or_default();
+            Cache { path, rows, dirty: false }
+        });
+        Some(f(cache))
+    }
+
+    pub fn lookup(path: &Path, stamp: &Stamp) -> Option<[u8; 32]> {
+        with(|c| c.rows.get(path.as_os_str().as_encoded_bytes())
+            .filter(|(seen, _)| seen == stamp).map(|(_, d)| *d)).flatten()
+    }
+
+    /// The wall clock as (seconds, nanoseconds), taken before a read begins.
+    pub fn now() -> (i64, i64) {
+        let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        (d.as_secs() as i64, d.subsec_nanos() as i64)
+    }
+
+    pub fn record(path: &Path, stamp: &Stamp, digest: [u8; 32], read_began: (i64, i64)) {
+        if (stamp.newest().0 + RACY_SECONDS, stamp.newest().1) >= read_began { return; }
+        with(|c| {
+            if c.rows.len() < MAX_ENTRIES {
+                c.rows.insert(path.as_os_str().as_encoded_bytes().to_vec(), (stamp.clone(), digest));
+                c.dirty = true;
+            }
+        });
+    }
+
+    /// Persist new digests, dropping rows whose file is gone. Best effort: a
+    /// cache that cannot be written only costs the next command its reads.
+    pub fn save() {
+        let _ = with(|c| -> std::io::Result<()> {
+            let Some(path) = c.path.clone() else { return Ok(()) };
+            if !c.dirty { return Ok(()); }
+            c.rows.retain(|name, _| { use std::os::unix::ffi::OsStrExt; Path::new(std::ffi::OsStr::from_bytes(name)).exists() });
+            let mut out = Vec::with_capacity(16 + c.rows.len() * 140);
+            out.extend_from_slice(MAGIC);
+            for (name, (s, digest)) in &c.rows {
+                for v in [name.len() as i64] { out.extend_from_slice(&v.to_le_bytes()); }
+                out.extend_from_slice(name);
+                for v in [s.device as i64, s.inode as i64, s.size as i64, s.mode as i64, s.mtime.0, s.mtime.1, s.ctime.0, s.ctime.1] {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+                out.extend_from_slice(digest);
+            }
+            let dir = path.parent().unwrap_or(Path::new("."));
+            std::fs::create_dir_all(dir)?;
+            let tmp = dir.join(format!(".checkout-digests-{}.tmp", std::process::id()));
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+                f.write_all(&out)?;
+            }
+            std::fs::rename(&tmp, &path)?;
+            c.dirty = false;
+            Ok(())
+        });
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub use digest_cache::save as save_digest_cache;
+
+/// The digest a later command would reuse for `path` as it stands now.
+#[cfg(all(test, target_os = "linux"))]
+pub fn reusable_digest(path: &Path) -> Option<[u8; 32]> {
+    digest_cache::lookup(path, &Stamp::file(&fs::symlink_metadata(path).ok()?))
+}
+#[cfg(not(target_os = "linux"))]
+pub fn save_digest_cache() {}
+
+/// The SHA-256 of a file the snapshot does not cover, read at most once while its
+/// stamp stays the same (see `digest_cache`). The stamp is checked around the read.
+#[cfg(target_os = "linux")]
+pub fn file_digest(path: &Path) -> io::Result<[u8; 32]> {
+    let mut input = File::open(path)?;
+    let stamp = Stamp::file(&input.metadata()?);
+    if let Some(digest) = digest_cache::lookup(path, &stamp) { return Ok(digest); }
+    let began = digest_cache::now();
+    let mut content = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 { break; }
+        content.update(&buffer[..count]);
+    }
+    let digest: [u8; 32] = content.finalize().into();
+    if stamp == Stamp::file(&input.metadata()?) { digest_cache::record(path, &stamp, digest, began); }
+    Ok(digest)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn file_digest(path: &Path) -> io::Result<[u8; 32]> {
+    let mut input = File::open(path)?;
+    let mut content = Sha256::new();
+    io::copy(&mut input, &mut content)?;
+    Ok(content.finalize().into())
 }
 
 #[cfg(target_os = "linux")]
@@ -232,21 +404,30 @@ impl Capture {
                 let mut input = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&physical)?;
                 let stamp = Stamp::file(&input.metadata()?);
                 if stamp != Stamp::file(&info) { return Err(invalid("engine input changed during open")); }
-                let mut hash = Sha256::new();
-                let mut buffer = [0u8; 65536];
-                let mut count = 0u64;
-                loop {
-                    let read = input.read(&mut buffer)?;
-                    if read == 0 { break; }
-                    count += read as u64;
-                    self.bytes += read as u64;
-                    if count > self.policy.file_bytes || self.bytes > self.policy.total_bytes { return Err(invalid("engine-input byte limit exceeded")); }
-                    hash.update(&buffer[..read]);
-                }
-                if stamp != Stamp::file(&input.metadata()?) || stamp != Stamp::file(&fs::symlink_metadata(&physical)?) || count != info.len() {
-                    return Err(invalid("engine input changed while hashing"));
-                }
-                let digest: [u8; 32] = hash.finalize().into();
+                let digest: [u8; 32] = if let Some(digest) = digest_cache::lookup(&physical, &stamp) {
+                    self.bytes += info.len();
+                    if self.bytes > self.policy.total_bytes { return Err(invalid("engine-input byte limit exceeded")); }
+                    digest
+                } else {
+                    let began = digest_cache::now();
+                    let mut hash = Sha256::new();
+                    let mut buffer = [0u8; 65536];
+                    let mut count = 0u64;
+                    loop {
+                        let read = input.read(&mut buffer)?;
+                        if read == 0 { break; }
+                        count += read as u64;
+                        self.bytes += read as u64;
+                        if count > self.policy.file_bytes || self.bytes > self.policy.total_bytes { return Err(invalid("engine-input byte limit exceeded")); }
+                        hash.update(&buffer[..read]);
+                    }
+                    if stamp != Stamp::file(&input.metadata()?) || stamp != Stamp::file(&fs::symlink_metadata(&physical)?) || count != info.len() {
+                        return Err(invalid("engine input changed while hashing"));
+                    }
+                    let digest: [u8; 32] = hash.finalize().into();
+                    digest_cache::record(&physical, &stamp, digest, began);
+                    digest
+                };
                 let hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
                 let executable = info.mode() & 0o100 != 0;
                 self.rows.push((key, format!("[{encoded},\"regular\",{executable},\"{hex}\"]")));

@@ -79,6 +79,7 @@ fn checkout_main(args: &[String]) -> ! {
     let sources = checkout_project_generation(&root, &project, &extra_sources, Some(&evidence))
         .unwrap_or_else(|e| fail(&format!("checkout project inventory: {e}")));
     evidence.verify().unwrap_or_else(|e| fail(&format!("checkout engine inventory: {e}")));
+    engine_inputs::save_digest_cache();
     std::env::set_var("BL_CHECKOUT_ROOT", &root);
     std::env::set_var("BL_CHECKOUT_GENERATION", runtime);
     std::env::set_var("BL_CHECKOUT_SOURCE_GENERATION", sources);
@@ -352,15 +353,7 @@ fn checkout_hash_files(root: &Path, mut files: Vec<PathBuf>, evidence: Option<&e
         let digest = if let Some(digest) = evidence.and_then(|snapshot| snapshot.digest(&path)) {
             *digest
         } else {
-            let mut input = std::fs::File::open(&path)?;
-            let mut content = Sha256::new();
-            let mut buffer = [0u8; 65536];
-            loop {
-                let count = std::io::Read::read(&mut input, &mut buffer)?;
-                if count == 0 { break; }
-                content.update(&buffer[..count]);
-            }
-            <[u8; 32]>::from(content.finalize())
+            engine_inputs::file_digest(&path)?
         };
         let canonical = std::fs::canonicalize(&path)?;
         let physical = canonical.as_os_str().as_encoded_bytes();
@@ -465,6 +458,48 @@ mod checkout_tests {
         std::fs::write(root.join("priv/runtime.bl"), "runtime 2").unwrap();
         assert!(snapshot.verify().is_err(), "a captured YES cannot survive a source edit");
         assert_ne!(snapshot.fingerprint, engine_inputs::Snapshot::capture(&root).unwrap().fingerprint);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn digests_are_reused_only_for_settled_unchanged_stamps() {
+        use std::os::unix::fs::MetadataExt;
+        let root = engine_fixture("digest-cache");
+        let runtime = root.join("priv/runtime.bl");
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let external = project.join("external.bl");
+        std::fs::write(&external, "external 1").unwrap();
+        // a file changed within the racy window is read again, never reused
+        let fresh = engine_inputs::Snapshot::capture(&root).unwrap();
+        let fresh_project = checkout_project_generation(&root, &project, &[], Some(&fresh)).unwrap();
+        assert!(engine_inputs::reusable_digest(&runtime).is_none());
+        assert!(engine_inputs::reusable_digest(&external).is_none());
+        std::thread::sleep(std::time::Duration::from_millis(2300));
+        let first = engine_inputs::Snapshot::capture(&root).unwrap();
+        let first_project = checkout_project_generation(&root, &project, &[], Some(&first)).unwrap();
+        assert_eq!(first.fingerprint, fresh.fingerprint);
+        assert_eq!(first_project, fresh_project);
+        assert!(engine_inputs::reusable_digest(&runtime).is_some());
+        assert!(engine_inputs::reusable_digest(&external).is_some());
+        // reuse answers exactly what a full read answers
+        let second = engine_inputs::Snapshot::capture(&root).unwrap();
+        assert_eq!(second.fingerprint, first.fingerprint);
+        assert_eq!(checkout_project_generation(&root, &project, &[], Some(&second)).unwrap(), first_project);
+        // same length, mtime put back: ctime still moves, so the edit is read
+        for path in [&runtime, &external] {
+            let mtime = std::fs::metadata(path).unwrap().modified().unwrap();
+            let before = std::fs::metadata(path).unwrap().size();
+            let text = std::fs::read_to_string(path).unwrap().replace('1', "9");
+            std::fs::write(path, text).unwrap();
+            std::fs::File::options().write(true).open(path).unwrap().set_modified(mtime).unwrap();
+            assert_eq!(std::fs::metadata(path).unwrap().size(), before);
+            assert!(engine_inputs::reusable_digest(path).is_none());
+        }
+        assert_ne!(engine_inputs::Snapshot::capture(&root).unwrap().fingerprint, first.fingerprint);
+        let edited = engine_inputs::Snapshot::capture(&root).unwrap();
+        assert_ne!(checkout_project_generation(&root, &project, &[], Some(&edited)).unwrap(), first_project);
         std::fs::remove_dir_all(root).unwrap();
     }
 
