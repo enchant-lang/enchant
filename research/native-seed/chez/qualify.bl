@@ -411,7 +411,7 @@
        units (bundle-units text)
        changed (filterv (fn [u] (not= (:source u) (File/read! (Path/join (root) (:path u))))) units)
        bundle (Path/join out "bundle.scm")]
-  (write-atomic! bundle
+  (write-atomic! (Path/join out "literal-bundle.scm")
    (erlang/iolist_to_binary
     (to-list (let [[parts at] (reduce (fn [[parts at] u]
                                        [(conj parts (binary/part text at (- (:start u) at))
@@ -421,6 +421,17 @@
               (conj parts (binary/part text at (- (erlang/byte_size text) at)))))))
   (say "changed units " (mapv :ns changed))
   (let [s1 (build! (Path/join image "stage1.scm"))
+        ;; A stage with the native refresh recomputes the metadata for the new
+        ;; sources; an older stage gets the sources replaced in place.
+        eval-bundle (Path/join out "eval-bundle.scm")
+        ;; two output files, about 2 s: run directly rather than through the run cache
+        refresh (cmd! (:scheme (tools)) ["--script" (:launcher s1) "--refresh-bundle" (Path/join image "bundle.scm") bundle eval-bundle]
+                      {:env (chez-env)})
+        refreshed? (= 0 (:exit refresh))
+        _ (when-not refreshed?
+           (File/cp! (Path/join out "literal-bundle.scm") bundle)
+           (File/cp! (Path/join image "eval-bundle.scm") eval-bundle))
+        _ (say (if refreshed? "bundle metadata refreshed natively" "bundle sources replaced (stage has no refresh)"))
         s2 (Path/join out "S2.scm")
         r (check! "stage1-builds-S2" (run-stage! s1 ["--compile" bundle (Path/join image "host.scm") s2]
                                                  {:emits s2 :fresh fresh :label "stage1-builds-S2"}))
@@ -435,6 +446,13 @@
    (File/ln_s! fix (Path/join cand "stage2.scm"))
    (let [s2-text (File/read! fix)]
     (File/write! (Path/join cand "prelude.scm") (without-entry s2-text)))
+   ;; the candidate's own macro bundle, prepared by the candidate compiler
+   (when refreshed?
+    (doseq [f ["eval-bundle.scm" "eval-prepared.scm"]] (File/rm! (Path/join cand f)))
+    (File/ln_s! eval-bundle (Path/join cand "eval-bundle.scm"))
+    (check! "candidate-prepares-eval-bundle"
+     (run-stage! (build! fix) ["--prepare-eval" eval-bundle (Path/join cand "eval-prepared.scm")]
+                 {:emits (Path/join cand "eval-prepared.scm") :fresh fresh :label "candidate-prepares-eval-bundle"})))
    (let [q (qualify! cand (Path/join out "qualification") {:fresh fresh})
          old (Path/join out "S2-on-original-bundle.scm")
          ;; Output-preserving changes must give the old compiler's output on the
@@ -449,6 +467,7 @@
                   "units" (mapv (fn [u] {"ns" (:ns u) "path" (:path u) "old_sha256" (sha (:source u))
                                          "new_sha256" (sha-file (Path/join (root) (:path u)))}) changed)
                   "stage1_builds_S2" {"ms" (:ms r) "reused" (:reused r)}
+                  "bundle_refreshed" refreshed? "bundle_sha256" (sha-file bundle)
                   "codegen" (boolean codegen) "fixpoint_sha256" (sha-file fix) "generations" generations
                   "gates" (if codegen
                            (assoc (get q "gates") "codegen-fixpoint" {"pass" true "detail" (sha-file fix)})
