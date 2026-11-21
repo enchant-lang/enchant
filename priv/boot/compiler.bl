@@ -4926,6 +4926,10 @@
    not one. A canonical `base__N__c` is deliberately NOT matched.
    Binary recognition carries no node-local regular-expression resource."
   [name]
+  ;; Almost no symbol is a baked gensym. The suffix test below decides that
+  ;; first: it is the same `__auto` (optionally plus one terminal LF) that the
+  ;; byte-offset test requires, without measuring or slicing the name.
+  (when (or (String/ends_with? name "__auto") (String/ends_with? name "__auto\n"))
   (let [size (erlang/byte_size name)
         ;; The anchored pattern accepts exactly one terminal LF; its dot
         ;; excludes LF inside the nonempty base. All offsets count bytes.
@@ -4945,7 +4949,7 @@
             (when (and (> position 0) (> digits-size 0)
                        (= :nomatch (binary/match (binary/part body 0 position) "\n"))
                        (gensym-digits? (binary/part body digits-offset digits-size)))
-              (binary/part body 0 position))))))))
+              (binary/part body 0 position)))))))))
 
 ; Order matters here, because this file is compiled by the compiler it
 ; defines: the moment `expand-macro` below is (re)defined, every later
@@ -4956,7 +4960,9 @@
 ; the other, then define the first.
 (defn- renumber
   "Walk `node` threading the rename map `m` (baked name → canonical name).
-   Returns a native tuple of the new node and rename map. One self-recursive fn: this file is compiled by the
+   Returns a native tuple of the new node, the rename map, and whether anything
+   inside was renamed. A subtree with no baked gensym is returned as it came,
+   not rebuilt. One self-recursive fn: this file is compiled by the
    compiler it defines, so by the time the NEXT form after `expand-macro`
    expands a macro, everything `expand-macro` reaches must already be a real
    definition — a `declare`d placeholder would be called for real."
@@ -4972,20 +4978,25 @@
       ; crashed on: `list_to_tuple` receiving an evaluated list is exactly how
       ; BUG-090 surfaced (priv/build/ns-interface.bl:108). A value passes
       ; through untouched — it is not a node, so there is no position to keep.
-      (if (erlang/is_tuple ren)
-        (erlang/list_to_tuple (list (rn/meta-node ren (erlang/element 3 node)) (erlang/element 2 inner)))
-        (erlang/list_to_tuple (list ren (erlang/element 2 inner)))))
+      ;; "unchanged" is claimed only where rebuilding would give back an equal
+      ;; node: a 3-element wrapper around an unchanged node.
+      (cond
+        (and (not (erlang/element 3 inner)) (erlang/is_tuple ren) (= 3 (erlang/tuple_size node)))
+          (tuple node (erlang/element 2 inner) false)
+        (erlang/is_tuple ren)
+          (tuple (rn/meta-node ren (erlang/element 3 node)) (erlang/element 2 inner) true)
+        :else (tuple ren (erlang/element 2 inner) true)))
     (let [tag (rn/node-tag node)]
       (cond
         (= tag :symbol)
           (let [name (rn/node-name node)
                 base (gensym-base name)]
             (if (nil? base)
-              (erlang/list_to_tuple (list node m))
+              (tuple node m false)
               (if (contains? m name)
-                (erlang/list_to_tuple (list (erlang/list_to_tuple (list :symbol (get m name))) m))
+                (tuple (erlang/list_to_tuple (list :symbol (get m name))) m true)
                 (let [new (str base "__" (next-fresh!) "__c")]
-                  (erlang/list_to_tuple (list (erlang/list_to_tuple (list :symbol new)) (assoc m name new)))))))
+                  (tuple (erlang/list_to_tuple (list :symbol new)) (assoc m name new) true)))))
         ; a (quote …) form is DATA: renaming symbols inside it changes the
         ; value the quote yields, not just hygiene. Leave it untouched.
         (and (= tag :list)
@@ -4993,26 +5004,30 @@
                (and (not (empty? items))
                     (= :symbol (rn/node-tag (rn/node-form (first items))))
                     (= "quote" (rn/node-name (rn/node-form (first items)))))))
-          (erlang/list_to_tuple (list node m))
+          (tuple node m false)
         (or (= tag :list) (= tag :vector) (= tag :set))
-          (loop [items (rn/node-items node) result (list) names m]
+          (loop [items (rn/node-items node) result (list) names m changed false]
             (if (erlang/== items (list))
-              (erlang/list_to_tuple
-                (list (erlang/list_to_tuple (list tag (lists/reverse result))) names))
+              (if (or changed (not (= 2 (erlang/tuple_size node))))
+                (tuple (erlang/list_to_tuple (list tag (lists/reverse result))) names true)
+                (tuple node names false))
               (let [child (renumber (erlang/hd items) names)]
                 (recur (erlang/tl items) (cons (erlang/element 1 child) result)
-                       (erlang/element 2 child)))))
+                       (erlang/element 2 child) (or changed (erlang/element 3 child))))))
         (= tag :map)
-          (loop [pairs (rn/node-items node) result (list) names m]
+          (loop [pairs (rn/node-items node) result (list) names m changed false]
             (if (erlang/== pairs (list))
-              (erlang/list_to_tuple
-                (list (erlang/list_to_tuple (list :map (lists/reverse result))) names))
+              (if (or changed (not (= 2 (erlang/tuple_size node))))
+                (tuple (erlang/list_to_tuple (list :map (lists/reverse result))) names true)
+                (tuple node names false))
               (let [pair (erlang/hd pairs)
                     k (renumber (kv-key pair) names)
                     v (renumber (kv-val pair) (erlang/element 2 k))
                     entry (erlang/list_to_tuple (list (erlang/element 1 k) (erlang/element 1 v)))]
-                (recur (erlang/tl pairs) (cons entry result) (erlang/element 2 v)))))
-        :else (erlang/list_to_tuple (list node m))))))
+                (recur (erlang/tl pairs) (cons entry result) (erlang/element 2 v)
+                       (or changed (erlang/element 3 k) (erlang/element 3 v)
+                           (not (= 2 (erlang/tuple_size pair))))))))
+        :else (tuple node m false)))))
 
 (defn- canonical-gensyms
   "Rename every template gensym in one expansion's result to a canonical name

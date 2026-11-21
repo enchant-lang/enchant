@@ -396,6 +396,27 @@
       (let ((order (bl-key-compare key (vector-ref entries (fx* 2 index)))))
        (cond ((eqv? order 0) index) ((< order 0) (fx- -1 index))
              (else (ordered (fx+ index 1)))))))))))
+;; Lookup only (no insertion position): found index, or -1. An interned symbol
+;; key equals a stored key only if it is that same symbol, a symbol or UTF16
+;; keyword wrapper with its spelling, or -- for :true, :false and :nil -- the
+;; boolean or nil atom of that name (the same exactness rule native-field-slot
+;; uses). So after an identity miss, a map with no uninterned symbol or UTF16
+;; keyword among its keys does not hold it; anything else takes the ordered search.
+(define (native-small-map-find storage key)
+ (if (and (symbol? key) (not (uninterned-symbol? key))
+          (not (memq key '(|:true| |:false| |:nil|))))
+  (let* ((entries (vector-ref storage 1)) (count (vector-ref storage 2)))
+   (let identity ((index 0))
+    (cond ((fx= index count)
+           (let scan ((index 0))
+            (cond ((fx= index count) -1)
+             ((let ((k (vector-ref entries (fx* 2 index))))
+               (or (and (symbol? k) (uninterned-symbol? k)) (bl-tag? k 'utf16-keyword)))
+              (native-small-map-search storage key))
+             (else (scan (fx+ index 1))))))
+     ((eq? key (vector-ref entries (fx* 2 index))) index)
+     (else (identity (fx+ index 1))))))
+  (native-small-map-search storage key)))
 (define (native-small-map-root storage)
  (let ((entries (vector-ref storage 1)))
   (let build ((start 0) (end (vector-ref storage 2)))
@@ -444,7 +465,7 @@
 (define (native-map-entry m key)
  (let ((storage (vector-ref m 1)))
   (if (native-map-small? storage)
-   (let ((found (native-small-map-search storage key)) (entries (vector-ref storage 1)))
+   (let ((found (native-small-map-find storage key)) (entries (vector-ref storage 1)))
     (if (fx< found 0) native-missing
      (cons (vector-ref entries (fx* 2 found)) (vector-ref entries (fx+ 1 (fx* 2 found))))))
    (if (native-field-storage? storage)
@@ -456,7 +477,7 @@
 (define (native-map-ref m key missing)
  (let ((storage (vector-ref m 1)))
   (if (native-map-small? storage)
-   (let ((found (native-small-map-search storage key)))
+   (let ((found (native-small-map-find storage key)))
     (if (fx< found 0) missing (vector-ref (vector-ref storage 1) (fx+ 1 (fx* 2 found)))))
    (if (native-field-storage? storage)
     (let ((i (native-field-slot storage key))) (if i (vector-ref storage i) missing))
@@ -527,7 +548,7 @@
 (define (native-raw-has? m k)
  (and (bl-tag? m 'map)
   (let ((storage (vector-ref m 1)))
-   (if (native-map-small? storage) (fx>= (native-small-map-search storage k) 0)
+   (if (native-map-small? storage) (fx>= (native-small-map-find storage k) 0)
     (if (native-field-storage? storage) (and (native-field-slot storage k) #t)
      (if (native-tree-find (native-map-root m) k) #t #f))))))
 (define (native-map-has? m k) (native-raw-has? m (native-key-canon k)))
@@ -553,7 +574,7 @@
   (let ((storage (vector-ref m 1)))
    (cond ((native-field-storage? storage) (if (native-field-slot storage k) (native-raw-remove (native-field-materialize storage) k) m))
     ((native-map-small? storage)
-     (let ((found (native-small-map-search storage k)))
+     (let ((found (native-small-map-find storage k)))
       (if (< found 0) m (native-small-map-remove storage found))))
     (else
     (let* ((root (native-map-root m)) (remaining (native-tree-remove root k)))

@@ -17,8 +17,8 @@ TEXT_FILES = ('host.scm', 'prelude.scm', 'stage1.scm', 'stage2.scm', 'stage3.scm
 
 
 def top_level_forms(text):
-    """Yield (name, exact text) of '(define (name' / '(define name' forms starting at column 0."""
-    starts = [m.start() for m in re.finditer(r'(?m)^\(define[ (]', text)] + [len(text)]
+    """Yield (name, exact text) of every top-level form starting with '(' at column 0."""
+    starts = [m.start() for m in re.finditer(r'(?m)^\(', text)] + [len(text)]
     for a, b in zip(starts, starts[1:]):
         chunk = text[a:b]
         depth, end, i, in_str = 0, None, 0, False
@@ -37,8 +37,11 @@ def top_level_forms(text):
                 if depth == 0: end = i + 1; break
             i += 1
         form = chunk[:end]
-        m = re.match(r'\(define \(?([^\s()]+)', form)
-        yield m.group(1), form
+        yield label(form), form, a, a + end
+
+
+def label(form):
+    return (re.match(r'\(define \(?([^\s()]+)', form) or re.match(r'\((\S+(?: "[^"]*")?)', form)).group(1)
 
 
 def main():
@@ -52,16 +55,20 @@ def main():
     for rel in changed:
         before = subprocess.check_output(['git', 'show', f'{base}:{rel}'], cwd=root, text=True)
         after = (root / rel).read_text()
-        old_forms = [f for _, f in top_level_forms(before)]
-        new_forms = [f for _, f in top_level_forms(after)]
-        matcher = difflib.SequenceMatcher(a=old_forms, b=new_forms, autojunk=False)
+        old_rows, new_rows = list(top_level_forms(before)), list(top_level_forms(after))
+        matcher = difflib.SequenceMatcher(a=[r[1] for r in old_rows], b=[r[1] for r in new_rows], autojunk=False)
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == 'equal':
                 continue
-            if i1 == i2:
-                sys.exit(f'{rel}: pure insertion without an anchoring changed form is not supported')
-            edits.append({'name': re.match(r'\(define \(?([^\s()]+)', old_forms[i1]).group(1), 'file': rel,
-                          'old': '\n'.join(old_forms[i1:i2]), 'new': '\n'.join(new_forms[j1:j2])})
+            # Exact source spans (comments between changed forms included); a pure
+            # insertion or deletion is anchored on the unchanged form before it.
+            if i1 == i2 or j1 == j2:
+                if i1 == 0 or j1 == 0:
+                    sys.exit(f'{rel}: an insertion or deletion before the first form is not supported')
+                i1, j1 = i1 - 1, j1 - 1
+            edits.append({'name': old_rows[i1][0], 'file': rel,
+                          'old': before[old_rows[i1][2]:old_rows[i2 - 1][3]] if i2 > i1 else before[old_rows[i1][2]:old_rows[i1][3]],
+                          'new': after[new_rows[j1][2]:new_rows[j2 - 1][3]] if j2 > j1 else after[new_rows[j1][2]:new_rows[j1][3]]})
     for e in edits:
         if image_host.count(e['old']) != 1:
             sys.exit(f"{e['name']}: qualified host text is not unique")
