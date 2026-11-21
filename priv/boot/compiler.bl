@@ -1209,6 +1209,32 @@
    (Enum/reduce (Enum/reverse (Enum/zip names arguments)) result
      (fn [pair body] (a/lett (elem pair 0) (elem pair 1) body))))))
 
+(defn- core-function-name?
+  "Whether plain `name` (not local, not a contextual binding) resolves to the
+   core namespace's definition of that name."
+  [env name]
+  (and (string? name) (not (has-slash? name)) (not (local? env name))
+       (not (contains? (:contextual-bindings env) name))
+       (let [lo (BeamLisp.Env/link_owner (:ns env) (core-qualified name))]
+         (and (erlang/is_tuple lo) (= 3 (erlang/tuple_size lo)) (= "core" (erlang/element 2 lo))))))
+
+(defn- tuple-construction-elements
+  "The element forms of a call that only builds a tuple from them, or nil:
+   `(tuple e…)` and `(erlang/list_to_tuple (list e…))` with core's `tuple` and
+   `list`."
+  [name args env]
+  (cond
+    (and (= name "tuple") (core-function-name? env "tuple")) (vec args)
+    (and (= name "erlang/list_to_tuple") (= 1 (count args)))
+      (let [arg (rn/node-form (first args))]
+        (when (= :list (rn/node-tag arg))
+          (let [items (rn/node-items arg) h (when (seq items) (rn/node-form (first items)))]
+            (when (and h (= :symbol (rn/node-tag h)) (= "list" (rn/node-name h))
+                       (core-function-name? env "list")
+                       (= [:remote :erlang :list_to_tuple] (vec (slash-target env name))))
+              (vec (rest items))))))
+    :else nil))
+
 (defn- compile-call
   "Turn a call form (head arg ...) into the tree that runs it.
 
@@ -1236,10 +1262,16 @@
                               (or (= name "set!") (starts-with? name ".")))
                          (and (:js-interop env) (starts-with? name "js/"))
                          (and (:js-interop env) (contains? #{"aget" "aset" "bl->js" "js->bl"} name))))
-        arg-nodes (when-not native? (compile-each-notail args env))
+        tuple-elems (when-not native? (tuple-construction-elements name args env))
+        arg-nodes (when-not (or native? tuple-elems) (compile-each-notail args env))
         tag (rn/node-tag head)]
     (if native? (compile-js-call name args env)
     (cond
+      ; `(tuple a b)` and `(erlang/list_to_tuple (list a b))`, with core's
+      ; `tuple`/`list`: the tuple itself, its elements compiled once, in order,
+      ; instead of a list built and converted (the same value).
+      (some? tuple-elems) (a/tup (compile-each-notail tuple-elems env))
+
       ; (7 1) — a literal head that cannot be called at all. The compiler can
       ; READ this head, so the mistake is knowable before the program runs,
       ; which is the whole reason to refuse it here: no stack, no arity

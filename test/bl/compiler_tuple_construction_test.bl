@@ -1,0 +1,25 @@
+; (tuple …) and (erlang/list_to_tuple (list …)) with core's names compile to the
+; tuple itself; a local or another namespace's `tuple`/`list` keeps its call.
+(ns compiler.tuple-construction-test
+ (:require [compiler :as c] [reader :as rd]))
+
+(defn- anf [src] (c/compile (first (rd/read-string src "t.bl")) (c/new-env "user")))
+(defn- ops [n] (cons (:op n) (mapcat (fn [v] (cond (map? v) (ops v) (sequential? v) (mapcat #(if (map? %) (ops %) []) v) :else [])) (vals n))))
+
+(deftest core-tuple-and-list-to-tuple-build-the-tuple-directly
+ (is (= :tuple (:op (anf "(tuple 1 2 3)"))))
+ (is (= :tuple (:op (anf "(erlang/list_to_tuple (list 1 2))"))))
+ (is (= :tuple (:op (anf "(tuple)")))))
+
+(deftest the-values-are-unchanged
+ (is (= (erlang/list_to_tuple (list 1 :a "b")) (tuple 1 :a "b")))
+ (is (= (tuple) (erlang/list_to_tuple (list))))
+ (let [order (atom [])]
+  (tuple (swap! order conj 1) (swap! order conj 2) (swap! order conj 3))
+  (is (= [1 2 3] @order) "elements evaluate left to right")))
+
+(deftest a-local-tuple-or-list-is-still-called
+ (is (not= :tuple (:op (anf "(let [tuple (fn [& xs] xs)] (tuple 1 2))"))))
+ (is (not (some #{:tuple} (ops (anf "(let [list (fn [& xs] xs)] (erlang/list_to_tuple (list 1 2)))"))))
+     "a shadowed list keeps the list_to_tuple call")
+ (is (= '(1 2) (let [tuple (fn [& xs] xs)] (tuple 1 2)))))
