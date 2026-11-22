@@ -269,3 +269,26 @@ The library does not depend on the optional natives: unit reuse keys on =lazy_me
 Grouped by structure, the reader job spends about 28% in the emitter, 24% around macros, 12.5% in the reader and 4.5% renumbering gensyms. The emitter concatenated each child's text into its parent; it now builds iodata and flattens once at its entry points (emit 29.2 → 26.6 ms, byte-identical).
 
 A memo of macro answers per call head per form hits 57% of 3,546 =macro?= calls and qualifies byte-identically, but gives nothing on this host: its containers cost what the lookup costs. A native atom write walked the whole new value with a list of visited containers, quadratic in its size, to refuse a self-holding atom; that walk now visits each container once through an identity table: 1,000 writes onto a growing map went from 2.2 s to within noise (warm runs, same image otherwise). Keys are strings, so a memo pays a string hash much like the lookup it saves. Every expansion also walks its result three times: the first-order bound check (about 9% of the run alone), =data->form= and gensym canonicalization. One fused walk is the largest structural item left.
+
+* The macro path, measured where it spends
+An expansion's own macro body is cheap; the walks around it are not. The first-order bound check is a refusal boundary with named reasons, so fusing it into =data->form= would change which error a broken macro meets. Each walk was made cheap instead, and one lookup removed:
+- =compile-node= resolved a macro head with =macro?= and again in =macroexpand-1-env=; it now resolves once (=call-macro-fn=, the same staged-kind decision) and expands with the function found.
+- =datum= dispatches on the tag with =case= and filters author metadata only for the vectors and symbols that keep it; =author-meta= answers a location-only map without rebuilding it, which also helps every positioned node =compile-node= lowers.
+- The bound check reads and compares its integer budgets with primitives; it called the generic =elem=, =neg?= and =dec= per node.
+- =&env= is reused while consecutive expansions see equal locals.
+- =renumber= and =data->form= compare tags with =erlang/=:==.
+- =core-qualified= and the =java.= tests are prefix tests. =index-of= split the string to find a prefix, and =core-qualified= stripped 13 characters wherever =clojure.core/= occurred.
+Byte-identical, 13/13 gates; 16 BEAM test files (19,532 checks) pass on an SDK built from the change. Over 128 interleaved reader-job runs the median went from 124.3 to 117.2 ms and compile from 87.0 to 80.2 ms.
+
+A per-form memo of macro answers (branch kept until now) hit 57% of calls and gained nothing: on the native host its containers cost what the lookup costs. The single lookup per call takes the part of that idea that pays.
+
+* Keyword calls on the native host
+=(:k m)= emitted a procedure test, an argument list and =bl-invoke=. =native-keyword-call1/2= do what =bl-invoke= does for a keyword under the original resolver and defer to it under any other. A first version read the map through =bl-get=, whose optional and rest arguments cost what the helper saved, and lost; reading with =native-raw-get= (a symbol keyword is its own canonical key) gives a median of 133.2 → 130.1 ms over 256 runs, mostly in emit. Codegen candidate: fixpoint at the second generation, 13/13.
+
+* The SDK in two layers
+The producer yields the library only (payload, unit store, =library.json=) and packs no drop. =nix/sdk-join.nix= copies the payload, installs the current native set, packs and checks the portable drop against its trailer (application packaging reads its launcher from =BL_BIN=), and writes the launchers. The library identity is the assembly identity without the optional natives: it names =lazy_memo= and the producer tree without the optional crate sources, whose only payload consumer, the Android native contract, reads =lazy_memo= alone. A previous SDK whose library identity matches lends its library.
+
+Measured end to end on the build station: a compiler-key rotation built the whole SDK in 13 minutes (shards 167–197 s each, balanced by source bytes; 236–306 s with every k-th file); then a Rust edit in =native/datom_fjall= built in 82 s, the cargo build included, reusing the same library store path. The two images differ only in that =.so=, the launchers and metadata, and the fjall tests pass on the result. The build station has four CPUs, so the VM keeps four.
+
+* Images that outlive their ancestors
+Candidate and derived images linked each unchanged file to the previous image's path, so a chain of scratch images held every later image up; removing old scratch broke the current one. Links now name the resolved file, and the image matching =main= lives in =research/native-seed/out/chez-main= (21 MB of its own files beside the root image).

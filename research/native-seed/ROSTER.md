@@ -9,15 +9,20 @@ holds the reasoning.
 
 | | Work | Why | Done when |
 |---|---|---|---|
-| ⏳ | Fused macro-result walk | Each expansion walks its result 3×: the first-order bound check alone is ~9% of the reader job, `data->form` and gensym canonicalization the rest | One pass converts, bounds, refuses and canonicalizes; byte-identical candidate; paired |
-| ⏳ | SDK in two layers: library image + native join | A native edit re-produces 2 GB to change one `.so`; nothing reads the packed drop in a checkout SDK | Library identity excludes optional natives; a join links `priv/native`; packing moves to the portable product; a native edit's SDK under 30 s |
-| ⏳ | Build VM `cpuCount` for shards | 4 shards share 4 CPUs (297 s vs 575 s serial) | Measured at 8 CPUs |
-| 🅿️ | Disk floor | Daemon has `min-free = 0`; this account is not trusted | Root sets `nix.settings.min-free`, or the user approves a user timer running a bounded `nix-store --gc` |
+| ⏳ | Interned names on the native host | Lookups and any memo pay a string hash per name; `string-hash`/`equal-hash` are ~4–5% of the reader job | The reader interns symbol names; byte-identical candidate; paired |
+| ⏳ | Emitter `ident` | `ident` joins one text per character for every emitted name | A memo or a direct encoder; byte-identical; paired |
+
 
 ## Done
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | Disk floor | User timer `nix-store-floor` (every 15 min): below 40 GB free, a bounded `nix-store --gc` toward 80 GB; dry-run checked | `~/.config/systemd/user/nix-store-floor.timer` |
+| ✅ | Durable base image | Image links name resolved files; `research/native-seed/out/chez-main` (21 MB) qualifies on its own | (this batch) |
+| ✅ | SDK in two layers | Library reused across native edits: a Rust edit builds in 82 s (cargo included), same library path; a key rotation in 13 min | `2fa24ed63` |
+| ✅ | Balanced shards | Largest-first to the least-loaded shard: 167–197 s per shard (was 236–306 s); library producer 222 s | `2fa24ed63` |
+| ✅ | Keyword calls via `native-raw-get` | Codegen fixpoint at generation 2, 13/13; median 133.2 → 130.1 ms | `0b79f6231`, `dd34d93bb` |
+| ✅ | Macro path | One head lookup, cheap `datum` and bound checks, reused `&env`, prefix tests; 13/13, 19,532 BEAM checks; median 124.3 → 117.2 ms, compile 87.0 → 80.2 ms | `8e58ace04` |
 | ✅ | Native atom write linear in its value | Identity table replaces the visited list; derived image 13/13; 1,000 writes onto a growing map 2.2 s → noise | (this batch) |
 | ✅ | SDK sharding on (4 ways) | Root fix: shards are app-shaped (`beam_lisp-0.1.0`); verify: 662 units from scratch, none differ; end to end with a rotated key: producer restores all 662, library 297 s vs 575 s; skipped when the previous store is current | `4229cfbc1` … `96d43a428` |
 | ✅ | iodata emitter | 13/13, byte-identical on the original bundle; emit 29.2 → 26.6 ms, reader job 126.3 → 121.3 ms | `959d09c7b` |
@@ -38,23 +43,21 @@ holds the reasoning.
 
 | | Prototype | Finding | Where |
 |---|---|---|---|
-| 🧪 | Macro answer per call head per form | 57% of 3,546 `macro?` calls hit; byte-identical 13/13; **no gain**: memo containers (atom, tuple-keyed map) cost what the lookup costs | branch `proto/macro-head-memo` (`d5a93cd58`) |
-| 🧪 | Keyword call `(:k m)` as a direct get | 77 → 50 ns per call in isolation; 1,614 sites in the compiler | measured only |
+| 🧪 | Macro answer per call head per form | 57% hits, no gain; superseded by one lookup per call | dropped |
 
 ## Scratch
 
 | Tree | Owner | Removed when |
 |---|---|---|
-| `/tmp/claude-ab/c9` | base image for pairs | the next image becomes the base |
-| job tmp `cand-io2`, `der-atom` | current candidate images | superseded |
+| `research/native-seed/out/chez-main` | base image for candidates and pairs (matches `main`) | replaced by the next qualified image |
 
 ## Numbers to beat
 
 | Measure | Now | Warm BEAM |
 |---|---|---|
-| Reader job (read + compile + emit) | 121 ms | 158 ms |
+| Reader job (read + compile + emit) | ~110 ms min, ~117 ms median under load | 158 ms |
 | Native qualification, cold / repeat | 20.8 s / 0.4 s | — |
-| SDK preparation, runtime edit / compiler edit | 2.7 min / 16 min (sharded) | — |
+| SDK build, native edit / compiler edit | 82 s / 13 min | — |
 
 ## Parked
 
