@@ -1,0 +1,46 @@
+; Card N2, BEAM side 2: compile the native Core and compare.
+;
+;   $MAIN/bin/bl run research/native-seed/beam-backend/compare.bl -- OUT
+;
+; For every job of OUT/dump.term: read the native Core (OUT .core.etf), check
+; it is =:= to the BEAM's own lower/module->core of the same descriptor, then
+; compile it with lower/module->beam (compile:forms [from_core binary return
+; {source File}] and the canonical chunk re-encoding, exactly what
+; BeamLisp.Emit/compile_descriptor runs) and compare the bytes with the BEAM
+; compiler's bytes for that descriptor and with the unit store.
+(ns native-beam.compare)
+
+(defn- store [] (Path/expand (System/fetch_env! "BL_UNIT_STORE")))
+
+(defn- check-job [j]
+ (let [in (:in j) out (:out j) module (:module j)]
+  (if-not (File/exists? out)
+   {:module module :reason "native-lowering-failed"}
+   (try
+    (let [descriptor (erlang/binary_to_term (File/read! in))
+          native (erlang/binary_to_term (File/read! out))
+          own (lower/module->core descriptor)
+          pair (lower/module->beam native (get-in descriptor [:ann :file]))
+          bytes (elem pair 1)
+          reference (File/read! (String/replace in ".etf" ".beam"))
+          stored (Path/join (store) (str module ".beam"))]
+     {:module module
+      :core-equal (erlang/=:= native own)
+      :beam-equal (= bytes reference)
+      :store-equal (and (File/exists? stored) (= bytes (File/read! stored)))})
+    (catch e {:module module :reason "beam-compile-failed" :error (ex-message e)})))))
+
+(defn run [[out]]
+ (let [units (erlang/binary_to_term (File/read! (Path/join out "dump.term")))
+       rows (vec (mapcat (fn [u] (map check-job (:jobs u))) units))
+       n (count rows)
+       count-of (fn [k] (count (filter k rows)))]
+  (File/write! (Path/join out "compare.json") (Jason/encode! (to-list rows)))
+  (println (str "COMPARE descriptors " n " core-equal " (count-of :core-equal)
+                " beam-equal " (count-of :beam-equal) " store-equal " (count-of :store-equal)))
+  (doseq [[reason rs] (group-by :reason (filter :reason rows))]
+   (println (str "COMPARE-REASON " reason " " (count rs) " e.g. " (:module (first rs)) " " (:error (first rs)))))
+  (doseq [r (take 10 (filter #(and (nil? (:reason %)) (not (:beam-equal %))) rows))]
+   (println (str "COMPARE-DIFF " (:module r) " core-equal " (:core-equal r))))))
+
+(run (vec (BeamLisp/argv)))
