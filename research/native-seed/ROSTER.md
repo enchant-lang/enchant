@@ -158,7 +158,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
     exception text.
 - **Conflicts with** U1.
 
-#### U3 🧪 A failed SDK preparation names its first cause · H/S · BL
+#### U3 ✅ A failed SDK preparation names its first cause · H/S · BL
 - **Why.** A failed preparation reports only
   `Preparation ended failed: exited with code 1` (`nix/preparation-operation.bl`
   line ~481). On 2026-11-22 the real cause, a cached nixbuild.net failure for
@@ -176,7 +176,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - The test fails without the change.
 - **Note.** `nix/` is an SDK input: batch this with other SDK-input cards.
 
-#### U4 🧪 Lock work per request proportional to change — retargeted: locks cost 1–3 ms per request, Env full-table scans cost 15–30 ms; U4b replaces the scans with exact-key lookups (`lane/runtime`, Env own time per spawn 1,904 → 971 µs) · S+ · BL runtime (after U1)
+#### U4 ✅ Lock work per request proportional to change — retargeted: locks cost 1–3 ms per request, Env full-table scans cost 15–30 ms; U4b replaces the scans with exact-key lookups (`lane/runtime`, Env own time per spawn 1,904 → 971 µs) · S+ · BL runtime (after U1)
 - **Why.** Journal 06, "Where a warm request waits": ~84
   `bl_native_publication_lock` acquisitions per warm request, through
   `run_code_callback_entry!`, `retain_code_components!`,
@@ -334,7 +334,7 @@ census to start from.
 
 ### T — tools
 
-#### T1 🧪 A host check without an SDK build · S
+#### T1 ✅ A host check without an SDK build · S
 - **Why.** `priv/` edits have no inner loop. `scripts/check-runtime-hosts`
   compiles changed `priv/host` modules with the existing compiler and tests them
   in a capped VM. It fails before starting: `elixir is not on PATH`, and
@@ -352,7 +352,7 @@ census to start from.
 
 ### J — JavaScript target
 
-#### J1 🧪 Four JS test files fail on `main` · S · BL (`priv/lib/js`)
+#### J1 🔨 Four JS test files fail on `main` · S · BL (`priv/lib/js`)
 - **Why.** These four fail at HEAD, both with and without the 2026-11-22
   shadowing fix. Both sessions checked:
   - `test/bl/js_compiled_core_test.bl`
@@ -397,6 +397,10 @@ Cards in one lane conflict; lanes run at the same time.
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | U4b: Env custody cleanup by exact key | Profile keys and handoff targets kept in the owner's own row; departure and offer lookups no longer scan 22,800-row tables. Env own time per spawn 1,904 → 971 µs, reductions 90k → 24k. 27 custody/execution/env files green with `BL_CUSTODY_SCAN_CHECK=1` | `90e0347ae` |
+| ✅ | T1: `scripts/check-runtime-hosts` works | Brings its own erlang/elixir, runs against a store SDK image: `priv/host` edits checked in ~40 s (+2.5 min when `env.bl` changes), a deliberate break fails | `e69f3863f` |
+| ✅ | U3: a failed preparation names its first cause | The refusal carries the first `error:` lines from the job's events; `preparation_failure_cause_test` 11/11 | `e69f3863f` |
+| ✅ | J1/J2: JS tests and runtime | Tests build from the SDK's library roots; JS value-equal collection keys, `-0.0` printing, alias-only lazy cycles: 21/22 js files, `js_diff` 478/478. Open: `js_compiled_core` (J3) | `e69f3863f` |
 | ✅ | U2: a warm VM that dies at start fails the request at once | The client stops waiting when the VM it started exits and prints the log tail: 18 s including VM start, was 120 s of silence. cargo test 114 pass (1 environmental builder test, pre-existing) | `ad3274b1b` |
 | ✅ | N1: `cerl` as data on the native host | 38 `cerl` functions build OTP 29's exact records on Chez; the real `lower` runs on Chez; 75 rows BEAM vs Chez byte-identical; derived image 12/12 qualify gates | `701802dc9` |
 | ✅ | C1: emitter `ident` in one `iolist_to_binary` | `candidate --codegen` 13/13 with fixpoint; pair: same bytes, emit 26.7 → 25.7 ms (median 123.9 → 119.8 ms, near noise) | `aacc7bd25` |
