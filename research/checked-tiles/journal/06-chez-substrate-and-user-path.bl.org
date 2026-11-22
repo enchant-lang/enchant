@@ -292,3 +292,40 @@ Measured end to end on the build station: a compiler-key rotation built the whol
 
 * Images that outlive their ancestors
 Candidate and derived images linked each unchanged file to the previous image's path, so a chain of scratch images held every later image up; removing old scratch broke the current one. Links now name the resolved file, and the image matching =main= lives in =research/native-seed/out/chez-main= (21 MB of its own files beside the root image).
+
+* Where a cold start goes
+
+Card U5, measurement only; no runtime code changed. The installed =bl= (the 2026-10 build =f5ee4ce9=, erts-17.0.1) was run as =bl --cold run y.bl= from a scratch directory, where =y.bl= prints =erlang/statistics :wall_clock= and =erlang/system_time= in its first form and then =(println 1)=. The checkout =bin/bl= was not run, because main moves and it would have started preparing an SDK. Raw data and the method are in =research/checked-tiles/evidence/cold-start-phases.json=.
+
+Total wall time of nine cold runs, with =uptime= load, was 3.77–4.25 s in seven of them (median 3.86 s, load 3.2–4.8). The two slow runs, 11.7 s and 14.5 s (load 3.2 and 5.3), were the first command of their batch after other work had used the machine. The 7.6 s that was reported earlier falls between the two regimes. Client to VM start is 25 ms, the first user form is reached 3.72–4.12 s after VM start, and the VM is gone 25 ms after it.
+
+Phase split, from three repeats of a =strace -f --seccomp-bpf -e trace=openat,execve= run (the filter keeps tracing cost small: 4.27 s traced against 3.77–4.12 s untraced), with the =init_debug= run for the boot mark. Machine load was about 10 for these three (=uptime=: 10.4, 9.6, 9.6), so they are slower than the table of totals above; the lower-load reference run is in the JSON.
+
+#+begin_rosetta
+Phase (ends at a file-open landmark, not a function) | Median of 3 | Reference, load 3.9
+1. client chain to =beam.smp= exec | 50 ms | 42 ms
+2. erts boot to =init_debug= =started= (kernel, stdlib, elixir) | 168 ms | 129 ms
+3. eval compile of =start_app!= and ~40 dependency apps | 233 ms | 130 ms
+4. =:beam_lisp= app start (Env, Loader, language init, owner registry) | 2,102 ms | 1,306 ms
+5. post-start: =vm.native= load and =build-all! | 2,184 ms | 1,498 ms
+6. loading the namespaces =bl.cli= needs (Release to Substrate) | 794 ms | 667 ms
+7. =bl.cli= to the user file | 595 ms | 531 ms
+8. user form, =println=, exit (exit ≈25 ms in the timed runs) | 19 ms | 10 ms
+Total | 6,077 ms (r1 23.2 s, r2 5.3 s, r3 6.1 s) | 4,271 ms
+#+end_rosetta
+
+What this says:
+
+- Phases 1–3, the client, erts and the dependency applications (ssh, ssl, inets, bandit, req and the rest), are 0.3–0.45 s together, under 8%. Starting those apps lazily, or putting the erts boot into a release boot script, can win at most that.
+- Phases 4 and 5 are 65–70% of every run. The 40 dependency apps are loaded and started before phase 4 begins; phase 4 is =BeamLisp.init/0= and its seed-tier loading, with the Erlang compiler (=compile=, =beam_ssa*=, =beam_asm=) being loaded at about +1.2 s into the VM, so something compiles during start.
+- Across 4–7 the VM reads the whole SDK =priv= tree again and again: about 2,800 =.bl= files plus the native =.so=, =precompiled.term= (opened 8 times), =codegen.sources= and =libz3=. Each run has 12–17 bursts of more than 20 files, 2–4 of which read 1,100–2,800 files in 216–358 ms. All bursts together are 1.5–1.7 s per run, about 35% of the run. From the source (=aot.bl= =sdk_runtime_inventory_uncached!=, =env.bl= =retain_sdk_runtime!= and =prepare_sdk_class!=) these are the SDK inventory and source-digest walks. That link is read from code, not traced.
+
+Not measured: time per function inside phases 4 and 5. That needs an SDK edit or a profiler inside the VM. =perf= is not installed, and Elixir's Logger removes the OTP default handler when it starts, so two attempts at =application_controller= progress reports after =elixir= returned nothing.
+
+** Proposal for the largest phase
+
+Phases 4 and 5 with the repeated priv sweeps are the target; nothing smaller is worth doing first.
+
+1. Walk the SDK inventory once per VM. For an image under =/nix/store= or a drop directory, whose bytes are immutable by identity, take the digest and receipts from the sealed manifest and skip re-reading source files; keep the full walk for mutable checkouts. Expected effect: the 1.5–1.7 s of sweeps shrinks to one 80–100 ms read (the first sweep, which reads 666 files), so a cold run drops from about 4.3 s to about 2.9 s at load 4, and from 6.1 s to about 4.5 s at load 10. This is an estimate from the sweep durations measured above, not a result.
+2. Then measure phases 4–5 inside the VM (=eprof=/=fprof= started by a =-s= module through =ERL_AFLAGS=, or =+JPperf true= with =perf=) before choosing between seeding the language from a stored term and pre-compiling what is compiled at start. Do not decide that from this table.
+3. A pre-started VM per SDK would hide the whole 4 s from the first request, but the persistent VM already does that for the second request, and it costs 150–400 MB resident per SDK. A boot script, a release or lazy dependency starts cannot pay for themselves: phases 1–3 total 0.3–0.45 s.
