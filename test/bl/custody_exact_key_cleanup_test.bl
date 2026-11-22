@@ -1,0 +1,117 @@
+; custody_exact_key_cleanup_test.bl — owner departure and registration
+; consumption clean custody by exact key, and clean all of it.
+;
+; Env used to find a departed owner's execution-profile keys and every
+; handoff offer by scanning whole tables (~23,000 inert SDK rows in a realm).
+; The owner's own source_extents row now lists them. These checks read Env's
+; private tables after ordinary spawns and assert that nothing the old scans
+; would have removed or marked is left behind. With BL_CUSTODY_SCAN_CHECK=1
+; Env also re-runs the old scans itself and fails on any difference.
+;
+; The last test prints Env's own time per spawn (call_time on the Env
+; process only) for before/after comparison; it asserts no timing.
+;
+; Run: ./bin/bl test test/bl/custody_exact_key_cleanup_test.bl
+
+(ns custody-exact-key-cleanup-test)
+
+(defn- spawn-and-join []
+  (let [me (erlang/self) ref (erlang/make_ref)]
+    (spawn (fn [] (erlang/send me ref)))
+    (receive ref :ok (after 10000 (throw (ex-info "spawned child never ran" {}))))))
+
+(defn- nested-spawn-and-join []
+  (let [me (erlang/self) ref (erlang/make_ref)]
+    (spawn (fn [] (spawn (fn [] (erlang/send me ref)))))
+    (receive ref :ok (after 10000 (throw (ex-info "grandchild never ran" {}))))))
+
+(defn- in-env [f] (Agent/get :Elixir.BeamLisp.Env (fn [_] (f)) :infinity))
+
+(defn- custody-leftovers []
+  (in-env
+   (fn []
+    (let [dead? (fn [pid] (and (erlang/is_pid pid) (not (erlang/is_process_alive pid))))
+          owners (Enum/filter (ets/tab2list :beam_lisp_source_extents)
+                   (fn [row] (dead? (erlang/element 1 row))))
+          profiles (Enum/filter (ets/select :beam_lisp_source_extent_heads
+                                 (list (tuple (tuple (tuple :source_execution_profile :_ :_) :_) (list) (list :"$_"))))
+                     (fn [row] (dead? (erlang/element 2 (erlang/element 1 row)))))
+          handoffs (Enum/filter (ets/select :beam_lisp_source_lease_domains
+                                 (list (tuple (tuple :_ {:kind :execution-handoff}) (list) (list :"$_"))))
+                     (fn [row]
+                       (let [value (erlang/element 2 row) source (Map/get value :source)]
+                         (and (erlang/is_tuple source) (dead? (erlang/element 2 source))
+                              (not (Map/get value :source-gone))))))
+          stale-offers (Enum/flat_map (ets/tab2list :beam_lisp_source_extents)
+                         (fn [row]
+                           (Enum/reject (maps/keys (Map/get (erlang/element 2 row) :handoffs (maps/new)))
+                             (fn [key]
+                               (let [rows (ets/lookup :beam_lisp_source_lease_domains key)]
+                                 (and (not (= rows (list)))
+                                      (= :execution-handoff (Map/get (erlang/element 2 (erlang/hd rows)) :kind))))))))]
+      {:dead-owner-rows (count owners) :dead-owner-profiles (count profiles)
+       :unmarked-handoffs (count handoffs) :stale-offer-entries (count stale-offers)}))))
+
+(defn- settle []
+  ;; Departure runs in each owner's guardian after DOWN; wait for it.
+  (loop [n 0]
+    (let [left (custody-leftovers)]
+      (if (or (= 0 (:dead-owner-rows left)) (>= n 100)) left
+        (do (receive (after 50 :ok)) (recur (inc n)))))))
+
+(def clean {:dead-owner-rows 0 :dead-owner-profiles 0 :unmarked-handoffs 0 :stale-offer-entries 0})
+
+(deftest spawns-leave-no-custody-behind
+  (doseq [_ (range 20)] (is (= :ok (spawn-and-join))))
+  (is (= clean (settle))))
+
+(deftest nested-spawns-leave-no-custody-behind
+  (doseq [_ (range 10)] (is (= :ok (nested-spawn-and-join))))
+  (is (= clean (settle))))
+
+(deftest a-killed-child-leaves-no-custody-behind
+  (doseq [_ (range 5)]
+    (let [pid (spawn (fn [] (receive :never :ok)))]
+      (erlang/exit pid :kill)))
+  (is (= clean (settle))))
+
+(deftest env-time-per-spawn
+  (doseq [_ (range 20)] (spawn-and-join))
+  (settle)
+  (let [env (Process/whereis :Elixir.BeamLisp.Env)
+        tracer (erlang/spawn (fn [] (receive :stop :ok)))
+        n 200
+        sizes (in-env (fn [] {:heads (ets/info :beam_lisp_source_extent_heads :size)
+                              :domains (ets/info :beam_lisp_source_lease_domains :size)}))
+        reductions (fn [] (erlang/element 2 (erlang/process_info env :reductions)))]
+    (erlang/trace_pattern (tuple :Elixir.BeamLisp.Env :_ :_) true (list :local :call_time))
+    (erlang/trace env true (list :call (tuple :tracer tracer)))
+    (let [r0 (reductions) t0 (erlang/monotonic_time :microsecond)]
+      (doseq [_ (range n)] (spawn-and-join))
+      (settle)
+      (let [wall (- (erlang/monotonic_time :microsecond) t0) r1 (reductions)
+            rows (Enum/flat_map (Kernel/apply :Elixir.BeamLisp.Env :module_info (list :functions))
+                   (fn [fa]
+                     (let [info (erlang/trace_info (tuple :Elixir.BeamLisp.Env (erlang/element 1 fa) (erlang/element 2 fa)) :call_time)
+                           samples (erlang/element 2 info)]
+                       (if (erlang/is_list samples)
+                         (list (tuple (erlang/element 1 fa)
+                                      (Enum/reduce samples 0 (fn [s acc] (+ acc (* 1000000 (erlang/element 3 s)) (erlang/element 4 s))))))
+                         (list)))))
+            ;; A function's own time includes its anonymous closures (-name/N-...).
+            us (fn [name] (Enum/reduce rows 0 (fn [row acc]
+                 (let [f (erlang/atom_to_binary (erlang/element 1 row))]
+                   (if (or (= name f) (String/starts_with? f (str "-" name "/")))
+                     (+ acc (erlang/element 2 row)) acc)))))
+            total (Enum/reduce rows 0 (fn [row acc] (+ acc (erlang/element 2 row))))]
+        (erlang/trace env false (list :call))
+        (erlang/trace_pattern (tuple :Elixir.BeamLisp.Env :_ :_) false (list :local :call_time))
+        (erlang/send tracer :stop)
+        (println "CUSTODY-PROBE" {:spawns n :tables sizes
+                                  :wall-us-per-spawn (erlang/div wall n)
+                                  :env-own-us-per-spawn (erlang/div total n)
+                                  :env-reductions-per-spawn (erlang/div (- r1 r0) n)
+                                  :departed-rows-us-per-spawn (erlang/div (us "source_owner_departed_rows!") n)
+                                  :consume-us-per-spawn (erlang/div (us "consume_execution_row!") n)
+                                  :owner-cleanup-select-us-per-spawn (erlang/div (us "source_owner_cleanup_rows") n)})
+        (is (= clean (settle)))))))
