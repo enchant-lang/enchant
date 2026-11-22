@@ -134,6 +134,7 @@ command ends — without a second async mechanism to keep in step.
   []
   (BeamLisp.Env/in_ns "user")
   (try (require '[clojure.repl :refer [apropos dir source source-fn]]) (catch _ nil))
+  (try (require '[harness.repl :refer [task say steer note keep! kept rerun await stop! tail tasks smells]]) (catch _ nil))
   (println "beam-lisp on the BEAM — Ctrl+D to exit")
   (loop []
     (let [src (read-form)]

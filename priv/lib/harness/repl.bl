@@ -1,0 +1,155 @@
+; harness/repl.bl — the harness as functions you call at the prompt.
+;
+; Whatever an agent can do in a task you can do at the REPL, with the same
+; names: start a task, add to it, steer it, wait for it, read it. Each call is a
+; thin layer over the keeper (`harness`), so a task started here is the same
+; session an MCP client or another REPL sees, and its `.bl.org` document is the
+; whole record.
+;
+;   (def t (task "Replace fixed sleeps in recording_test"))
+;   (note t "The 1500 ms sleep at :19 is on purpose.")   ; read at the next step
+;   (keep! t "sleeps" "(smells \"test/x.bl\")")          ; a saved command
+;   (rerun t "sleeps")                                    ; run it again, by name
+;   (await t)                                             ; until the turn ends
+;   (tasks)                                               ; every task, newest last
+;
+; A task value is a plain map — {:task id :status … :turns n :doc path} — that
+; every function here accepts in place of the id. The REPLs refer these names
+; into `user`; `keep!` keeps its bang because `keep` is core.
+
+(ns harness.repl
+  (:require [harness :as h] [deodorant.advice :as adv]))
+
+(def ^:private origins
+  "Where each task was started from in this VM: {id ns}. Not persisted — the
+   document records the task, not the prompt that typed it."
+  (atom {}))
+
+(defn- ensure-keeper!
+  "A keeper for the current directory's project, started cold when none runs."
+  []
+  (when-not (h/running?) (h/start-keeper (File/cwd!) nil))
+  :ok)
+
+(defn- id-of [t]
+  (cond (string? t) t
+        (map? t) (:task t)
+        :else (throw (ex-info "Not a task: give a task value or its id" {:kind :harness/not-a-task :value t}))))
+
+(defn- outcome [s]
+  (cond (some? (:turn s)) :running
+        (some? (:last s)) (get-in s [:last :outcome])
+        :else :idle))
+
+(defn view
+  "Task `t` as a value: {:task :status :turns :doc :origin}."
+  [t]
+  (ensure-keeper!)
+  (let [id (id-of t)
+        s (h/status id)]
+    (cond-> {:task id :status (outcome s) :turns (:turns s) :doc (:doc s)}
+      (contains? @origins id) (assoc :origin (get @origins id)))))
+
+(defn- next-id []
+  (let [ns (keep (fn [sid] (when (starts-with? sid "task-")
+                             (try (erlang/binary_to_integer (subs sid 5)) (catch _ nil))))
+                 (h/sessions))]
+    (str "task-" (inc (reduce max 0 ns)))))
+
+(defn- checked [r]
+  (if (and (map? r) (contains? r :error))
+    (throw (ex-info (str (:error r)) {:kind :harness/refused :error (:error r)}))
+    r))
+
+(defn task
+  "Start a task: a new session whose model works on `goal` (prose, or
+   `.bl.org`/`.bl.md` with cells, which run first). Returns at once with the
+   task value; the turn appends to the task's document as it works.
+   `opts` may name the session (`:id`)."
+  ([goal] (task goal {}))
+  ([goal opts]
+   (ensure-keeper!)
+   (let [id (or (:id opts) (next-id))]
+     (checked (h/start-turn {:session id :code goal}))
+     (swap! origins assoc id (BeamLisp.Env/current_ns))
+     (view id))))
+
+(defn say
+  "Add `text` to task `t` for its model: a running turn reads it at its next
+   step and does not end before it has; an idle task starts a new turn."
+  [t text]
+  (ensure-keeper!)
+  (checked (h/steer-turn {:session (id-of t) :code text}))
+  (view t))
+
+(defn steer
+  "Redirect task `t`: the same delivery as `say` (the keeper has one channel
+   into a running turn), named for intent."
+  [t text]
+  (say t text))
+
+(defn note
+  "Add `text` to task `t` without starting a turn: the model reads it at its
+   next step, whenever that is."
+  [t text]
+  (ensure-keeper!)
+  (checked (h/note! (id-of t) text))
+  (view t))
+
+(defn keep!
+  "Save `src` in task `t` as the command `name`, unevaluated, so it can run
+   again with `rerun`. A newer save of the same name replaces it."
+  [t name src]
+  (ensure-keeper!)
+  (checked (h/save-cell! (id-of t) name (if (string? src) src (pr-str src))))
+  (view t))
+
+(defn kept
+  "Task `t`'s saved commands: {name src}."
+  [t]
+  (ensure-keeper!)
+  (h/kept (id-of t)))
+
+(defn rerun
+  "Run task `t`'s saved command `name` now, as you; its cell and result are
+   appended. The cells as {:id :value | :error}."
+  [t name]
+  (ensure-keeper!)
+  (let [src (get (kept t) name)]
+    (when (nil? src)
+      (throw (ex-info (str "No saved command " (pr-str name) " in " (id-of t))
+                      {:kind :harness/no-saved-command :name name :saved (vec (keys (kept t)))})))
+    (:cells (checked (h/evaluate {:session (id-of t) :code src})))))
+
+(defn await
+  "Wait until task `t`'s turn ends, or `ms` (default 15 minutes) pass. The task value."
+  ([t] (await t 900000))
+  ([t ms]
+   (ensure-keeper!)
+   (h/await-turn (id-of t) ms)
+   (view t)))
+
+(defn stop!
+  "Stop task `t`'s running turn. The task value."
+  [t]
+  (ensure-keeper!)
+  (h/stop! (id-of t))
+  (view t))
+
+(defn tail
+  "The last `n` characters (default 4000) of task `t`'s document."
+  ([t] (tail t 4000))
+  ([t n] (ensure-keeper!) (h/tail (id-of t) n)))
+
+(defn tasks
+  "Every session of this project as task values, sorted by id."
+  []
+  (ensure-keeper!)
+  (mapv view (h/sessions)))
+
+(defn smells
+  "Advice for the file at `path` — what the harness tells an agent after it
+   edits that file: [{:smell :line :message :suggest :allowed}]. Allowed
+   findings stay in the list with their reason."
+  [path]
+  (adv/advise path))

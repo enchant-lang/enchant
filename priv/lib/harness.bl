@@ -32,6 +32,7 @@
 (ns harness
   (:require [harness.doc :as hd]
             [harness.model :as model]
+            [deodorant.advice :as adv]
             [vm.core :as vmc]
             [vm.owner :as owner]
             [vm.scope :as scope]))
@@ -120,14 +121,17 @@
 
 (defn- render-section
   "A titled section's text in `fmt`, numbering its cells from `n`: [text ids next-n].
-   `blocks` are {:kind :prose :text} and {:kind :cell :src :result}."
+   `blocks` are {:kind :prose :text} and {:kind :cell :src :result}. A cell
+   marked `:kept` is a saved command: written without a result, because it has
+   not run here."
   [fmt title blocks n]
   (reduce
    (fn [[md ids n] b]
      (if (= :prose (:kind b))
        [(str md "\n" (hd/safe-prose fmt (:text b)) "\n") ids n]
        (let [id (str "c" (inc n))]
-         [(str md "\n" (hd/cell-block fmt id (:src b)) "\n" (hd/result-block fmt id (:result b)))
+         [(str md "\n" (hd/cell-block fmt id (:src b))
+               (if (:kept b) "" (str "\n" (hd/result-block fmt id (:result b)))))
           (conj ids id) (inc n)])))
    [(hd/heading fmt title) [] n]
    blocks))
@@ -321,6 +325,57 @@
 
 ;; ── the turn ────────────────────────────────────────────────────────────────
 
+;; ── feedback after edits ─────────────────────────────────────────────────────
+;;
+;; A model edits files through its cells (File/write!, sh, …), so the keeper
+;; cannot see an edit as a call. It sees it as a CHANGE: the `.bl` sources git
+;; reports as changed, with their modification times, before and after a step.
+;; Each source that is new to that set or newer than before is advised
+;; (deodorant.advice), and open findings are appended as an `advice` section —
+;; an operator section, so the model reads it as a user message at its next
+;; step. No git, no advice: nothing is guessed.
+
+(defn- git-changed [root]
+  (try
+    (let [r (System/cmd "git" (list "-C" root "status" "--porcelain" "--untracked-files=all")
+                        (list (tuple :stderr_to_stdout true)))]
+      (if (= 0 (elem r 1))
+        (keep (fn [line]
+                (when (> (count line) 3)
+                  (let [p (subs line 3)
+                        p (if (includes? p " -> ") (last (String/split p " -> ")) p)]
+                    (when (ends-with? p ".bl") p))))
+              (String/split (elem r 0) "\n"))
+        nil))
+    (catch _ nil)))
+
+(defn- changed-sources
+  "{relative-path mtime} of the `.bl` sources git reports changed under
+   `root`, or nil when `root` is not a git checkout."
+  [root]
+  (let [ps (git-changed root)]
+    (when (some? ps)
+      (into {} (keep (fn [p]
+                       (let [f (str root "/" p)]
+                         (when (File/regular? f) [p (:mtime (File/stat! f))])))
+                     ps)))))
+
+(defn- advice-text [path findings]
+  (join "\n" (map (fn [f] (str (:smell f) " · " path ":" (:line f) " — " (:message f) " " (:suggest f)))
+                  findings)))
+
+(defn- advise-edits!
+  "Advise the sources a step changed; append open findings to session `sid`."
+  [sid root before]
+  (let [after (changed-sources root)
+        edited (filter (fn [[p m]] (not= m (get before p))) (or after {}))
+        notes (keep (fn [[p _]]
+                      (let [open (try (adv/open (adv/advise (str root "/" p))) (catch _ []))]
+                        (when (not (empty? open)) (advice-text p open))))
+                    edited)]
+    (when (not (empty? notes))
+      (keep! [:post sid "advice" [{:kind :prose :text (join "\n" notes)}]]))))
+
 (defn- run-turn
   "The model loop for one turn. Each step the model reads the whole document
    and replies; its reply is appended and its cells evaluated. The turn goes on
@@ -342,8 +397,11 @@
                 (keep! [:end sid :failed nil]))
             ;; a reply is read in the format it was written in: a model asked
             ;; for Org may still answer with Markdown fences, and its cells run
-            (let [ps (hd/parts (:ok reply) (hd/format-of (:ok reply) nil nil (:format s)))]
+            (let [ps (hd/parts (:ok reply) (hd/format-of (:ok reply) nil nil (:format s)))
+                  before (when (hd/cells? ps) (changed-sources (:root s)))]
               (post! sid (str "model · " tid " · " step) ps EVAL-TIMEOUT-MS)
+              ;; what the step's cells edited is advised before the next step
+              (when (some? before) (advise-edits! sid (:root s) before))
               (if (or (hd/cells? ps) (= :steered (keep! [:end sid :done seen])))
                 (recur (inc step))
                 :done))))))))
@@ -455,6 +513,58 @@
    (let [t (File/read! (:doc (status sid)))
          c (count t)]
      (if (> c n) (subs t (- c n) c) t))))
+
+;; ── what the operator adds without running the model ─────────────────────────
+;;
+;; A note is text the model reads at its next step; it starts no turn. A saved
+;; cell is a named command written into the document unevaluated, so anyone can
+;; run it again by name (`kept` reads them back from the document — the file
+;; stays the only state).
+
+(def ^:private NAME-PATTERN (Regex/compile! "^[a-z0-9][a-z0-9_-]{0,40}$"))
+
+(defn note!
+  "Append `text` to session `sid` as a note: the model reads it at its next
+   step; no turn starts. The appended text."
+  [sid text]
+  (cond
+    (not (valid-sid? sid)) {:error (str "session must match [a-z0-9][a-z0-9_-]*, got " (pr-str sid))}
+    (blank? (or text "")) {:error "a note needs text"}
+    :else (:md (keep! [:post sid "note" [{:kind :prose :text text}]]))))
+
+(defn save-cell!
+  "Write `src` into session `sid` as the saved command `name`, unevaluated.
+   Saving a name again appends a newer version; `kept` returns the latest."
+  [sid name src]
+  (cond
+    (not (valid-sid? sid)) {:error (str "session must match [a-z0-9][a-z0-9_-]*, got " (pr-str sid))}
+    (not (and (string? name) (Regex/match? NAME-PATTERN name))) {:error (str "a saved cell's name must match [a-z0-9][a-z0-9_-]*, got " (pr-str name))}
+    (blank? (or src "")) {:error "a saved cell needs code"}
+    :else (:md (keep! [:post sid (str "keep " name) [{:kind :cell :src (trim src) :kept true}]]))))
+
+(defn kept
+  "Session `sid`'s saved commands, read from its document: {name src}."
+  [sid]
+  (let [s (status sid)
+        text (File/read! (:doc s))]
+    (hd/kept-cells text (or (:format s) (hd/document-format text)))))
+
+(defn root
+  "The project root the keeper serves."
+  []
+  (keep! [:root]))
+
+(defn sessions
+  "Every session with a document under the project root, sorted by id."
+  []
+  (let [dir (str (root) "/.local/harness")]
+    (if (File/dir? dir)
+      (sort (distinct (keep (fn [f]
+                              (cond (ends-with? f ".bl.org") (subs f 0 (- (count f) 7))
+                                    (ends-with? f ".bl.md") (subs f 0 (- (count f) 6))
+                                    :else nil))
+                            (File/ls! dir))))
+      ())))
 
 (defn in-vm
   "Run `thunk` in VM `vm`'s env and scope, or as-is when `vm` is nil (cold)."

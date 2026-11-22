@@ -1,0 +1,128 @@
+; test/bl/harness_repl_test.bl — the harness as prompt functions.
+; Run: ./bin/bl test test/bl/harness_repl_test.bl
+;
+; The keeper runs against a scratch root and a SCRIPTED model, as in
+; harness_test.bl. These pin what the prompt relies on: a task is a value
+; every function accepts, a note never starts a turn, a saved command is in the
+; document unevaluated and runs again by name, and the document stays .bl.org.
+
+(ns harness-repl-test
+  (:require [harness :as h]
+            [harness.repl :as r]
+            [harness.model :as model]
+            [bl.doc :as bldoc]))
+
+(defn- scratch []
+  (let [root (str (System/tmp_dir) "/bl-harness-repl-test-" (erlang/unique_integer (list :positive)))]
+    (File/mkdir_p! root)
+    root))
+
+(defn- scripted [replies]
+  (let [left (atom replies)]
+    (fn [_root _ns _doc]
+      (let [x (first @left)]
+        (swap! left rest)
+        {:ok (or x "Done.")}))))
+
+(defn- with-keeper [step f]
+  (h/stop-keeper)
+  (let [root (scratch)]
+    (h/start-keeper root nil {:step step})
+    (try (f root) (finally (h/stop-keeper)))))
+
+(defn- text [t] (File/read! (:doc (r/view t))))
+
+(deftest a-task-is-a-value-and-ids-count-up
+  (with-keeper (scripted ["#+begin_src beam-lisp\n(* 6 7)\n#+end_src" "It is 42."])
+    (fn [_root]
+      (let [t (r/task "What is 6 times 7?")]
+        (is (= "task-1" (:task t)))
+        (is (= :running (:status t)))
+        (is (ends-with? (:doc t) "/.local/harness/task-1.bl.org"))
+        (let [done (r/await t 5000)]
+          (is (= :done (:status done)))
+          (is (includes? (text t) "#+RESULTS: c1\n: 42\n"))))
+      (is (= "task-2" (:task (r/task "Another." {}))))
+      (r/await "task-2" 5000)
+      (is (= ["task-1" "task-2"] (mapv :task (r/tasks)))))))
+
+(deftest a-note-is-read-at-the-next-step-and-starts-nothing
+  (let [seen (atom [])
+        step (fn [_root _ns doc] (swap! seen conj doc) {:ok "Done."})]
+    (with-keeper step
+      (fn [_root]
+        (let [t (r/task "First." {:id "n1"})]
+          (r/await t 5000)
+          (is (= 1 (count @seen)))
+          (r/note t "The 1500 ms sleep is on purpose.")
+          (is (= :done (:status (r/view t))) "a note starts no turn")
+          (is (= 1 (count @seen)))
+          (is (includes? (text t) "\n* note\n\nThe 1500 ms sleep is on purpose.\n"))
+          (r/say t "Go on.")
+          (r/await t 5000)
+          (is (= 2 (count @seen)) "say starts a turn on an idle task")
+          (is (includes? (last @seen) "The 1500 ms sleep is on purpose.") "the next step read the note")
+          (is (some (fn [m] (and (= "user" (:role m)) (includes? (:content m) "on purpose")))
+                    (model/messages (last @seen)))
+              "a note is a user message"))))))
+
+(deftest a-saved-command-is-unevaluated-and-runs-again-by-name
+  (with-keeper (scripted [])
+    (fn [_root]
+      (let [t (r/task "Hold commands." {:id "k1"})]
+        (r/await t 5000)
+        (r/keep! t "answer" "(+ 40 2)")
+        (let [doc (:ok (bldoc/slice-text (text t) :org))
+              kept-id (:id (last (filter #(= :cell (:kind %)) (:spans doc))))]
+          (is (not (some #(and (= :result (:kind %)) (= kept-id (:id %))) (:spans doc)))
+              "a saved command has no result until it runs"))
+        (is (= {"answer" "(+ 40 2)"} (r/kept t)))
+        (r/keep! t "answer" '(* 6 7))
+        (is (= {"answer" "(* 6 7)"} (r/kept t)) "the newest save wins; a form is saved as its text")
+        (is (= "42" (:value (first (r/rerun t "answer")))))
+        (is (includes? (text t) "\n* eval\n"))
+        (is (= :harness/no-saved-command
+               (try (r/rerun t "missing") nil (catch e (:kind (ex-data e))))))))))
+
+(deftest refusals-are-data
+  (with-keeper (scripted [])
+    (fn [_root]
+      (is (= :harness/refused (try (r/note "../up" "x") nil (catch e (:kind (ex-data e))))))
+      (is (= :harness/refused (try (r/keep! "k2" "Bad Name" "1") nil (catch e (:kind (ex-data e))))))
+      (is (= :harness/not-a-task (try (r/view 42) nil (catch e (:kind (ex-data e)))))))))
+
+(deftest stop-ends-a-running-task
+  (with-keeper (fn [_ _ _] (Process/sleep 10000) {:ok "late"})
+    (fn [_root]
+      (let [t (r/task "Slow." {:id "s1"})]
+        (is (= :running (:status t)))
+        (is (= :stopped (:status (r/stop! t))))))))
+
+(deftest an-edit-with-a-fixed-sleep-comes-back-as-advice
+  ;; a real git checkout: the step's cell writes a browser test with a sleep,
+  ;; the keeper sees the change and the NEXT step reads the advice. The cell
+  ;; names the root itself: File/* resolves relative paths against the VM's
+  ;; directory, which in a test VM is not the scratch project.
+  (let [seen (atom [])
+        cell (fn [root]
+               (str "#+begin_src beam-lisp\n"
+                    "(File/mkdir_p! \"" root "/test\")\n"
+                    "(File/write! \"" root "/test/page_test.bl\" \"(ns demo.page-test (:require [browser.page :as page]))\\n(deftest w\\n  (Process/sleep 400))\\n\")\n"
+                    "#+end_src"))
+        n (atom 0)
+        step (fn [root _ns doc]
+               (swap! seen conj doc)
+               (swap! n inc)
+               {:ok (case @n 1 (cell root) 2 "Noted." "Done.")})]
+    (with-keeper step
+      (fn [root]
+        (System/cmd "git" (list "-C" root "init" "-q"))
+        (let [t (r/task "Write the page test." {:id "adv1"})]
+          (r/await t 5000)
+          (let [doc (text t)]
+            (is (includes? doc "\n* advice\n"))
+            (is (includes? doc "fixed-sleep · test/page_test.bl:3"))
+            (is (includes? (second @seen) "fixed-sleep · test/page_test.bl:3") "the next step read it")))))))
+
+(deftest smells-at-the-prompt
+  (is (= [19 33 60 96] (mapv :line (r/smells "optional/browser-port/test/recording_test.bl")))))
