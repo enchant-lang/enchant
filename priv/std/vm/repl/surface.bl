@@ -1,0 +1,335 @@
+; vm/repl/surface.bl — what the web REPL's panels show, as data.
+;
+; The page (vm/repl/page.html) has four surfaces around the prompt, and each
+; one is a question answered here from the running image:
+;
+;   shelf     what this namespace has loaded: its aliases and refers
+;   record    one namespace or one var: what it does, its publics, its source,
+;             who uses it, which tests name it (Understory's record, applied
+;             to the realm)
+;   tiles     the harness tasks of this project, with their saved commands
+;   smells    advice for the form being typed, read the way the harness reads
+;             a changed file
+;
+; plus the two the prompt needs: the namespaces `require` can name, grouped by
+; where they live, and the repair of a form that does not read.
+;
+; Every function returns string-keyed maps so vm.repl can send them as JSON
+; unchanged. Nothing here writes: an action in the page is a REPL form the
+; user can see in the history — a tile's ↻ evaluates `(rerun "task-1" "x")`.
+
+(ns vm.repl.surface
+  (:require [deodorant.advice :as adv]
+            [repair]
+            [clojure.repl]
+            [harness :as h]
+            [harness.repl :as hr]))
+
+;; ── the namespaces a prompt can require ─────────────────────────────────────
+
+(defn- strip-ext [rel]
+  (cond (ends-with? rel ".bl.org") (subs rel 0 (- (count rel) 7))
+        (ends-with? rel ".bl.md") (subs rel 0 (- (count rel) 6))
+        (ends-with? rel ".bl") (subs rel 0 (- (count rel) 3))
+        :else rel))
+
+(defn ns-of-path
+  "The namespace a tier-relative path holds: `harness/repl.bl` → harness.repl."
+  [rel]
+  (-> (strip-ext rel) (String/replace "/" ".") (String/replace "_" "-")))
+
+(defn gloss-of
+  "One line saying what a source is, from its first line: the words after the
+   ` — ` of `; harness/repl.bl — the harness as …`, a `# ns — …` heading, or an
+   Org `#+title:`. Nil when the file opens with code."
+  [text]
+  (let [line (String/trim (first (String/split (or text "") "\n")))
+        line (cond (starts-with? line "#+title:") (String/trim (subs line 8))
+                   :else (String/trim (Regex/replace (Regex/compile! "^[;#]+") line "")))
+        parts (String/split line " — ")]
+    (cond (= "" line) nil
+          (starts-with? line "(") nil
+          (> (count parts) 1) (join " — " (rest parts))
+          :else line)))
+
+(def ^:private TIERS ["std" "lib" "compat"])
+
+(defn- scan-tiers []
+  (let [root (BeamLisp.Tiers/priv_root)]
+    (vec
+     (for [tier TIERS
+           path (sort (Path/wildcard (str root "/" tier "/**/*.{bl,bl.md,bl.org}")))
+           :let [rel (subs path (inc (count (str root "/" tier))))]
+           :when (not (some? (index-of rel "/test")))]
+       {"ns" (ns-of-path rel) "kind" tier "path" path
+        "gloss" (gloss-of (try (first (String/split (File/read! path) "\n" (list (tuple :parts 2))))
+                               (catch _ nil)))}))))
+
+(defn catalog
+  "Every namespace on the tiers, once per daemon: [{ns kind path gloss}]. The
+   tiers change with a checkout, which ships with a restart; namespaces made at
+   the prompt are added by `namespaces`."
+  []
+  (let [key (tuple :vm-repl-surface :catalog)
+        cached (erlang/apply :persistent_term :get (list key nil))]
+    (if (nil? cached)
+      (let [c (scan-tiers)] (erlang/apply :persistent_term :put (list key c)) c)
+      cached)))
+
+(defn namespaces
+  "What `require` can name, each marked `loaded`: the tiers, then any loaded
+   namespace with no tier file (one made at the prompt, or the project's own)
+   as kind `here`."
+  []
+  (let [loaded (set (BeamLisp.Env/namespaces))
+        cat (catalog)
+        known (set (map #(get % "ns") cat))
+        extra (for [n (sort loaded)
+                    :when (and (not (contains? known n))
+                               (not (starts-with? n "harness.session."))
+                               (not (starts-with? n "bl.session")))]
+                {"ns" n "kind" "here" "path" nil "gloss" nil})]
+    (mapv (fn [m] (assoc m "loaded" (contains? loaded (get m "ns"))))
+          (concat cat extra))))
+
+(defn- entry [n]
+  (or (first (filter #(= n (get % "ns")) (catalog)))
+      {"ns" n "kind" "here" "path" nil "gloss" nil}))
+
+;; ── the shelf ───────────────────────────────────────────────────────────────
+
+(defn- refers-of [cur]
+  (BeamLisp.Env/match (erlang/list_to_tuple
+                       (list (erlang/list_to_tuple (list :refer cur :$1)) :$2))))
+
+(defn shelf
+  "What namespace `cur` has loaded for the prompt: one row per namespace it
+   aliases or refers from, [{ns alias refers kind gloss publics}], aliases
+   first. `clojure.core` and `core` are the air, not the shelf."
+  [cur]
+  (let [aliases (ns-aliases (symbol cur))
+        by-ns (reduce (fn [acc [nm src]] (assoc acc (str src) (conj (get acc (str src) []) (str nm))))
+                      {} (refers-of cur))
+        targets (distinct (concat (map str (vals aliases)) (sort (keys by-ns))))]
+    (vec
+     (for [n targets
+           :when (not (contains? #{"core" "clojure.core"} n))
+           :let [e (entry n)
+                 alias (some (fn [[a t]] (when (= (str t) n) (str a))) aliases)]]
+       {"ns" n "alias" alias "refers" (vec (sort (get by-ns n [])))
+        "kind" (get e "kind") "gloss" (get e "gloss")
+        "publics" (count (try (BeamLisp.Env/public_names n) (catch _ [])))}))))
+
+;; ── the record ──────────────────────────────────────────────────────────────
+
+(defn- first-line [s]
+  (when (and (string? s) (not= "" (String/trim s)))
+    (String/trim (first (String/split (String/trim s) "\n")))))
+
+(defn- doc-of [n name]
+  (let [d (try (BeamLisp.Env/doc_string n name) (catch _ nil))]
+    (cond (map? d) (:doc d)
+          (string? d) d
+          :else nil)))
+
+(defn- header-of
+  "The `(ns …)` text at the top of `text`: enough to find a require."
+  [text]
+  (subs text 0 (min (count text) 4000)))
+
+(defn- requirer
+  "How namespace `user` requires `n`: {ns alias refers}, or nil. Read from its
+   source header, because a precompiled namespace records no alias rows; a
+   namespace made at the prompt has no source, so its Env rows answer."
+  [user n]
+  (let [text (try (BeamLisp.Loader/source_content user) (catch _ nil))
+        q (Regex/escape n)
+        m (when (string? text)
+            (Regex/run (Regex/compile! (str "\\[\\s*" q "(\\s[^\\[\\]]*(?:\\[[^\\]]*\\][^\\[\\]]*)*)?\\]")) (header-of text)))
+        rows-alias (some (fn [[a t]] (when (= (str t) n) (str a))) (try (ns-aliases (symbol user)) (catch _ {})))
+        rows-refers (vec (for [[nm src] (refers-of user) :when (= (str src) n)] (str nm)))]
+    (cond
+      m (let [opts (or (second m) "")
+              as (Regex/run (Regex/compile! ":as\\s+([^\\s\\]]+)") opts)
+              rf (Regex/run (Regex/compile! ":refer\\s+\\[([^\\]]*)\\]") opts)]
+          {:ns user :alias (second as)
+           :refers (if rf (vec (remove #(= "" %) (Regex/split (Regex/compile! "\\s+") (String/trim (second rf))))) [])})
+      (or rows-alias (seq rows-refers)) {:ns user :alias rows-alias :refers rows-refers}
+      :else nil)))
+
+(defn- requirers [n]
+  (vec (keep (fn [user] (when (and (not= user n) (not (starts-with? user "harness.session.")))
+                          (requirer user n)))
+             (sort (BeamLisp.Env/namespaces)))))
+
+(defn- used-by
+  "Loaded namespaces that require `n`, sorted."
+  [n]
+  (mapv :ns (requirers n)))
+
+(defn- test-files
+  "Test files under `root` whose name matches the namespace's last segment —
+   `browser.page` → *page_test.bl. A name match, not a call graph."
+  [root n]
+  (let [last-seg (String/replace (last (String/split n ".")) "-" "_")
+        pats [(str root "/test/**/*" last-seg "_test.bl")
+              (str root "/optional/*/test/**/*" last-seg "_test.bl")]]
+    (vec (take 8 (sort (distinct (mapcat #(Path/wildcard %) pats)))))))
+
+(defn- relative [root path]
+  (if (and (string? path) (starts-with? path (str root "/")))
+    (subs path (inc (count root)))
+    path))
+
+(defn ns-record
+  "The record of namespace `n`: {ns kind gloss path publics usedBy tests}, each
+   public {name arglists doc}. `arglists` is vm.repl's one source of that text."
+  [root n arglists]
+  (try (BeamLisp.Loader/ensure_loaded n) (catch _ nil))
+  (let [e (entry n)
+        path (or (get e "path") (try (BeamLisp.Loader/source_path n) (catch _ nil)))
+        names (sort (try (BeamLisp.Env/public_names n) (catch _ [])))]
+    {"ns" n "kind" (get e "kind") "gloss" (get e "gloss")
+     "path" (relative root path)
+     "loaded" (contains? (set (BeamLisp.Env/namespaces)) n)
+     "publics" (mapv (fn [nm] {"name" (str nm) "arglists" (arglists n (str nm))
+                               "doc" (first-line (doc-of n (str nm)))})
+                     names)
+     "usedBy" (used-by n)
+     "tests" (mapv #(relative root %) (test-files root n))}))
+
+(defn- line-of-def [text name]
+  (let [lines (String/split text "\n")
+        pat (Regex/compile! (str "^\\s*\\((defn-?|def|defmacro|defserver|defsmell|defadvice)\\s+(\\^\\S+\\s+)?"
+                                 (Regex/escape name) "(\\s|$)"))]
+    (some (fn [[i l]] (when (Regex/match? pat l) (inc i)))
+          (map-indexed (fn [i l] [i l]) lines))))
+
+(defn- callers
+  "Where loaded namespaces that require `n` write `alias/name` or the referred
+   `name`: [{ns path line text}]. A text search over their sources, so it is
+   honest about what it is: no macro expansion, no dynamic calls."
+  [root n name]
+  (vec
+   (take 20
+    (for [{user :ns alias :alias refers :refers} (requirers n)
+          :let [needle (cond alias (str alias "/" name)
+                             (some #(= % name) refers) name
+                             :else nil)
+                text (when needle (try (BeamLisp.Loader/source_content user) (catch _ nil)))
+                path (try (BeamLisp.Loader/source_path user) (catch _ nil))]
+          :when (string? text)
+          [i l] (map-indexed (fn [i l] [i l]) (String/split text "\n"))
+          :when (some? (index-of l (str "(" needle)))]
+      {"ns" user "path" (relative root path) "line" (inc i) "text" (String/trim l)}))))
+
+(defn var-record
+  "The record of `n/name`: {ns name arglists doc source path line callers}."
+  [root n name arglists]
+  (try (BeamLisp.Loader/ensure_loaded n) (catch _ nil))
+  (let [text (try (BeamLisp.Loader/source_content n) (catch _ nil))
+        path (try (BeamLisp.Loader/source_path n) (catch _ nil))
+        src (try (clojure.repl/source-fn (symbol n name)) (catch _ nil))]
+    {"ns" n "name" name "arglists" (arglists n name) "doc" (doc-of n name)
+     "source" src "path" (relative root path)
+     "line" (when (string? text) (line-of-def text name))
+     "callers" (callers root n name)}))
+
+;; ── tiles ───────────────────────────────────────────────────────────────────
+
+(defn- goal-of [doc-text]
+  (let [i (index-of doc-text "\n* task\n")]
+    (when (some? i)
+      (let [body (subs doc-text (+ i 8))
+            end (index-of body "\n* ")]
+        (first-line (if (some? end) (subs body 0 end) body))))))
+
+(defn tiles
+  "The project's harness tasks: [{task status turns goal kept origin}], newest
+   last. Empty when no keeper runs here — the panel does not start one."
+  []
+  (if-not (h/running?)
+    []
+    (mapv (fn [v]
+            (let [text (try (File/read! (:doc v)) (catch _ ""))]
+              {"task" (:task v) "status" (name (or (:status v) :idle)) "turns" (:turns v)
+               "goal" (goal-of text) "origin" (:origin v)
+               "kept" (vec (sort (keys (try (hr/kept (:task v)) (catch _ {})))))}))
+          (hr/tasks))))
+
+(defn transcript
+  "Task `id`'s whole document: {task status text}."
+  [id]
+  (let [v (hr/view id)]
+    {"task" id "status" (name (or (:status v) :idle))
+     "text" (try (File/read! (:doc v)) (catch _ ""))}))
+
+;; ── smells at the prompt ────────────────────────────────────────────────────
+
+(defn prompt-smells
+  "Advice for `src` typed in namespace `cur`, read as if it sat under `cur`'s
+   own requires — so a prompt that aliased `browser.page` is a browser file,
+   exactly as the harness would judge it. [{smell line form message suggest allowed}]."
+  [cur src]
+  (let [reqs (distinct (concat (map str (vals (ns-aliases (symbol cur))))
+                               (map #(str (second %)) (refers-of cur))))
+        header (str "(ns " cur " (:require " (join " " (map #(str "[" % "]") reqs)) "))\n")]
+    (try
+      (mapv (fn [f] {"smell" (str (:smell f)) "line" (dec (:line f)) "form" (:form f)
+                     "message" (:message f) "suggest" (:suggest f)
+                     "allowed" (:allowed f)})
+            (filter #(pos? (dec (:line %))) (adv/advise-source (str header src) {})))
+      (catch _ []))))
+
+;; ── repair at Enter ─────────────────────────────────────────────────────────
+
+(def ^:private CLOSERS #{")" "]" "}"})
+
+(defn- prompt-read
+  "repair's :read for the prompt: the reader's structured diagnostic, or nil.
+   bl.report's verifier answers only yes or no, and repair builds its
+   candidates from the diagnostic's kind, offset and expected closer."
+  [src _file]
+  (let [r (BeamLisp.Ns.Reader/read src {:diagnostics :collect})]
+    (when (:error r) {:error (:error r)})))
+
+(def ^:private OPTS {:file "prompt" :read prompt-read})
+(defn- reads? [src] (nil? (prompt-read src "prompt")))
+(def ^:private CLOSING #{:insert-closer-at-eof :insert-closer-at-line-end})
+
+(defn- close-open
+  "`src` with the closers repair chooses, one at a time, until it reads — or
+   nil when a step is not a closer, is ambiguous, or 32 steps do not suffice.
+   repair's own `fix-src` applies only a fix that clears the form in one edit;
+   a form missing two closers needs two, each re-read."
+  [src opts]
+  (loop [s src n 0]
+    ;; no :ambiguous check: closing at the line end and at the end of a
+    ;; one-line form tie, and give the same text; the caller accepts only a
+    ;; result that is the input plus closers
+    (cond (reads? s) s
+          (> n 32) nil
+          :else (let [o (repair/options s opts)
+                      c (:chosen o)]
+                  (if (and (map? c) (contains? CLOSING (:kind c)))
+                    (recur (repair/apply-fix s c) (inc n))
+                    nil)))))
+
+(defn repair-prompt
+  "What Enter does with a form that does not read. `auto` is true only when the
+   repair adds closers at the end and nothing else (J2): the page applies it
+   and runs the form. Otherwise the prose says what is wrong and the page
+   offers the repair when there is one. {reads auto src added solved explain}."
+  [src]
+  (let [opts OPTS]
+    (if (reads? src)
+      {"reads" true "auto" false "src" src "added" "" "solved" true "explain" ""}
+      (let [o (repair/options src opts)
+            closed (close-open src opts)
+            added (when (and (string? closed) (starts-with? closed src)) (subs closed (count src)))
+            auto (and (string? added) (not= "" added)
+                      (every? #(contains? CLOSERS %) (String/graphemes added)))
+            fixed (if auto {:src closed :ok true} (repair/fix-src src opts))]
+        {"reads" false "auto" (boolean auto) "src" (:src fixed)
+         "added" (if auto added "") "solved" (boolean (:ok fixed))
+         "explain" (repair/explain-of src opts o)}))))
