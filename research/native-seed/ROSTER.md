@@ -38,9 +38,16 @@ per batch, and runs the gate tests.** A card is ✅ only after that gate.
   checkout's client against the main SDK:
   `MAIN=/home/othman/code/undefine/beam-lisp--execution-protocol` and
   `$MAIN/bin/bl ...`.
-- **Run every check through `work run --memory 4G --timeout S -- ...`.** At
-  most two run at once per account; checks queue behind other agents'. Keep each
-  under ~10 minutes. Don't use 6G; it's refused.
+- **Run every check through `work run --memory 4G --timeout S -- ...`.** The
+  queue allows two running checks for the whole account, shared with every other
+  agent on the station. A check can wait 20 minutes before it starts (seen
+  2026-11-22), so:
+  - batch: one `work run -- bash -lc 'cargo test && cargo build'`, and one
+    `bl test a.bl b.bl c.bl`, never one check per file;
+  - set `--timeout` to cover the queue wait too (1500–2400);
+  - read the code while a check waits; don't poll it.
+
+  Don't use 6G; it's refused.
 - **Don't touch** `priv/lib/scenario.bl`,
   `test/bl/scenario/browser_world_verdict_test.bl` or `research/field-station/`.
   Delete only by explicit path; `rm` inside `bash -c` is blocked.
