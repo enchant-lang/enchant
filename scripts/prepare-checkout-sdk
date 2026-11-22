@@ -26,11 +26,109 @@ for prerequisite in nix-build systemd-run python3 flock; do
   command -v "$prerequisite" >/dev/null || { echo "bl: required preparation tool missing: $prerequisite" >&2; exit 69; }
 done
 mkdir -p "$root/.bl/sdks"
+verify_selection() {
+  python3 - "$1" "$2" <<'PYVERIFY'
+import json, pathlib, re, sys
+output, coordinator = map(pathlib.Path, sys.argv[1:])
+assert re.fullmatch(r'/nix/store/[0-9a-z]{32}-[^/]+', str(output))
+metadata = json.loads((output / 'artifact.json').read_text())
+assert metadata['version'] == 1 and metadata['kind'] == 'sdk'
+assert metadata['target'] == 'x86_64-linux'
+assert metadata['coordinator'] == str(coordinator)
+assert (output / 'preparation-coordinator').is_symlink()
+assert (output / 'preparation-coordinator').resolve(strict=True) == coordinator
+assert (output / 'image/ebin/Elixir.BeamLisp.Launcher.beam').is_file()
+assert (output / 'bin/bl').is_file()
+cm = json.loads((coordinator / 'artifact.json').read_text())
+assert cm['version'] == 1 and cm['kind'] == 'artifact-coordinator-runtime'
+assert (coordinator / 'foundry/bin/preparation-operation.bl').is_file()
+PYVERIFY
+}
+# The lock holder names itself here so a waiting caller can say whom it waits
+# for and where that preparation reports progress. The file is advisory: it is
+# read only while the lock is held, and every new holder rewrites it.
+owner_file="$root/.bl/sdks/preparation.owner"
+record_owner() {
+  {
+    printf 'pid=%s\nstarted=%s\n' "$$" "$owner_started"
+    printf 'caller=%s\n' "$(ps -o args= -p "$PPID" 2>/dev/null | cut -c1-200)"
+    printf 'fingerprint=%s\njob=%s\nprogress=%s\n' "${fingerprint:-}" "${job:-}" "${progress:-}"
+  } >"$owner_file.tmp" 2>/dev/null && mv -T "$owner_file.tmp" "$owner_file" 2>/dev/null || true
+}
+describe_owner() {
+  local pid='' started='' caller='' held='' log='' line
+  if [ -f "$owner_file" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        pid=*) pid=${line#pid=} ;;
+        started=*) started=${line#started=} ;;
+        caller=*) caller=${line#caller=} ;;
+        fingerprint=*) held=${line#fingerprint=} ;;
+        progress=*) log=${line#progress=} ;;
+      esac
+    done <"$owner_file"
+  fi
+  echo "bl: waiting for the SDK preparation of this checkout ($root)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "bl:   held by pid $pid since $started: ${caller:-unknown caller}"
+    if [ -n "$held" ]; then echo "bl:   preparing SDK inputs $held"; fi
+    if [ -n "$log" ]; then echo "bl:   progress: tail -f $log"; fi
+  else
+    echo "bl:   holder not recorded; see: fuser -v $root/.bl/sdks/preparation.lock"
+  fi
+  echo "bl:   BL_SDK_REUSE_CURRENT=1 runs on the current SDK instead; BL_SDK_LOCK_WAIT=SECONDS bounds this wait"
+}
+# While another caller prepares, BL_SDK_REUSE_CURRENT=1 selects the published
+# current SDK under its own captured fingerprint instead of waiting. It never
+# relabels: the emitted fingerprint is the one that SDK was produced from, so a
+# caller that needs the edited engine must not set it. With the lock free the
+# variable has no effect and preparation proceeds as usual.
+reuse_current_sdk() {
+  local output coordinator link reused=''
+  output=$(readlink -f "$root/.bl/sdks/current-sdk" 2>/dev/null) || return 1
+  [ -f "$output/artifact.json" ] || return 1
+  for link in "$root"/.bl/sdks/*/result-sdk; do
+    if [ -L "$link" ] && [ "$(readlink -f "$link")" = "$output" ]; then
+      reused=${link%/result-sdk}; reused=${reused##*/}; break
+    fi
+  done
+  [[ "$reused" =~ ^[0-9a-f]{64}$ ]] || return 1
+  coordinator=$(readlink -f "$output/preparation-coordinator" 2>/dev/null) || return 1
+  verify_selection "$output" "$coordinator" 2>/dev/null || return 1
+  echo "bl: SDK preparation busy; BL_SDK_REUSE_CURRENT=1 selects current SDK $reused, which may predate engine edits" >&2
+  fingerprint=$reused
+  emit_selection "$output"
+}
+
 # Fingerprint and capture occur after the preparation lock. In particular a
 # waiting caller never adopts a fingerprint computed before its predecessor.
+# The wait is visible and bounded: BL_SDK_LOCK_WAIT seconds (default 3900,
+# above a preparation's own RuntimeMaxSec), then exit 75 (temporary failure).
+lock_wait=${BL_SDK_LOCK_WAIT:-3900}
+[[ "$lock_wait" =~ ^[0-9]+$ ]] || { echo 'bl: BL_SDK_LOCK_WAIT must be a whole number of seconds' >&2; exit 64; }
 exec 9>"$root/.bl/sdks/preparation.lock"
-flock -x 9
+if ! flock -n -x 9; then
+  if [ "${BL_SDK_REUSE_CURRENT:-0}" = 1 ] && reuse_current_sdk; then exit 0; fi
+  describe_owner >&2
+  waited=0
+  while :; do
+    step=$((lock_wait - waited))
+    if [ "$step" -gt 60 ]; then step=60; fi
+    if [ "$step" -le 0 ]; then
+      echo "bl: gave up after ${waited}s waiting for the SDK preparation lock; that preparation continues" >&2
+      exit 75
+    fi
+    if flock -w "$step" -x 9; then break; fi
+    waited=$((waited + step))
+    if [ "$waited" -lt "$lock_wait" ]; then
+      echo "bl: still waiting for the SDK preparation (${waited}s of ${lock_wait}s)" >&2
+    fi
+  done
+fi
+owner_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+record_owner
 fingerprint=$(fingerprint_of_tree)
+record_owner
 directory="$root/.bl/sdks/$fingerprint"
 mkdir -p "$directory"
 retained="$directory/result-sdk"
@@ -89,24 +187,6 @@ dispatch() {
   wait "$preparation_reader" || true
   return "$preparation_status"
 }
-verify_selection() {
-  python3 - "$1" "$2" <<'PYVERIFY'
-import json, pathlib, re, sys
-output, coordinator = map(pathlib.Path, sys.argv[1:])
-assert re.fullmatch(r'/nix/store/[0-9a-z]{32}-[^/]+', str(output))
-metadata = json.loads((output / 'artifact.json').read_text())
-assert metadata['version'] == 1 and metadata['kind'] == 'sdk'
-assert metadata['target'] == 'x86_64-linux'
-assert metadata['coordinator'] == str(coordinator)
-assert (output / 'preparation-coordinator').is_symlink()
-assert (output / 'preparation-coordinator').resolve(strict=True) == coordinator
-assert (output / 'image/ebin/Elixir.BeamLisp.Launcher.beam').is_file()
-assert (output / 'bin/bl').is_file()
-cm = json.loads((coordinator / 'artifact.json').read_text())
-assert cm['version'] == 1 and cm['kind'] == 'artifact-coordinator-runtime'
-assert (coordinator / 'foundry/bin/preparation-operation.bl').is_file()
-PYVERIFY
-}
 
 # A restored selection owns its original coordinator. A freshly evaluated
 # coordinator can differ solely because the predecessor hint changed.
@@ -155,6 +235,8 @@ trap remember_preparation EXIT
 # can die while its managed await service continues writing; never truncate or
 # parse that surviving observer's files when another caller rejoins the job.
 transport=$(mktemp -d "$job/client-XXXXXXXXXXXX")
+progress="$transport/client-prepare.log"
+record_owner
 # Unique job directories never move: durable handles bind their path/inode.
 if [ ! -L "$job/source-retained" ]; then
   echo 'bl: capturing the immutable engine source through the configured Nix backend' >&2
