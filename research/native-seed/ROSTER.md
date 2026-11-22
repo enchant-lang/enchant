@@ -104,7 +104,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
 ### U — the request path (what every user pays)
 
-#### U1 🔨 The checkout client inventories declared inputs only · S · Rust · branch `lane/client` (2026-11-22)
+#### U1 🔨 The checkout client inventories declared inputs only · S · Rust
 - **Why.** Each `./bin/bl` request first hashes the project's sources so the
   warm VM can tell whether they changed.
   - `checkout_sources_walk` in `tooling/drop/src/checkout.rs` (~line 374)
@@ -139,7 +139,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   roots, never fewer.
 - **Conflicts with** U2 (both edit `tooling/drop`, one platform build).
 
-#### U2 🔨 A warm VM that dies at start fails the request at once · S · Rust · branch `lane/client` (2026-11-22)
+#### U2 ✅ A warm VM that dies at start fails the request at once · S · Rust
 - **Why.** `retry_from_warm` → `wait_ready` (`tooling/drop/src/launcher.rs`
   ~line 525) waits the whole readiness deadline even when the VM it started
   has already exited. On 2026-11-22 the installed `bl` inside this checkout
@@ -157,7 +157,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
     exception text.
 - **Conflicts with** U1.
 
-#### U3 🔨 A failed SDK preparation names its first cause · H/S · BL · branch `lane/tools` (2026-11-22)
+#### U3 🧪 A failed SDK preparation names its first cause · H/S · BL
 - **Why.** A failed preparation reports only
   `Preparation ended failed: exited with code 1` (`nix/preparation-operation.bl`
   line ~481). On 2026-11-22 the real cause, a cached nixbuild.net failure for
@@ -175,7 +175,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - The test fails without the change.
 - **Note.** `nix/` is an SDK input: batch this with other SDK-input cards.
 
-#### U4 🔒 Lock work per request proportional to change · S+ · BL runtime (after U1)
+#### U4 🧪 Lock work per request proportional to change — retargeted: locks cost 1–3 ms per request, Env full-table scans cost 15–30 ms; U4b replaces the scans with exact-key lookups (`lane/runtime`, Env own time per spawn 1,904 → 971 µs) · S+ · BL runtime (after U1)
 - **Why.** Journal 06, "Where a warm request waits": ~84
   `bl_native_publication_lock` acquisitions per warm request, through
   `run_code_callback_entry!`, `retain_code_components!`,
@@ -216,7 +216,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
 ### N — the native compiler on the default path
 
-#### N1 🔨 `cerl` as data on the native host · S+ · native-only · branch `lane/cerl` (2026-11-22)
+#### N1 ✅ `cerl` as data on the native host · S+ · native-only
 - **Why.** The native image already carries `lower` and `lower-core`
   (`priv/boot/lower.bl`, `priv/boot/lower-core.bl`): bl-ANF → Core Erlang.
   They build Core through OTP's `cerl` module, which doesn't exist on Chez. No
@@ -306,7 +306,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
 ### C — native compile throughput (only matters for edits and SDK builds)
 
-#### C1 🔨 Emitter `ident` without the per-character join · H · native-only · branch `lane/native-speed` (2026-11-22)
+#### C1 ✅ Emitter `ident` without the per-character join · H · native-only
 - **Why.** `ident` (`research/native-seed/src/native/scheme.bl` line 32) turns
   every emitted name into `"v"` plus `"_<code>"` per character. It maps over
   the characters and joins the list, for every name, every time.
@@ -318,7 +318,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - `pair` (256 runs: `--reps 8 --rounds 8`) shows the same bytes; report both
     medians. If it isn't faster, record that and don't merge.
 
-#### C2 🔨 Interned names on the native host · S · native-only · branch `lane/native-speed` (2026-11-22)
+#### C2 🅿️ Interned names on the native host · S · native-only
 - **Why.** `string-hash`/`equal-hash` take ~4–5% of the reader job. Names are
   strings, so every lookup and every memo pays a hash.
 - **Change.** The reader interns symbol and keyword names (one Chez symbol or
@@ -333,7 +333,7 @@ census to start from.
 
 ### T — tools
 
-#### T1 🔨 A host check without an SDK build · S · branch `lane/tools` (2026-11-22)
+#### T1 🧪 A host check without an SDK build · S
 - **Why.** `priv/` edits have no inner loop. `scripts/check-runtime-hosts`
   compiles changed `priv/host` modules with the existing compiler and tests them
   in a capped VM. It fails before starting: `elixir is not on PATH`, and
@@ -351,7 +351,7 @@ census to start from.
 
 ### J — JavaScript target
 
-#### J1 🔨 Four JS test files fail on `main` · S · BL (`priv/lib/js`) · branch `lane/tools` (2026-11-22)
+#### J1 🧪 Four JS test files fail on `main` · S · BL (`priv/lib/js`)
 - **Why.** These four fail at HEAD, both with and without the 2026-11-22
   shadowing fix. Both sessions checked:
   - `test/bl/js_compiled_core_test.bl`
@@ -396,6 +396,9 @@ Cards in one lane conflict; lanes run at the same time.
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | U2: a warm VM that dies at start fails the request at once | The client stops waiting when the VM it started exits and prints the log tail: 18 s including VM start, was 120 s of silence. cargo test 114 pass (1 environmental builder test, pre-existing) | `ad3274b1b` |
+| ✅ | N1: `cerl` as data on the native host | 38 `cerl` functions build OTP 29's exact records on Chez; the real `lower` runs on Chez; 75 rows BEAM vs Chez byte-identical; derived image 12/12 qualify gates | `701802dc9` |
+| ✅ | C1: emitter `ident` in one `iolist_to_binary` | `candidate --codegen` 13/13 with fixpoint; pair: same bytes, emit 26.7 → 25.7 ms (median 123.9 → 119.8 ms, near noise) | `aacc7bd25` |
 | ✅ | Scratch removed | `research/native-seed/out` 32 GB → 2.7 GB (kept `cutover-core-build-v3`, `chez-main`) | 2026-11-22 |
 | ✅ | SDK preparation from a layered previous SDK | The unit archive read the image's linked `unit-store` and refused the link, so every preparation after the first layered SDK failed; it reads the library's directory: 862 s key rotation, passes | `d2cd91781` and after |
 | ✅ | Disk floor | User timer `nix-store-floor` (every 15 min): below 40 GB free, a bounded `nix-store --gc` toward 80 GB; dry-run checked | `~/.config/systemd/user/nix-store-floor.timer` |
