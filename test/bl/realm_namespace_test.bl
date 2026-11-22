@@ -77,3 +77,21 @@
   (let [e (BeamLisp.Env/fork :global)]
     (testing "no realm key: the global path, unchanged"
       (is (= :Elixir.BeamLisp.Ns.Rn-app (BeamLisp.Env/with_env e (fn [] (BeamLisp.Link/module_for "rn-app"))))))))
+
+;; A helper that gains a function after another realm already used it (the
+;; `test.bl.seed-support` case): the NEW name is not a var anywhere yet, so the
+;; caller compiles against the helper's source, and that call must name the module
+;; the helper loads into for THIS realm, not the platform's.
+(deftest a-function-added-to-a-helper-is-callable-from-a-later-realm
+  (let [root (str (System/tmp_dir!) "/bl-realm-helper-" (System/unique_integer (list :positive)))]
+    (File/mkdir_p! root)
+    (try
+      (File/write! (str root "/rn-helper.bl") "(ns rn-helper)\n(defn old [] \"old\")\n")
+      (File/write! (str root "/rn-caller.bl")
+                   "(ns rn-caller (:require [rn-helper :as h]))\n(defn go [] (str (h/old) \">\" (h/added)))\n")
+      (let [a (open-realm "ha") b (open-realm "hb")]
+        (is (= "old" (in-realm a root "(ns user (:require [rn-helper :as h])) (h/old)")))
+        (File/write! (str root "/rn-helper.bl")
+                     "(ns rn-helper)\n(defn old [] \"old\")\n(defn added [] \"added\")\n")
+        (is (= "old>added" (in-realm b root "(ns user (:require [rn-caller])) (rn-caller/go)"))))
+      (finally (File/rm_rf! root)))))
