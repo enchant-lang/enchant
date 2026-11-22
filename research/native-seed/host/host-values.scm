@@ -908,6 +908,14 @@
     ;; the STORED (canonical) member, as on BEAM: (#{1} 1.0) is 1
     ((bl-tag? f 'set) (let ((k (native-key-canon (car xs)))) (if (native-map-has? (vector-ref f 1) k) k bl-nil)))
     (else (error "value is not callable")))))))
+;; A literal keyword called with one or two arguments, as emitted for (:k m)
+;; and (:k m default). Under the original resolver a keyword resolves to
+;; itself and reads its map with bl-get, so that is the whole call; any other
+;; installed resolver takes the complete bl-invoke path.
+(define (native-keyword-call1 k m)
+ (if (eq? native-resolve-call native-invoke-original-resolve) (bl-get m k) (bl-invoke k (list m))))
+(define (native-keyword-call2 k m d)
+ (if (eq? native-resolve-call native-invoke-original-resolve) (bl-get m k d) (bl-invoke k (list m d))))
 
 ;; A raise has explicit class/reason/raw trace. Catch variables and finally
 ;; flags are lexical; scheduler suspension never runs language finally.
