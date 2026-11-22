@@ -377,8 +377,20 @@
                    (else (bl-invoke value arguments)))))))
          (table-set! native-remote-table (string-copy key) wrapper)
          wrapper))
+       ;; A boot-tier stub has no code in the image. Once its source has been
+       ;; evaluated here (native eval of priv/boot/lower.bl), a call reaches
+       ;; that evaluated definition, with the variadic arm as above; until
+       ;; then the refusal stands.
        ((not (eq? stub native-missing))
-        (lambda arguments (error "native target explicitly excludes namespace" stub key)))
+        (lambda arguments
+         (let ((value (native-env-value (native-row stub logical))))
+          (cond ((eq? value native-missing) (error "native target explicitly excludes namespace" stub key))
+           (variadic?
+            (let ((value (native-unmacro value)))
+             (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))
+              (bl-invoke (bl-nth (bl-nth value 2) 1) arguments)
+              (error "native variadic clause missing" key))))
+           (else (bl-invoke (native-unmacro value) arguments))))))
        (else (error "unimplemented native host leaf" key)))))))))
 (define (native-remote key)
  (let ((hit (table-ref native-remote-table key #f)))

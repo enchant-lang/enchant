@@ -1,0 +1,196 @@
+; Card N1: Core Erlang trees as data on the native host.
+;
+; Lowers small bl-ANF forms to Core through the real `lower` namespace
+; (priv/boot/lower.bl over lower-core.bl) and prints each Core term with
+; `pr-str`, one line per form. On the BEAM, `cerl` is OTP's module; on Chez it
+; is the host leaf set in host/native-data-bifs.scm. The two outputs must be
+; byte-identical.
+;
+;   BEAM:  $MAIN/bin/bl run research/native-seed/fixtures/native-cerl-data.bl
+;   Chez:  cat priv/boot/lower-core.bl priv/boot/lower.bl THIS-FILE > F.bl
+;          qualify.bl -- eval --image IMG --file F.bl
+;
+; The native image carries `lower` only as a boot-tier stub (no code), and
+; `lower-core` not at all, so the Chez run evaluates their checkout sources
+; first; this file is the same on both sides.
+(ns native.cerl-data
+ (:require [anf :as a] [lower :as lower] [lower-core :as core-ir]))
+
+(declare term-str)
+(defn- join [xs] (reduce (fn [acc x] (if (= "" acc) x (str acc "," x))) "" xs))
+(defn- list-str [xs]
+ (loop [xs xs out []]
+  (cond (erlang/=:= xs (list)) (str "[" (join out) "]")
+        (erlang/is_list xs) (recur (erlang/tl xs) (conj out (term-str (erlang/hd xs))))
+        :else (str "[" (join out) "|" (term-str xs) "]"))))
+(defn- term-str
+ "Erlang term syntax from Erlang BIFs alone: the printer both hosts share.
+  Map pairs are written in term order (lists:sort of maps:to_list)."
+ [x]
+ (cond
+  (erlang/is_atom x) (str "'" (erlang/atom_to_binary x) "'")
+  (erlang/is_binary x) (str "<<" (pr-str x) ">>")
+  (erlang/is_number x) (str x)
+  (erlang/is_tuple x) (str "{" (join (mapv term-str (erlang/tuple_to_list x))) "}")
+  (erlang/is_list x) (list-str x)
+  (erlang/is_map x) (str "#{" (join (mapv (fn [p] (str (term-str (elem p 0)) "=>" (term-str (elem p 1))))
+                                         (lists/sort (maps/to_list x)))) "}")
+  :else (str "?" (pr-str x))))
+
+;; CERL lines are the comparison: Erlang term syntax. PRSTR lines are the same
+;; term through pr-str, kept to record where the two hosts' printers differ.
+(defn- show [label term]
+ (println (str "CERL " label " " (term-str term)))
+ (println (str "PRSTR " label " " (pr-str term))))
+
+(defn- lowered [label node]
+ (lower/reset-fresh!)
+ (show label (lower/lower-anf node)))
+
+(defn- raised [label thunk]
+ (println (str "CERL " label " "
+               (try (do (thunk) "returned") (catch e "raised")))))
+
+(defn- cl
+ ([pats body] (a/clause (to-list pats) nil body))
+ ([pats guard body] (a/clause (to-list pats) guard body)))
+
+(defn- at [node line file] (assoc node :ann (if file {:line line :file file} {:line line})))
+
+(defn- remote [m f & args] (a/remote m f (to-list args)))
+
+;; A counting loop in the compiler's fixed-point shape: lower turns its
+;; self-application into a Core letrec over a local fname.
+(defn- loop-node []
+ (let [self "self"
+       knot (a/app (a/var self) (list (a/var self)))
+       inner (a/fnn (list (cl [(a/pvar "n")]
+                            (a/iff (remote :erlang (erlang/binary_to_atom "=:=") (a/var "n") (a/lit 0))
+                                   (a/lit :done)
+                                   (a/app knot (list (remote :erlang (erlang/binary_to_atom "-") (a/var "n") (a/lit 1))))))))
+       outer (a/fnn (list (cl [(a/pvar self)] inner)))
+       scaffold (a/lett self outer (a/app (a/var self) (list (a/var self))))]
+  (a/app scaffold (list (a/lit 3)))))
+
+(defn- forms []
+ [["lit-integer" (a/lit 42)]
+  ["lit-negative-bignum" (a/lit -123456789012345678901234567890)]
+  ["lit-float" (a/lit 1.5)]
+  ["lit-binary" (a/lit "hi")]
+  ["lit-atom" (a/lit :ok)]
+  ["lit-nil" (a/lit nil)]
+  ["lit-list" (a/lit (list 1 :two "three"))]
+  ["lit-tuple" (a/lit (tuple :a 1))]
+  ["lit-map" (a/lit {:a 1})]
+  ["var" (a/var "x")]
+  ["let" (a/lett "x" (a/lit 1) (a/var "x"))]
+  ["let-annotated" (at (a/lett "x" (a/lit 1) (a/var "x")) 3 "let.bl")]
+  ["letrec-loop" (loop-node)]
+  ["fn-simple" (a/fnn (list (cl [(a/pvar "x")] (a/var "x"))))]
+  ["fn-clauses" (a/fnn (list (cl [(a/plit 0)] (a/lit :zero))
+                             (cl [(a/pvar "_")] (a/lit :other))))]
+  ["case-guard" (a/casee (a/var "x")
+                 (list (cl [(a/pvar "y")] (remote :erlang (erlang/binary_to_atom ">") (a/var "y") (a/lit 0)) (a/var "y"))
+                       (cl [(a/ptuple (list (a/pvar "p") (a/plit :ok)))] (a/var "p"))
+                       (cl [(a/pcons (a/pvar "h") (a/empty-list-pattern))] (a/var "h"))
+                       (cl [(a/palias (a/pvar "whole") (a/pvar "part"))] (a/var "whole"))))]
+  ["case-binary-pattern" (at (a/casee (a/var "s") (list (cl [(a/plit "ab")] (a/lit true)))) 9 "bin.bl")]
+  ["try-catch" (a/tryy (remote :erlang :error (a/lit :boom))
+                (list (cl [(a/plit :error) (a/pvar "r")] (a/var "r")))
+                nil)]
+  ["try-catch-after" (a/tryy (a/var "x")
+                      (list (cl [(a/pvar "k") (a/pvar "r")] (a/tup (list (a/var "k") (a/var "r")))))
+                      (remote :erlang :put (a/lit :done) (a/lit true)))]
+  ["try-after-only" (a/tryy (a/var "x") (list) (a/lit :cleanup))]
+  ["receive" (a/recv (list (cl [(a/ptuple (list (a/plit :msg) (a/pvar "m")))] (a/var "m"))) nil nil)]
+  ["receive-after" (a/recv (list (cl [(a/pvar "m")] (a/var "m"))) (a/lit 100) (a/lit :timeout))]
+  ["map-construction" (a/mapp (list [(a/lit :k) (a/var "v")] [(a/lit :n) (a/lit 1)]))]
+  ["map-literal-fold" (a/mapp (list [(a/lit :k) (a/lit 1)] [(a/lit "s") (a/lit 2)]))]
+  ["map-pattern" (a/casee (a/var "m") (list (cl [(a/pmap (list [(a/lit :k) (a/pvar "v")]))] (a/var "v"))))]
+  ["struct-pattern" (a/casee (a/var "m") (list (cl [(a/pstruct :Elixir.Range (list [:first (a/pvar "f")]))] (a/var "f"))))]
+  ["call" (remote :lists :reverse (a/var "xs"))]
+  ["call-operands" (at (remote :erlang (erlang/binary_to_atom "+") (remote :erlang :length (a/var "xs")) (a/lit 1)) 12 "call.bl")]
+  ["call-line-only" (at (remote :erlang :self) 4 nil)]
+  ["primop-raw-raise" (assoc (remote :erlang :raise (a/var "c") (a/var "r") (a/var "s")) :stack-format :raw)]
+  ["erlang-raise" (remote :erlang :raise (a/var "c") (a/var "r") (a/var "s"))]
+  ["tuple" (a/tup (list (a/var "a") (a/lit 1)))]
+  ["tuple-literal-fold" (a/tup (list (a/lit :a) (a/lit 1)))]
+  ["cons-nil" (a/cons-cell (a/var "h") (a/empty-list-node))]
+  ["enil" (a/empty-list-node)]
+  ["apply" (a/app (a/var "f") (list (a/var "x") (a/lit 2)))]
+  ["apply-annotated" (at (a/app (a/var "f") (list (remote :erlang :self))) 21 "apply.bl")]
+  ["if" (a/iff (a/var "t") (a/lit :yes) (a/lit :no))]
+  ["do" (a/doo (list (remote :erlang :put (a/lit :k) (a/lit 1)) (a/var "x")))]
+  ["invoke" (a/invoke (a/var "f") (a/lit (list 1 2)))]
+  ["global" (a/global "clojure.core" "inc")]
+  ["global-exact" (a/global-exact "rt" "invoke")]
+  ["struct" (a/structt :Elixir.Range (list [(a/lit :first) (a/var "f")]))]
+  ["arith" (at (a/arith :add :+ (list (a/var "x") (a/lit 1))) 5 "arith.bl")]])
+
+;; cerl combinations lower itself makes outside lower-anf, and cerl's folds
+;; and edges read directly.
+(defn- direct []
+ (let [x (cerl/c_var :X)
+       body (cerl/c_call (cerl/c_atom :erlang) (cerl/c_atom :self) (list))
+       l (cerl/set_ann (cerl/c_let (list x) (cerl/abstract 1) x) (list 7 (tuple :file "d.bl")))
+       c3 (cerl/c_clause (list x) (cerl/c_atom true) x)
+       defs (lower/module-info-defs :demo)]
+  (show "module" (cerl/c_module (cerl/c_atom :demo)
+                                (list (cerl/c_fname :module_info 0) (cerl/c_fname :module_info 1))
+                                (list (tuple (cerl/c_atom :vsn) (cerl/abstract (list 1))))
+                                defs))
+  (show "module-3" (cerl/c_module (cerl/c_atom :demo) (list) (list)))
+  (show "fname" (cerl/c_fname :run 0))
+  (show "var-name-fname" (cerl/var_name (cerl/c_fname :run 0)))
+  (show "c-atom-charlist" (cerl/c_atom (erlang/binary_to_list "abc")))
+  (raised "c-atom-binary" (fn [] (cerl/c_atom "abc")))
+  (show "get-ann" (cerl/get_ann l))
+  (show "set-ann-fresh" (cerl/get_ann (cerl/set_ann (cerl/c_nil) (list 1 2))))
+  (show "update-c-let" (cerl/update_c_let l (list (cerl/c_var :Y)) (cerl/abstract 2) body))
+  (show "let-parts" (list (cerl/let_vars l) (cerl/let_arg l) (cerl/let_body l)))
+  (show "clause-parts" (list (cerl/clause_pats c3) (cerl/clause_guard c3) (cerl/clause_body c3)))
+  (raised "clause-pats-badrecord" (fn [] (cerl/clause_pats l)))
+  (raised "let-vars-badrecord" (fn [] (cerl/let_vars c3)))
+  (raised "type-function-clause" (fn [] (cerl/type (tuple :c_var (list)))))
+  (show "types" (mapv (fn [t] (cerl/type t))
+                     (list x l c3 body (cerl/abstract 1) (cerl/c_cons x (cerl/c_nil))
+                           (cerl/c_tuple (list x)) (cerl/c_values (list x)) (cerl/c_alias x x)
+                           (cerl/c_apply x (list)) (cerl/c_primop (cerl/c_atom :p) (list))
+                           (cerl/c_case x (list c3)) (cerl/c_fun (list) x) (cerl/c_letrec (list) x)
+                           (cerl/c_seq x x) (cerl/c_try x (list x) x (list x) x)
+                           (cerl/c_receive (list c3)) (cerl/c_binary (list))
+                           (cerl/c_bitstr x (cerl/abstract 8) (cerl/abstract 1) (cerl/c_atom :integer) (cerl/abstract (list)))
+                           (cerl/c_map (list (cerl/c_map_pair x x)))
+                           (cerl/c_map_pattern (list (cerl/c_map_pair_exact x x)))
+                           (cerl/c_map_pair x x)
+                           (cerl/c_module (cerl/c_atom :m) (list) (list) (list)))))
+  (show "cons-literal-fold" (cerl/c_cons (cerl/abstract 1) (cerl/c_nil)))
+  (show "cons-improper-fold" (cerl/c_cons (cerl/abstract 1) (cerl/abstract 2)))
+  (show "cons-var" (cerl/c_cons x (cerl/abstract (list 2))))
+  (show "tuple-empty-fold" (cerl/c_tuple (list)))
+  (show "map-empty-fold" (cerl/c_map (list)))
+  (show "map-exact-absent" (cerl/c_map (list (cerl/c_map_pair_exact (cerl/abstract :k) (cerl/abstract 1)))))
+  (show "map-update-exact-present" (cerl/c_map (cerl/abstract {:k 0}) (list (cerl/c_map_pair_exact (cerl/abstract :k) (cerl/abstract 1)))))
+  (show "map-update-var" (cerl/c_map x (list (cerl/c_map_pair (cerl/abstract :k) (cerl/abstract 1)))))
+  (show "map-duplicate-key" (cerl/c_map (list (cerl/c_map_pair (cerl/abstract :k) (cerl/abstract 1))
+                                              (cerl/c_map_pair (cerl/abstract :k) (cerl/abstract 2)))))
+  (show "map-pattern-empty" (cerl/c_map_pattern (list)))
+  (show "receive-1" (cerl/c_receive (list)))
+  (show "clause-2" (cerl/c_clause (list) x))
+  (show "bitstr-4" (cerl/c_bitstr x (cerl/abstract 8) (cerl/c_atom :integer) (cerl/abstract (list))))
+  (show "bitstr-3" (cerl/c_bitstr x (cerl/c_atom :binary) (cerl/abstract (list))))
+  (show "abstract-nested" (cerl/abstract (tuple (list 1 2) {:a (list 1)} "b" 2.5 -7)))))
+
+(defn- fresh-sequence []
+ (core-ir/reset-fresh!)
+ (let [a (core-ir/fresh "t") b (core-ir/fresh "t")]
+  (show "fresh" (list a b (erlang/get :bl_core_fresh_seq)))))
+
+(defn run-check []
+ (let [rows (forms)]
+  (doseq [[label node] rows] (lowered label node))
+  (direct)
+  (fresh-sequence)
+  (println (str "CERL-DONE " (count rows) " lowered forms"))))
+
+(run-check)
