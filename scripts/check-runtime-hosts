@@ -28,6 +28,21 @@ def writable_copy(source, destination):
             path.chmod(path.stat().st_mode | 0o200)
 
 
+def ensure_tools():
+    """Put this repository's own erlang and elixir (flake packages) on PATH.
+
+    The SDK is built by exactly these packages, so their erts/elixir tag matches
+    the SDK's dependency beams. Nothing is installed; nix builds are cached.
+    """
+    outputs = subprocess.run(
+        ["nix", "build", "--no-link", "--print-out-paths", f"{ROOT}#erlang", f"{ROOT}#elixir"],
+        check=True, stdout=subprocess.PIPE, text=True).stdout.split()
+    bins = [str(Path(out) / "bin") for out in outputs if (Path(out) / "bin").is_dir()]
+    if not bins:
+        raise SystemExit("nix build .#erlang .#elixir produced no bin directory")
+    os.environ["PATH"] = os.pathsep.join(bins + [os.environ.get("PATH", "")])
+
+
 DEFAULT_TESTS = [
     "test/bl/perf/spawn_cost_test.bl",
     "test/bl/lazy_clean_capture_test.bl",
@@ -223,6 +238,10 @@ def main():
                         help="new lazy_memo library; install only after compiling its matching facade")
     parser.add_argument("--suite-timeout", type=int, default=120,
                         help="seconds per test file (default: 120)")
+    parser.add_argument("--memory", default="3G",
+                        help="MemoryMax of each phase's VM (default: 3G, inside the caller's budget)")
+    parser.add_argument("--no-nix-tools", action="store_true",
+                        help="use elixir/erl already on PATH instead of the flake's erlang and elixir")
     parser.add_argument("tests", nargs="*")
     args = parser.parse_args()
     if not 1 <= args.suite_timeout <= 840:
@@ -230,6 +249,8 @@ def main():
     if args.compile_sdk and args.sdk_image and (args.sdk_image / "priv/sdk-code.term").is_file():
         parser.error("--compile-sdk requires an unsealed build image; build a complete SDK before testing sealed ownership")
     tests = args.tests or DEFAULT_TESTS
+    if not args.no_nix_tools:
+        ensure_tools()
     for name in tests:
         if not (ROOT / name).is_file():
             raise SystemExit(f"missing test file: {name}")
@@ -322,6 +343,11 @@ def main():
             sdk_app = args.sdk_image.resolve()
             deps.extend(path for path in sorted(sdk_app.parent.glob("*/ebin"))
                         if path.parent != sdk_app and not path.parent.name.startswith("elixir-"))
+            # Store SDK layout: image/ sits beside lib/<dep>/ebin. beam_lisp is
+            # the image itself; elixir and its siblings come from the flake.
+            skip = ("beam_lisp", "elixir", "eex", "logger", "mix", "iex", "ex_unit")
+            deps.extend(path for path in sorted(sdk_app.parent.glob("lib/*/ebin"))
+                        if not path.parent.name.startswith(skip))
         # Last -pa wins; the isolated image takes precedence over every dependency.
         executable = shutil.which("elixir")
         if not executable:
@@ -334,7 +360,7 @@ def main():
         for phase in phases:
             if phase != "compile" and args.native_runtime:
                 shutil.copy2(args.native_runtime.resolve(), root / "priv/native/lazy_memo.so")
-            print(f"HOST-CHECK {phase}: isolated image, existing compiler, 6G cap", flush=True)
+            print(f"HOST-CHECK {phase}: isolated image, existing compiler, {args.memory} cap", flush=True)
             env = os.environ.copy()
             env.update(BL_ROOT=str(root), BL_DAEMON="off", HOST_CHECK_PHASE=phase,
                        XDG_CACHE_HOME=str(root / "cache"), HOST_CHECK_TIMEOUT_MS=str(args.suite_timeout * 1000),
@@ -343,7 +369,7 @@ def main():
             env.pop("BEAM_LISP_DEV", None)
             cap = ["systemd-run", "--user", "--collect", "--wait", "--pipe",
                    f"--unit=bl-host-check-{os.getpid()}-{phase}",
-                   f"--working-directory={root}", "--property=MemoryMax=6G",
+                   f"--working-directory={root}", f"--property=MemoryMax={args.memory}",
                    "--property=MemorySwapMax=0", "--property=RuntimeMaxSec=900"]
             for key in ("PATH", "BL_ROOT", "BL_DAEMON", "HOST_CHECK_PHASE", "XDG_CACHE_HOME", "ERL_FLAGS", "HOST_CHECK_TIMEOUT_MS", "AOT_ACTOR_INVENTORY_SOURCE"):
                 cap.append(f"--setenv={key}={env[key]}")

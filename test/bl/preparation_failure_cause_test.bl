@@ -1,0 +1,37 @@
+(ns preparation-failure-cause-test)
+
+;; Evaluate the coordinator's actual inert helpers, as application_preparation_limit_test
+;; does. The fixture is the events file of a real failed preparation (2026-11-22,
+;; cached nixbuild.net failure); only its "text" fields matter.
+(let [root (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd))
+      source (File/read! (Path/join root "nix/preparation-operation.bl"))
+      helpers (first (String/split
+                      (str "(def terminal" (second (String/split source "(def terminal")))
+                      "(defn- operation!"))]
+ (BeamLisp/eval (str "(ns preparation-failure-cause-test)\n" helpers)))
+(ns preparation-failure-cause-test)
+
+(def fixture-directory
+ (Path/join (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd))
+            "test/fixtures/preparation/failed"))
+(def failed {"id" "job_11d6be0c790d04bf" "status" "failed" "error" "exited with code 1"})
+
+(deftest a-failed-preparation-names-its-first-cause
+ (let [message (ended-message fixture-directory failed)]
+  (is (String/starts_with? message "Preparation ended failed: exited with code 1"))
+  (is (String/contains? message "Cached build failure"))
+  (is (String/contains? message "beam-lisp-sdk-unit-archive.drv"))
+  (is (not (String/contains? message "progress machine: ")))
+  (is (<= (erlang/byte_size (failure-note fixture-directory (get failed "id"))) (+ 3 failure-cap)))))
+
+(deftest causes-are-distinct-error-lines-at-most-three
+ (let [body (File/read! (Path/join fixture-directory "foundry-state/ledger/events/job_11d6be0c790d04bf.jsonl"))
+       causes (failure-causes (str body body))]
+  (is (= 3 (count causes)))
+  (is (= 3 (count (set causes))))
+  (is (every? #(String/contains? % "error:") causes))))
+
+(deftest other-terminal-states-and-missing-events-add-nothing
+ (is (= "Preparation ended cancelled: x" (ended-message fixture-directory {"id" "job_11d6be0c790d04bf" "status" "cancelled" "error" "x"})))
+ (is (= "Preparation ended failed: x" (ended-message fixture-directory {"id" "job_0000000000000000" "status" "failed" "error" "x"})))
+ (is (= [] (vec (failure-causes "not json\n{\"text\":3}\n")))))
