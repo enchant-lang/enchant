@@ -595,7 +595,20 @@
    this VM, remember what it already lists."
   [manifest root]
   (let [table :bl_realm_sources_seen
-        header (erlang/iolist_to_binary (list "bl-realm-sources 1\t" root "\n"))]
+        ;; The header carries a fresh token each time the file is (re)created.
+        ;; The client folds it into the generation, so a manifest that was
+        ;; deleted and restarted under a live realm cannot look like the one
+        ;; the realm was opened against: the realm retires and records afresh.
+        prefix (erlang/iolist_to_binary (list "bl-realm-sources 1\t" root "\t"))
+        header (erlang/iolist_to_binary
+                 (list prefix (erlang/integer_to_binary (erlang/system_time :nanosecond)) "-"
+                       (erlang/integer_to_binary (erlang/unique_integer (list :positive))) "\n"))]
+    ;; the file vanished under a live VM: forget what was recorded in it
+    (when (and (ets/member table (tuple :header manifest)) (erlang/not (File/regular? manifest)))
+      (ets/match_delete table (tuple (tuple manifest :_) :_))
+      (ets/match_delete table (tuple (tuple :listed manifest :_) :_))
+      (ets/delete table (tuple :header manifest))
+      (ets/delete table (tuple :full manifest)))
     (when (erlang/not (ets/member table (tuple :header manifest)))
       (File/mkdir_p! (Path/dirname manifest))
       (if (File/regular? manifest)
@@ -604,7 +617,7 @@
           ;; outgrew what a realm legitimately lists, or holds an X line): a
           ;; VM starting its records over is better than a manifest the client
           ;; can never use again.
-          (if (and (String/starts_with? text header)
+          (if (and (String/starts_with? text prefix)
                    (erlang/< (erlang/byte_size text) 262144)
                    (erlang/not (String/contains? text "\nX\n")))
             (Enum/each (String/split text "\n" (list (tuple :trim true)))
@@ -622,6 +635,23 @@
         (try (File/write! manifest header (list :exclusive)) (catch _ nil)))
       (ets/insert table (tuple (tuple :header manifest) true)))
     :ok))
+
+(defn source_manifest_begin
+  "A realm rooted at `root` is starting: make its manifest exist now, empty if
+   need be, so that a realm that loads nothing from the project (a bare `run`)
+   still has a manifest the client can use instead of walking the tree."
+  [root]
+  (when (and (erlang/is_binary root) (File/dir? root))
+    (let [manifest (Path/join root ".bl/realm-sources.v1")]
+      (try
+        (sources_table)
+        (sources_header_ready manifest root)
+        :ok
+        (catch e
+          (try (File/write! (erlang/iolist_to_binary (list manifest ".error")) (Kernel/inspect e))
+               (catch _ nil))
+          (try (File/rm! manifest) (catch _ nil))
+          :error)))))
 
 (defn source_record_candidate
   "Record one candidate `find_file` examined in `manifest` (for the realm rooted
@@ -645,7 +675,10 @@
                 (ets/insert table (tuple (tuple :full manifest) true))
                 (File/write! manifest "X\n" (list :append)))))))
       :ok)
-    (catch _
+    (catch e
+      ;; leave the reason next to where the manifest was, then drop the manifest
+      (try (File/write! (erlang/iolist_to_binary (list manifest ".error")) (Kernel/inspect e))
+           (catch _ nil))
       (try (File/rm! manifest) (catch _ nil))
       :error)))
 
@@ -655,9 +688,13 @@
   (try
     (let [realm (or (Process/get :bl_load_realm) (realm_facts))
           decl (if (erlang/is_map realm) (maps/get :decl realm nil) nil)
-          overrides (if (erlang/is_map decl) (maps/get :overrides decl nil) nil)]
-      (if (erlang/is_binary overrides)
-        (let [root (Path/dirname overrides)]
+          overrides (if (erlang/is_map decl) (maps/get :overrides decl nil) nil)
+          declared-root (if (erlang/is_map decl) (maps/get :root decl nil) nil)
+          project-root (if (erlang/is_binary declared-root)
+                         declared-root
+                         (if (erlang/is_binary overrides) (Path/dirname overrides) nil))]
+      (if (erlang/is_binary project-root)
+        (let [root project-root]
           (if (File/dir? root)
             (maps/put :root root (maps/put :manifest (Path/join root ".bl/realm-sources.v1") (maps/new)))
             nil))

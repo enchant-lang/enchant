@@ -1,0 +1,39 @@
+; loader_sources_realm_test.bl — a REAL realm (vm.spec/read + vm.manager) writes
+; the source manifest at its project root, whatever its env.bl declares. A plain
+; env.bl with no :overrides, :shadow or :uses is the common case: this
+; repository's own is one.
+
+(ns loader-sources-realm-test
+  (:require [vm.spec :as spec] [vm.manager :as manager]))
+
+(defn- scratch []
+  (let [dir (str "/tmp/loader-sources-realm-" (erlang/unique_integer (list :positive)))]
+    (File/mkdir_p! dir)
+    dir))
+
+(defn- lines [path]
+  (vec (String/split (File/read! path) "\n" (list (tuple :trim true)))))
+
+(deftest a-plain-env-realm-writes-the-manifest-when-a-project-file-loads
+  (let [root (scratch)
+        manifest (str root "/.bl/realm-sources.v1")]
+    (File/write! (str root "/env.bl") "{:name \"plain\"}")
+    (File/write! (str root "/plain_lib.bl") "(ns plain-lib)\n(defn who [] :plain)\n")
+    (manager/start)
+    (let [vm (manager/ensure (spec/read root))]
+      (try
+        (let [result (BeamLisp.Env/with_env (:env vm)
+                       (fn []
+                         (BeamLisp.Loader/with_ambient_dirs (list root)
+                           (fn []
+                             (BeamLisp.Compiler/eval_string "(ns user (:require [plain-lib])) (plain-lib/who)"
+                               (BeamLisp.Compiler/new_env "user") "loader_sources_realm_test")))))]
+          (is (= :plain result)))
+        (is (File/regular? manifest) (str "manifest written; error: "
+                                          (when (File/exists? (str manifest ".error"))
+                                            (File/read! (str manifest ".error")))))
+        (when (File/regular? manifest)
+          (let [ls (lines manifest)]
+            (is (String/starts_with? (first ls) (str "bl-realm-sources 1\t" (:root vm) "\t")))
+            (is (some (fn [l] (String/ends_with? l (str "\t" (:root vm) "/plain_lib.bl"))) ls))))
+        (finally (manager/drain (:id vm)) (File/rm_rf! root))))))
