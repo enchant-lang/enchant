@@ -4506,6 +4506,18 @@
             (Process/put k (tuple digest links))
             links))))))
 
+(defn- realm-local-provider?
+  "Whether `provider`, found under any of `dirs`, will load into a realm's own
+   module (`R<key>` or `S<hash>`): `BeamLisp.Loader/ns_home` answers :realm, :shadow
+   or :shared for the calling env's realm. Outside a realm it is never true."
+  [provider dirs]
+  (reduce (fn [found dir]
+            (or found
+                (contains? #{:realm :shadow :shared}
+                  (BeamLisp.Loader/with_search_dir dir
+                    (fn [] (BeamLisp.Loader/ns_home provider))))))
+          false dirs))
+
 (defn- declared-link
   "The link triple a call to `provider/member` must bake when the provider's
    registry has no link row yet, or nil (the call stays a fetched global).
@@ -4530,6 +4542,12 @@
              (not (BeamLisp.Env/loaded_ns? provider)))
     (let [dirs (BeamLisp.Env/deferred_dirs provider)]
       (when (and (erlang/is_list dirs)
+                 ;; A provider that will load into a realm's own module has no
+                 ;; name yet: `Link/module_for` answers for a namespace the realm
+                 ;; has not recorded, i.e. the PLATFORM's name, and the baked direct
+                 ;; call would target a module that never exists ("module …Rn-lib
+                 ;; is not available"). Such a call stays a fetched global.
+                 (not (realm-local-provider? provider dirs))
                  (= :error (BeamLisp.Env/lookup (tuple provider member))))
         (let [links (declared-links provider dirs)]
           (when (erlang/is_map links) (get links member)))))))

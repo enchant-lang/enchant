@@ -37,6 +37,8 @@
 
 (def MANAGER :vm-manager)
 
+(def SCOPE-ROW :manager_scope)
+
 (defn- spec-identity [spec]
  ;; Display IDs and truncated module keys are routing hints, not authority to
  ;; reuse another project's environment or capabilities. Keep the full tree
@@ -81,6 +83,38 @@
     (BeamLisp.Loader/ensure_loaded "vm.sched")
     (BeamLisp.Ns.Rt/invoke (BeamLisp.Env/fetch! "vm.sched" "start-for") (list vm))))
 
+(defn- caller-scope
+  "The manager scope the CALLING env belongs to, or nil. A test runner (ward)
+   binds one per file in the file's own env, so the VMs a file opens are the
+   file's, and `shutdown` from inside it ends only those. The row lives in the
+   env chain, so it follows the env into every process spawned under it and is
+   gone with it."
+  []
+  (let [r (BeamLisp.Env/lookup (tuple SCOPE-ROW))]
+    (if (and (erlang/is_tuple r) (erlang/== :ok (erlang/element 1 r)))
+      (erlang/element 2 r)
+      nil)))
+
+(defn- scoped
+  "`spec` stamped with the caller's scope, unless it already names one."
+  [spec]
+  (let [scope (caller-scope)]
+    (if (and (some? scope) (nil? (:scope spec))) (assoc spec :scope scope) spec)))
+
+(defn- shutdown-vms
+  "Drain the VMs `scope` owns (all of them for a nil scope); keep pending ones
+   as :draining and every VM of another scope untouched. Answers [reply state]."
+  [st scope]
+  (let [mine? (fn [vm] (or (nil? scope) (= scope (:scope vm))))
+        targets (filter (fn [[_ vm]] (mine? vm)) (:vms st))
+        others (into {} (filter (fn [[_ vm]] (not (mine? vm))) (:vms st)))
+        results (mapv (fn [[id vm]] [id (vmc/drain vm)]) targets)
+        pending (into {} (keep (fn [[id result]]
+                                (when (= :waiting (:status result))
+                                 [id (assoc (get (:vms st) id) :status :draining)])) results))]
+    [{:drained (- (count results) (count pending)) :pending (count pending)}
+     (assoc st :vms (merge others pending))]))
+
 (defserver daemon
   (init [_]
     (ok {:vms {}}))
@@ -100,7 +134,7 @@
        (if (contains? (:vms st) id)
         (reply (if (= :draining (get-in st [:vms id :status]))
                  {:error :realm-draining :id id} (get (:vms st) id)) st)
-        (let [vm (assoc (vmc/spawn-vm spec) :spec-identity (spec-identity spec))]
+        (let [vm (assoc (vmc/spawn-vm spec) :spec-identity (spec-identity spec) :scope (:scope spec))]
           (start-schedules! vm)
           (reply vm (assoc st :vms (assoc (:vms st) id vm))))))))
 
@@ -116,7 +150,7 @@
                  {:error :realm-draining :id id}
                  {:vm (get (:vms st) id) :created false}) st)
         (let [vm (assoc (vmc/spawn-vm (assoc spec :alias (unique-alias (:alias spec) (vals (:vms st)))))
-                        :spec-identity (spec-identity spec))]
+                        :spec-identity (spec-identity spec) :scope (:scope spec))]
           (start-schedules! vm)
           (reply {:vm vm :created true} (assoc st :vms (assoc (:vms st) id vm))))))))
 
@@ -174,15 +208,14 @@
                    (assoc st :vms (dissoc (:vms st) id)))))
       (reply {:halted 0} st)))
 
-  ;; shutdown drains every VM (each tears down its own processes + env) and
-  ;; then lets the daemon stop — the ONE place a node-wide end is legitimate.
+  ;; shutdown drains the VMs of ONE scope (see `caller-scope`), or every VM when
+  ;; the caller has none — the node-wide end stays the one legitimate place a
+  ;; daemon drains what it did not create. The scoped form is what lets a test
+  ;; file close "its" manager without closing the realm that is running it.
   (handle-call [:shutdown] [_from st]
-    (let [results (mapv (fn [[id vm]] [id (vmc/drain vm)]) (:vms st))
-          pending (into {} (keep (fn [[id result]]
-                                  (when (= :waiting (:status result))
-                                   [id (assoc (get (:vms st) id) :status :draining)])) results))]
-      (reply {:drained (- (count results) (count pending)) :pending (count pending)}
-             (assoc st :vms pending)))))
+    (let [[answer st2] (shutdown-vms st nil)] (reply answer st2)))
+  (handle-call [:shutdown scope] [_from st]
+    (let [[answer st2] (shutdown-vms st scope)] (reply answer st2))))
 
 (defn start
   "Boot the global daemon (idempotent by name). Returns its pid. The owner
@@ -196,13 +229,13 @@
 (defn ensure
   "Get-or-spawn the VM for `spec` (keyed by :id). Returns the VM value."
   [spec]
-  (accepted (call MANAGER [:ensure spec] :infinity)))
+  (accepted (call MANAGER [:ensure (scoped spec)] :infinity)))
 
 (defn open
   "Like `ensure`, answering {:vm vm :created bool}: `created` is true for exactly
    one caller per VM, however many ask at once."
   [spec]
-  (accepted (call MANAGER [:open spec] :infinity)))
+  (accepted (call MANAGER [:open (scoped spec)] :infinity)))
 
 (defn observe-sources
   "Observe project bytes under the realm lifecycle lock. Returns :current or
@@ -264,7 +297,11 @@
   (call MANAGER [:drain id] :infinity))
 
 (defn shutdown
-  "Drain every VM; retain pending entries. The daemon can stop only with zero
-   :pending. Returns {:drained n :pending n}."
+  "Drain every VM the caller's scope owns (every VM when the caller has no
+   scope, which is the node ending); retain pending entries. The daemon can stop
+   only with zero :pending. Returns {:drained n :pending n}."
   []
-  (call MANAGER [:shutdown] :infinity))
+  (let [scope (caller-scope)]
+    (if (nil? scope)
+      (call MANAGER [:shutdown] :infinity)
+      (call MANAGER [:shutdown scope] :infinity))))

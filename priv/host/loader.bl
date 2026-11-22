@@ -541,6 +541,135 @@
       (let [facts (maps/put :key key (maps/put :decl decl (maps/new)))]
         (if (and paths (erlang/> (maps/size paths) 0)) (maps/put :uses-paths paths facts) facts)))))
 
+;; ── the realm's source manifest ─────────────────────────────────────────────
+;;
+;; The checkout client pins a realm to a hash of its sources. Instead of walking
+;; the tree for them it reads `<root>/.bl/realm-sources.v1`, which this module
+;; writes: every candidate path `find_file` examines, in search order up to the
+;; match. Lines, tab separated, after the header `bl-realm-sources 1<TAB><root>`:
+;;
+;;   L <sha256> <path>   a file the loader read (the bytes it got)
+;;   A <path>            a candidate that did not exist, collapsed to its
+;;                       highest missing ancestor (a file OR directory that
+;;                       appearing there would change the resolution)
+;;   X                   not everything could be recorded: the manifest is unusable
+;;
+;; Each path is recorded once (a public ETS set, heired by the loader server, is
+;; seeded from the file the first time a manifest is used in this VM). The
+;; client keeps the first line for a path. Image tier directories are not
+;; recorded: the runtime pin covers them. A manifest that outgrew 256 KiB or ends
+;; in X is started over by the next VM. A failed write removes the manifest;
+;; past 1 MiB an `X` line makes it unusable. Either way the client
+;; walks the tree. Nothing here changes what is loaded, and nothing raises.
+
+(defn source_entry_line
+  "One manifest line for `path`: its bytes when `raw` is given, else absent."
+  [path raw]
+  (cond
+    (or (String/contains? path "\n") (String/contains? path "\t")) "X\n"
+    (nil? raw) (erlang/iolist_to_binary (list "A\t" path "\n"))
+    :else (erlang/iolist_to_binary
+            (list "L\t" (Base/encode16 (crypto/hash :sha256 raw) (list (tuple :case :lower)))
+                  "\t" path "\n"))))
+
+(defn source_highest_missing
+  "`path` (absent) collapsed to its topmost missing ancestor."
+  [path]
+  (let [parent (Path/dirname path)]
+    (if (or (erlang/== parent path) (File/exists? parent))
+      path
+      (source_highest_missing parent))))
+
+(defn- sources_table
+  []
+  (when (erlang/== :undefined (ets/whereis :bl_realm_sources_seen))
+    (try
+      (let [heir (erlang/whereis :Elixir.BeamLisp.Loader.Server)
+            opts (list :named_table :public :set)]
+        (ets/new :bl_realm_sources_seen
+                 (if (erlang/is_pid heir) (cons (tuple :heir heir nil) opts) opts)))
+      (catch _ nil))))
+
+(defn- sources_header_ready
+  "Make sure `manifest` starts with this root's header, and, the first time in
+   this VM, remember what it already lists."
+  [manifest root]
+  (let [table :bl_realm_sources_seen
+        header (erlang/iolist_to_binary (list "bl-realm-sources 1\t" root "\n"))]
+    (when (erlang/not (ets/member table (tuple :header manifest)))
+      (File/mkdir_p! (Path/dirname manifest))
+      (if (File/regular? manifest)
+        (let [text (File/read! manifest)]
+          ;; A header of this root is kept, unless the file is degenerate (it
+          ;; outgrew what a realm legitimately lists, or holds an X line): a
+          ;; VM starting its records over is better than a manifest the client
+          ;; can never use again.
+          (if (and (String/starts_with? text header)
+                   (erlang/< (erlang/byte_size text) 262144)
+                   (erlang/not (String/contains? text "\nX\n")))
+            (Enum/each (String/split text "\n" (list (tuple :trim true)))
+              (fn [line]
+                (let [parts (String/split line "\t")]
+                  (when (erlang/> (erlang/length parts) 1)
+                    (ets/insert table (tuple (tuple :listed manifest (List/last parts)) true))
+                    (ets/insert table (tuple (tuple manifest (List/last parts)) true))))))
+            (let [tmp (erlang/iolist_to_binary
+                        (list manifest ".tmp" (erlang/integer_to_binary (erlang/unique_integer (list :positive)))))]
+              (ets/match_delete table (tuple (tuple manifest :_) :_))
+              (ets/match_delete table (tuple (tuple :listed manifest :_) :_))
+              (File/write! tmp header)
+              (File/rename! tmp manifest))))
+        (try (File/write! manifest header (list :exclusive)) (catch _ nil)))
+      (ets/insert table (tuple (tuple :header manifest) true)))
+    :ok))
+
+(defn source_record_candidate
+  "Record one candidate `find_file` examined in `manifest` (for the realm rooted
+   at `root`): `raw` is the file's bytes, or nil when there is no such file."
+  [manifest root path raw]
+  (try
+    (let [abs (Path/expand path)
+          table :bl_realm_sources_seen]
+      (sources_table)
+      (sources_header_ready manifest root)
+      (when (and (erlang/not (ets/member table (tuple manifest abs)))
+                 (erlang/not (ets/member table (tuple :full manifest))))
+        (ets/insert table (tuple (tuple manifest abs) true))
+        (when (erlang/not (Enum/any? (BeamLisp.Tiers/dirs)
+                            (fn [d] (String/starts_with? abs (erlang/iolist_to_binary (list (Path/expand d) "/"))))))
+          (let [at (if (nil? raw) (source_highest_missing abs) abs)]
+            (when (erlang/not (ets/member table (tuple :listed manifest at)))
+              (ets/insert table (tuple (tuple :listed manifest at) true))
+              (File/write! manifest (source_entry_line at raw) (list :append))
+              (when (erlang/> (filelib/file_size manifest) 1048576)
+                (ets/insert table (tuple (tuple :full manifest) true))
+                (File/write! manifest "X\n" (list :append)))))))
+      :ok)
+    (catch _
+      (try (File/rm! manifest) (catch _ nil))
+      :error)))
+
+(defn- sources_target
+  "{:manifest :root} for the calling realm, or nil outside one."
+  []
+  (try
+    (let [realm (or (Process/get :bl_load_realm) (realm_facts))
+          decl (if (erlang/is_map realm) (maps/get :decl realm nil) nil)
+          overrides (if (erlang/is_map decl) (maps/get :overrides decl nil) nil)]
+      (if (erlang/is_binary overrides)
+        (let [root (Path/dirname overrides)]
+          (if (File/dir? root)
+            (maps/put :root root (maps/put :manifest (Path/join root ".bl/realm-sources.v1") (maps/new)))
+            nil))
+        nil))
+    (catch _ nil)))
+
+(defn- note_source
+  "Observation only: tell the manifest that `path` was examined."
+  [target path raw]
+  (when (erlang/is_map target)
+    (source_record_candidate (maps/get :manifest target) (maps/get :root target) path raw)))
+
 (defn- env_row
   "The value of a chain-walking env row, or nil."
   [k]
@@ -1040,7 +1169,8 @@
          result)))))
   ([ns dirs]
   (when-not (erlang/== dirs (list))
-   (let [relatives (source_relatives ns)]
+   (let [relatives (source_relatives ns)
+         row (sources_target)]
     (Enum/reduce dirs nil
       (fn [dir acc]
         (if (ok-result? acc)
@@ -1053,12 +1183,13 @@
                   (if (File/regular? path)
                     (let [raw (File/read! path)
                           content (doc_content path raw)]
+                      (note_source row path raw)
                       (if (declares? content ns)
                         (tuple :ok path content)
                         (if (nil? acc2)
                           (tuple :wrong_ns path (declared_ns content))
                           acc2)))
-                    acc2))))))))))))
+                    (do (note_source row path nil) acc2)))))))))))))
 
 ; ── reading source: plain / literate / shebang ──────────────────────────────
 
