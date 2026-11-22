@@ -77,6 +77,8 @@ export function portableLeaves(lateModule) {
     "Elixir.File/regular?/1", "Elixir.File/exists?/1", "Elixir.File/dir?/1", "Elixir.File/ls!/1", "Elixir.File/ls/1",
     "Elixir.File/mkdir_p!/1", "Elixir.File/rm/1", "Elixir.File/rm!/1", "Elixir.File/stat!/1", "Elixir.File/stat!/2",
     "Elixir.File/rename!/2", "Elixir.File/cwd!/0"].map((k) => [k, beamOnly(k)])),
+  // A page loads namespaces from its module graph, never from source files.
+  "Elixir.BeamLisp.Loader/source_path/1": () => null,
   // A page has no process environment: every variable is unset.
   "Elixir.System/get_env/1": () => null,
   "Elixir.System/get_env/2": (_k, d) => d,
