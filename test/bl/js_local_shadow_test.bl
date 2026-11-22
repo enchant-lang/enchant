@@ -1,0 +1,22 @@
+(ns bl.js.local-shadow-test)
+;; A JavaScript namespace that defines its own `key` (a Core seed name) calls
+;; its own definition, as the BEAM does; it must not be linked to Core's.
+(deftest a-local-definition-shadows-a-core-seed-name-in-javascript
+ (let [root (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd))
+       dir (str (System/tmp_dir!) "/bl-js-shadow-" (System/unique_integer (list :positive)))
+       src (str dir "/src") out (str dir "/out")]
+  (File/mkdir_p! (str src "/shadow"))
+  (File/write! (str src "/shadow/main.bl")
+   "(ns ^:js shadow.main)\n(defn- key [x] (str \"k.\" x))\n(defn plain [x] (key x))\n(defn guarded [x] (try (key x) (catch _ nil)))\n(defn- update [x] (str \"u.\" x))\n(defn useupdate [x] (update x))\n(defn corekey [e] (clojure.core/key e))\n")
+  (try
+   (BeamLisp.Loader/ensure_loaded "bl.js")
+   ((BeamLisp.Env/fetch! "bl.js" "build!") "shadow.main"
+    {:paths (list src (Path/join root "priv/lib") (Path/join root "priv/boot")) :out out})
+   (let [js (File/read! (str out "/ns/shadow.main.mjs"))
+         body (fn [n] (let [m (Regex/run (Regex/compile! (str "export const d_" n " = [\\s\\S]*?(?=export const|$)")) js)] (first m)))]
+    (is (String/contains? (body "plain") "C.call(d_key,"))
+    (is (not (String/contains? (body "plain") "N_core.d_key")))
+    (is (String/contains? (body "guarded") "C.call(d_key,"))
+    (is (String/contains? (body "useupdate") "C.call(d_update,"))
+    (is (String/contains? (body "corekey") "N_core.d_key") "an explicit Core reference stays Core"))
+   (finally (File/rm_rf! dir)))))
