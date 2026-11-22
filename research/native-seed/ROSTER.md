@@ -298,6 +298,38 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 After N3. Journal 06, "What the lookup census says about the IR", has the
 census to start from.
 
+### J — JavaScript target
+
+#### J1 ⏳ Four JS test files fail on `main` · S · BL (`priv/lib/js`)
+- **Why.** These four fail at HEAD, both with and without the 2026-11-22
+  shadowing fix. Both sessions checked:
+  - `test/bl/js_compiled_core_test.bl`
+  - `test/bl/js_compiler_boundary_test.bl`
+  - `test/bl/js_diff_test.bl` (3 cases: `beam-and-js-print-every-case-identically`,
+    `beam-lisp-evaluated-in-js-gives-the-beams-answers` ×2)
+  - `test/bl/js_native_live_test.bl`
+
+  Three of them stop with `priv/lib/js/emit.bl: emit-invoke: priv/lib/js/emit.bl:290:
+  SDK declaration metadata is unavailable for system.ir/call-site`. The other 18
+  `js_*` files pass.
+- **Do.**
+  1. Read `priv/lib/js/emit.bl` around line 290, and find where SDK
+     declaration metadata is looked up (grep `declaration metadata` in
+     `priv/host/aot.bl` and `priv/lib/js/`).
+  2. Find why `system.ir`'s rows are missing. Candidates:
+     - `system.ir` isn't in the selected SDK's metadata;
+     - the JS build runs with no constructor context;
+     - a recent change to retained definition terms (`5ceb03aab`, "Compact
+       retained definition terms…").
+  3. Use `git log -S'declaration metadata' -- priv` to find when the message
+     appeared, and bisect against an older SDK only if that's cheap.
+- **Done when.**
+  - All 22 `test/bl/js_*_test.bl` files pass in one run:
+    `work run --memory 4G --timeout 3000 -- ./bin/bl test $(ls test/bl/js_*_test.bl)`,
+    about 8 minutes on a warm SDK.
+  - `js_local_shadow_test.bl` and `js_exact_global_test.bl` still pass.
+- **SDK build.** Yes. Lane "SDK inputs".
+
 ## Parallel lanes
 
 Cards in one lane conflict; lanes run at the same time.
@@ -305,7 +337,7 @@ Cards in one lane conflict; lanes run at the same time.
 | Lane | Cards | Shares |
 |---|---|---|
 | Platform (Rust) | U1 → U2 | one platform build |
-| SDK inputs (BL runtime, `nix/`) | U3, U4, then the BEAM half of N2 | one SDK build at a time |
+| SDK inputs (BL runtime, `nix/`) | J1, U3, U4, then the BEAM half of N2 | one SDK build at a time |
 | Native only | C1, C2, N1 → N2 (native half) | `chez-main` as base; no SDK build |
 | Measurement | U5 | needs a quiet machine |
 
