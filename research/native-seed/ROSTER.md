@@ -216,7 +216,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   pre-started VM per SDK. Change nothing.
 - **Done when.** The phases sum to within 10% of the measured total, over 3 runs.
 
-#### U6 🔨 The SDK inventory is walked once per VM · S · BL runtime · branch `lane/cold-start`
+#### U6 ✅ The SDK inventory is walked once per VM · S · BL runtime · branch `lane/cold-start`
 - **Why.** U5 measured a cold `bl run` at ~4.3 s (load ~4). 65–70% is the `:beam_lisp` app start
   plus `vm.native`'s `build-all!`, and the VM re-reads the whole SDK `priv` tree (~2,800 `.bl` files,
   `precompiled.term` 8 times) in 12–17 sweeps per run: 1.5–1.7 s. Phases 1–3 (client, erts boot,
@@ -227,6 +227,14 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   checkouts, with the same authentication authority.
 - **Done when.** The sweeps happen once (counted with a probe), the cold total drops (measured on
   the integration SDK), and the inventory and custody tests pass.
+
+#### U7 🔨 Cold-start hot spots · S · BL runtime · branch `lane/cold-start`
+- **Why.** U6's sampler over 3 cold runs of an unchanged store SDK (3.5–3.65 s) ranks
+  `Emit.collect_execution_entries` 9.6%, `seed_artifact_metadata!` 6.7% (first decode of 95 seeds),
+  `Loader.find_file` 5.2%, `compile_sdk_source!` 3.5% (a compile on an unchanged SDK), and
+  `code_server:call`/`gen:do_call` ~21% (serialized loads).
+- **Change.** For each: why it runs on an unchanged immutable SDK; remove it or seal the answer at
+  SDK build time; keep authentication; measure. Drop what doesn't pay.
 
 ### N — the native compiler on the default path
 
@@ -387,7 +395,7 @@ census to start from.
 
 ### J — JavaScript target
 
-#### J1 🔨 Four JS test files fail on `main` · S · BL (`priv/lib/js`)
+#### J1 ✅ Four JS test files fail on `main` · S · BL (`priv/lib/js`)
 - **Why.** These four fail at HEAD, both with and without the 2026-11-22
   shadowing fix. Both sessions checked:
   - `test/bl/js_compiled_core_test.bl`
@@ -432,6 +440,9 @@ Cards in one lane conflict; lanes run at the same time.
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | U6: SDK files hashed once per VM | Store files hashed once; artifact metadata and kernel disassembly reused; a warm inventory walk 118 → 98 ms; cold run paired with the previous SDK 3,594 → 3,483 ms median (load ~10). U5's "1.5 s of repeated walks" was too high: a repeat walk is ~100 ms | `c8a408a94` |
+| ✅ | J3: `js_compiled_core` passes | Fixed by W1's realm-local link fix: 11/11 | `c8a408a94` |
+| ✅ | Portable JS leaves, literate JS namespaces, `system.inputs` (from another session, lane/rich-edit) | `js_portable_leaves` 77/77, `system_inputs` 12/12, `js_boot_order` 3/3 | `c8a408a94` |
 | ✅ | W1: multi-file test runs stay isolated | `vm.manager` shutdown drained the realm running the tests (now per-file scope); the compiler baked a realm-local provider's platform module name ("module … is not available"). Ten realm/seed/JS files no longer go incoherent; an edited test helper is seen after a retirement | `e4973a0f3` |
 | ✅ | SDK lock wait visible and bounded | A waiter prints the holder and a heartbeat; `BL_SDK_LOCK_WAIT` bounds it (exit 75); `BL_SDK_REUSE_CURRENT=1` uses the current SDK; `realm stop` never queues. `checkout_sdk_lock_wait.py` passes | `e4973a0f3` (from another session, d9efc7f5d) |
 | ✅ | U5: where a cold start goes | 4.3 s at load ~4: `:beam_lisp` start + `vm.native` ~65–70%, repeated SDK tree sweeps ~35%; client + erts + deps < 8% | `33fd76cc4` |
