@@ -1,0 +1,190 @@
+; deodorant/advice.bl — smells that explain instead of rewriting.
+;
+; A deodorant rule rewrites: its after is exact, so `bl fix` may apply it blind.
+; Some smells have no exact after. A fixed `(Process/sleep 400)` in a browser
+; test waits for SOMETHING — a layout, a frame, a reply — and only the author
+; knows which condition to wait on. So an ADVICE smell finds the form, says why
+; it smells and what the usual way out is, and stops there. It is the feedback
+; an agent gets after an edit, and a hint a person sees at the prompt.
+;
+; Three things make advice usable rather than noisy:
+;
+;   * WHERE — a rule applies to a file context (a test, a file that drives a
+;     browser), not to every file. A server fixture that plays a slow network
+;     is not a test waiting for a page.
+;   * STRUCTURE — a sleep inside a `loop` that `recur`s is the poll interval
+;     of a deterministic wait (`browser.page/wait!` is one), not a fixed wait.
+;     The reader's positioned nodes say so; a line scan cannot.
+;   * ALLOWANCE WITH A REASON — the enclosing definition can carry
+;     `^{:smell/allow {:fixed-sleep "films a 1 s animation; no event marks its end"}}`.
+;     An allowance with a blank reason does not count: "ignore this" becomes a
+;     claim someone can check. Metadata travels with the form, so the record,
+;     the agent and the reviewer all see the same reason.
+;
+; The registry is open, like deodorant's: `defadvice` adds a rule.
+
+(ns deodorant.advice
+  (:require [reader-node :as rn]))
+
+(def registry
+  "Every advice rule, in declaration order: {name rule}."
+  (atom {}))
+
+(defn register-advice!
+  "Add or replace `rule` ({:name :where :finds :message :suggest}); returns it."
+  [rule]
+  (swap! registry assoc (:name rule) rule)
+  rule)
+
+(defmacro defadvice
+  "Declare an advice smell:
+     (defadvice name
+       {:where   (fn [ctx] bool)          ; does the rule apply to this file?
+        :finds   (fn [node ancestors] bool) ; does this form smell?
+        :message \"why it smells\"
+        :suggest \"the usual way out\"})
+   `ctx` is {:path :ns :requires}; `ancestors` are the enclosing forms,
+   innermost first."
+  [name spec]
+  (list 'def name (list 'deodorant.advice/register-advice! (list 'assoc spec :name (list 'quote name)))))
+
+;; ── reading a source ──────────────────────────────────────────────────────────
+
+(defn- head-name [node]
+  (let [f (rn/node-form node)]
+    (when (= :list (rn/node-tag f))
+      (let [items (rn/node-items f)]
+        (when (not (empty? items))
+          (let [h (rn/node-form (first items))]
+            (when (= :symbol (rn/node-tag h)) (rn/node-name h))))))))
+
+(defn- children [node]
+  (let [f (rn/node-form node)]
+    (if (contains? #{:list :vector :set :map} (rn/node-tag f))
+      (let [items (rn/node-items f)]
+        ;; a map node's items are pairs
+        (if (= :map (rn/node-tag f)) (mapcat (fn [p] (if (sequential? p) p [p])) items) items))
+      ())))
+
+(defn- line-of [node]
+  (let [p (rn/node-pos node)] (when (map? p) (:line p))))
+
+(defn- header
+  "{:ns name :requires [ns-string …]} from a source's `(ns …)` form."
+  [nodes]
+  (let [ns-node (some (fn [n] (when (= "ns" (head-name n)) n)) nodes)]
+    (if (nil? ns-node)
+      {:ns nil :requires []}
+      (let [items (rest (rn/node-items (rn/node-form ns-node)))
+            name (let [f (rn/node-form (first items))] (when (= :symbol (rn/node-tag f)) (rn/node-name f)))
+            clauses (filter (fn [n] (let [f (rn/node-form n)]
+                                      (and (= :list (rn/node-tag f))
+                                           (let [h (rn/node-form (first (rn/node-items f)))]
+                                             (and (= :keyword (rn/node-tag h)) (= "require" (rn/node-name h)))))))
+                            items)
+            targets (mapcat (fn [c]
+                              (keep (fn [spec]
+                                      (let [f (rn/node-form spec)]
+                                        (cond (= :symbol (rn/node-tag f)) (rn/node-name f)
+                                              (= :vector (rn/node-tag f))
+                                              (let [h (rn/node-form (first (rn/node-items f)))]
+                                                (when (= :symbol (rn/node-tag h)) (rn/node-name h)))
+                                              :else nil)))
+                                    (rest (rn/node-items (rn/node-form c)))))
+                            clauses)]
+        {:ns name :requires (vec targets)}))))
+
+;; ── allowances ────────────────────────────────────────────────────────────────
+
+(defn- plain
+  "A metadata value as plain data: reader map/keyword/string nodes become the
+   values they spell; plain values pass through."
+  [v]
+  (let [f (rn/node-form v)]
+    (case (rn/node-tag f)
+      :map (into {} (map (fn [p] [(plain (first p)) (plain (second p))]) (rn/node-items f)))
+      :keyword (keyword (rn/node-name f))
+      :symbol (symbol (rn/node-name f))
+      :scalar f
+      (if (map? f) (into {} (map (fn [[k x]] [k (plain x)]) f)) f))))
+
+(defn allowance
+  "The reason a definition node gives for allowing smell `rule`, or nil. The
+   reason is the `:smell/allow` metadata on the defined name (or on the form)."
+  [def-node rule]
+  (let [f (rn/node-form def-node)
+        name-node (second (rn/node-items f))
+        metas (keep (fn [n] (let [p (rn/node-pos n)] (when (map? p) p))) [name-node def-node])
+        allow (some (fn [m] (let [a (get m :smell/allow)] (when (some? a) (plain a)))) metas)
+        why (when (map? allow) (get allow (keyword (str rule))))]
+    (when (and (string? why) (not (blank? why))) why)))
+
+;; ── the walk ──────────────────────────────────────────────────────────────────
+
+(defn- walk
+  "Every [node ancestors] pair under `node`, ancestors innermost first."
+  [node ancestors]
+  (cons [node ancestors]
+        (mapcat (fn [c] (walk c (cons node ancestors))) (children node))))
+
+(defn advise-source
+  "Advice for source text `src`: [{:smell :line :form :message :suggest
+   :allowed reason-or-nil}], in source order. Allowed findings are kept,
+   marked with the reason, so a reader sees what was allowed and why.
+   `opts`: {:path p :rules [name …]} (default: every registered rule)."
+  ([src] (advise-source src {}))
+  ([src opts]
+   (let [nodes (BeamLisp.Reader/read_string src)
+         ctx (assoc (header nodes) :path (:path opts))
+         rules (keep (fn [n] (get @registry n)) (or (:rules opts) (keys @registry)))
+         active (filter (fn [r] ((:where r) ctx)) rules)]
+     (vec
+      (for [top nodes
+            r active
+            [node ancestors] (walk top ())
+            :when ((:finds r) node ancestors)]
+        {:smell (:name r)
+         :line (line-of node)
+         :form (head-name node)
+         :message (:message r)
+         :suggest (:suggest r)
+         :allowed (allowance top (:name r))})))))
+
+(defn advise
+  "Advice for the file at `path` (see `advise-source`)."
+  ([path] (advise path {}))
+  ([path opts] (advise-source (File/read! path) (assoc opts :path path))))
+
+(defn open
+  "Only the findings without an allowance."
+  [findings]
+  (vec (remove :allowed findings)))
+
+;; ── the rules ─────────────────────────────────────────────────────────────────
+
+(defn test-or-browser?
+  "A test file, or a file that drives a browser (requires one, or is one)."
+  [ctx]
+  (let [p (or (:path ctx) "")
+        n (or (:ns ctx) "")
+        browser? (fn [r] (or (starts-with? r "browser.") (= r "browser") (starts-with? r "scenario")))]
+    (or (ends-with? p "_test.bl") (includes? p "/test/") (includes? p "/tests/")
+        (ends-with? n "-test")
+        (browser? n)
+        (some browser? (:requires ctx)))))
+
+(defn- polling?
+  "Inside a `loop` whose body `recur`s: the interval of a deterministic wait."
+  [ancestors]
+  (some (fn [a]
+          (and (= "loop" (head-name a))
+               (some (fn [[n _]] (= "recur" (head-name n))) (walk a ()))))
+        ancestors))
+
+(defadvice fixed-sleep
+  {:where test-or-browser?
+   :finds (fn [node ancestors]
+            (and (contains? #{"Process/sleep" ":timer/sleep" "timer/sleep"} (head-name node))
+                 (not (polling? ancestors))))
+   :message "A fixed sleep waits for a time, not for the thing it is waiting for: slow when the page is fast, flaky when it is slow."
+   :suggest "Wait for the condition, bounded by a timeout: (page/wait! p \"…predicate…\") or (page/wait-url! p pred). If the time itself is the point, say why: ^{:smell/allow {:fixed-sleep \"why\"}} on the definition."})

@@ -1,0 +1,64 @@
+; test/bl/deodorant_advice_test.bl — advice smells: find, explain, never rewrite.
+; Run: ./bin/bl test test/bl/deodorant_advice_test.bl
+;
+; Pins the fixed-sleep rule where a plausible version drifts: the file context
+; decides whether it applies, a sleep inside a recurring loop is a poll and not
+; a finding, and an allowance counts only with a written reason. The last tests
+; read real browser files from this checkout.
+
+(ns deodorant-advice-test
+  (:require [deodorant.advice :as adv]))
+
+(defn- lines [findings] (mapv :line findings))
+
+(def browser-test
+  (str "(ns demo.page-test (:require [browser.page :as page]))\n"
+       "(deftest waits\n"
+       "  (page/click! p \"#go\")\n"
+       "  (Process/sleep 400)\n"
+       "  (is true))\n"))
+
+(deftest a-fixed-sleep-in-a-browser-test-is-found-and-explained
+  (let [f (adv/advise-source browser-test {:path "test/demo/page_test.bl"})]
+    (is (= [4] (lines f)))
+    (is (= 'fixed-sleep (:smell (first f))))
+    (is (includes? (:suggest (first f)) "page/wait!"))
+    (is (nil? (:allowed (first f))))))
+
+(deftest the-file-context-decides
+  (let [src "(ns app.server)\n(defn slow-reply [] (Process/sleep 400) :ok)\n"]
+    (is (= [] (adv/advise-source src {:path "src/app/server.bl"})) "an ordinary file is not advised")
+    (is (= [2] (lines (adv/advise-source src {:path "test/app/server_test.bl"}))) "a test file is")
+    (is (= [2] (lines (adv/advise-source "(ns app.x (:require [browser.page :as p]))\n(defn f [] (Process/sleep 1))\n" {})))
+        "a file that requires a browser is")))
+
+(deftest a-sleep-in-a-recurring-loop-is-a-poll
+  (let [src (str "(ns demo.wait-test)\n"
+                 "(defn wait-until [pred]\n"
+                 "  (loop [] (if (pred) true (do (Process/sleep 50) (recur)))))\n"
+                 "(defn pause [] (doseq [i (range 3)] (Process/sleep 25)))\n")]
+    (is (= [4] (lines (adv/advise-source src {:path "test/demo/wait_test.bl"})))
+        "the poll is not a finding; a sleep in doseq is")))
+
+(deftest an-allowance-needs-a-reason
+  (let [allowed (str "(ns demo.film-test)\n"
+                     "(deftest ^{:smell/allow {:fixed-sleep \"films a 1 s animation; no event marks its end\"}} films\n"
+                     "  (Process/sleep 1500))\n")
+        blank (str "(ns demo.film-test)\n"
+                   "(deftest ^{:smell/allow {:fixed-sleep \"\"}} films\n"
+                   "  (Process/sleep 1500))\n")
+        fa (adv/advise-source allowed {:path "test/demo/film_test.bl"})
+        fb (adv/advise-source blank {:path "test/demo/film_test.bl"})]
+    (is (= "films a 1 s animation; no event marks its end" (:allowed (first fa))))
+    (is (= [] (adv/open fa)) "an allowed finding is not open")
+    (is (nil? (:allowed (first fb))) "a blank reason allows nothing")
+    (is (= [3] (lines (adv/open fb))))))
+
+(deftest the-real-recording-test
+  (let [f (adv/advise "optional/browser-port/test/recording_test.bl")]
+    (is (= [19 33 60 96] (lines f)) "every fixed sleep; :19's comment is not an allowance")))
+
+(deftest the-real-browser-page-library
+  (let [f (adv/advise "optional/browser-port/bl/browser/page.bl")]
+    (is (not (some #{105 117} (lines f))) "wait! and wait-url! poll; they are the deterministic waits")
+    (is (= [159 222 264 267] (lines f)) "the pointer-pacing sleeps need a stated reason")))
