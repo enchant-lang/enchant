@@ -197,7 +197,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
     with `ls test/bl | grep -E 'reload|execution|env'`.
 - **SDK build.** Yes (~14 min). Batch with U3.
 
-#### U5 🔨 Where a cold start goes · S · measurement only
+#### U5 ✅ Where a cold start goes · S · measurement only
 - **Why.** Cold `bl run` of `(println 1)` takes 7.6 s, and nobody knows the
   split.
 - **Do.** Time phases of `./bin/bl --cold run /tmp/x.bl` under `work run`:
@@ -214,6 +214,18 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   the fix for the top phase: a lazy app start, a boot script, or a spare
   pre-started VM per SDK. Change nothing.
 - **Done when.** The phases sum to within 10% of the measured total, over 3 runs.
+
+#### U6 🔨 The SDK inventory is walked once per VM · S · BL runtime · branch `lane/cold-start`
+- **Why.** U5 measured a cold `bl run` at ~4.3 s (load ~4). 65–70% is the `:beam_lisp` app start
+  plus `vm.native`'s `build-all!`, and the VM re-reads the whole SDK `priv` tree (~2,800 `.bl` files,
+  `precompiled.term` 8 times) in 12–17 sweeps per run: 1.5–1.7 s. Phases 1–3 (client, erts boot,
+  dependency apps) total only 0.3–0.45 s, so boot scripts and lazy app start would not help.
+  Evidence: `research/checked-tiles/evidence/cold-start-phases.json`.
+- **Change.** Memoize the inventory per VM, keyed by the image's identity. For an immutable image,
+  take digests from the sealed manifest it already carries. Keep the full walk for mutable
+  checkouts, with the same authentication authority.
+- **Done when.** The sweeps happen once (counted with a probe), the cold total drops (measured on
+  the integration SDK), and the inventory and custody tests pass.
 
 ### N — the native compiler on the default path
 
@@ -419,6 +431,7 @@ Cards in one lane conflict; lanes run at the same time.
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | U5: where a cold start goes | 4.3 s at load ~4: `:beam_lisp` start + `vm.native` ~65–70%, repeated SDK tree sweeps ~35%; client + erts + deps < 8% | `33fd76cc4` |
 | ✅ | U4b: Env custody cleanup by exact key | Profile keys and handoff targets kept in the owner's own row; departure and offer lookups no longer scan 22,800-row tables. Env own time per spawn 1,904 → 971 µs, reductions 90k → 24k. 27 custody/execution/env files green with `BL_CUSTODY_SCAN_CHECK=1` | `90e0347ae` |
 | ✅ | T1: `scripts/check-runtime-hosts` works | Brings its own erlang/elixir, runs against a store SDK image: `priv/host` edits checked in ~40 s (+2.5 min when `env.bl` changes), a deliberate break fails | `e69f3863f` |
 | ✅ | U3: a failed preparation names its first cause | The refusal carries the first `error:` lines from the job's events; `preparation_failure_cause_test` 11/11 | `e69f3863f` |
