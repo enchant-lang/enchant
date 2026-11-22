@@ -7,16 +7,25 @@ holds the reasoning.
 
 ## Now
 
+Ordered by what a user waits for. Measured 2026-11-22 unless noted.
+
 | | Work | Why | Done when |
 |---|---|---|---|
-| ⏳ | Interned names on the native host | Lookups and any memo pay a string hash per name; `string-hash`/`equal-hash` are ~4–5% of the reader job | The reader interns symbol names; byte-identical candidate; paired |
-| ⏳ | Emitter `ident` | `ident` joins one text per character for every emitted name | A memo or a direct encoder; byte-identical; paired |
-
+| ⏳ | Checkout client inventories declared inputs only | A warm `./bin/bl` request takes 550 ms, `--version` 525 ms: the client walks the whole checkout (52k `statx`, 302k `readlink`), 18k directories of them in untracked `research/native-seed/out` (32 GB). Installed `bl` warm: 80 ms | Project pin from declared roots (or a VM-side watcher), not every directory; request cost independent of scratch |
+| ⏳ | Errors reach the waiting client | A failed preparation says only `exited with code 1` (the cause was a cached nixbuild.net failure); a warm VM that dies at start (`Invalid native refresh project`) makes the client wait 120 s | The first cause is in the client's message within a second of the failure |
+| ⏳ | BEAM backend on Chez | The native compiler emits Scheme only; `lower` (bl-ANF → Core Erlang) builds `cerl` records and is refused on Chez | `cerl` as data, Core Erlang shipped as ETF, BEAM does only `from_core` + load; byte-identical `.beam` on all 662 SDK units |
+| ⏳ | Native compile service in shadow mode | Nothing in `bl` calls the native compiler | One Chez process per realm; a unit whose macros need BEAM-only code falls back with a named reason; both compile, outputs compared, BEAM's shipped until zero differences over SDK, Knowledger and Enchant |
+| ⏳ | Early cutoff in the SDK | A compiler-key rotation rebuilds all 662 units (862 s today) | Units recompiled by the native front end; downstream keyed on emitted bytes |
+| ⏳ | Request custody per change | ~84 publication-lock acquisitions per warm request (journal 06) | Custody work proportional to changed modules |
+| ⏳ | Cold path breakdown | Cold `bl run` 7.6 s (was 21.0 s) | Measured per phase; a plan for the largest |
+| ⏳ | Interned names on the native host | `string-hash`/`equal-hash` ~4–5% of the reader job | Byte-identical candidate; paired |
+| ⏳ | Emitter `ident` | One text per character for every emitted name | Byte-identical; paired |
 
 ## Done
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | SDK preparation from a layered previous SDK | The unit archive read the image's linked `unit-store` and refused the link, so every preparation after the first layered SDK failed; it reads the library's directory: 862 s key rotation, passes | `d2cd91781` and after |
 | ✅ | Disk floor | User timer `nix-store-floor` (every 15 min): below 40 GB free, a bounded `nix-store --gc` toward 80 GB; dry-run checked | `~/.config/systemd/user/nix-store-floor.timer` |
 | ✅ | Durable base image | Image links name resolved files; `research/native-seed/out/chez-main` (21 MB) qualifies on its own | (this batch) |
 | ✅ | SDK in two layers | Library reused across native edits: a Rust edit builds in 82 s (cargo included), same library path; a key rotation in 13 min | `2fa24ed63` |
@@ -56,8 +65,10 @@ holds the reasoning.
 | Measure | Now | Warm BEAM |
 |---|---|---|
 | Reader job (read + compile + emit) | ~110 ms min, ~117 ms median under load | 158 ms |
+| Warm request, checkout / installed | 550 ms / 80 ms | — |
+| Cold `bl run` | 7.6 s | — |
 | Native qualification, cold / repeat | 20.8 s / 0.4 s | — |
-| SDK build, native edit / compiler edit | 82 s / 13 min | — |
+| SDK build, native edit / compiler edit | 82 s / 13–14 min | — |
 
 ## Parked
 
@@ -65,4 +76,3 @@ holds the reasoning.
 |---|---|---|
 | 🅿️ | Python in `formal-logic`, `checked-tiles` and other research | Not on the critical path |
 | 🅿️ | Incremental per-namespace native AOT on Chez | Waits for the native export |
-| 🅿️ | Interned names on the native host | Memo and lookup both pay string hashes; worth it only with the fused walk landed |
