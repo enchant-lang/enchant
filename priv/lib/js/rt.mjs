@@ -374,13 +374,15 @@ const EMPTY_BNODE = new BNode(0, []);
 
 export class HMap {
   constructor(cnt, root, meta) { this.cnt = cnt; this.root = root; this.meta = meta || null; this._h = undefined; }
-  get(k, dflt) { const v = nodeGet(this.root, 0, hashOf(k), k); return v === NOT_FOUND ? dflt : v; }
-  has(k) { return nodeGet(this.root, 0, hashOf(k), k) !== NOT_FOUND; }
+  get(k, dflt) { k = canonKey(k); const v = nodeGet(this.root, 0, hashOf(k), k); return v === NOT_FOUND ? dflt : v; }
+  has(k) { k = canonKey(k); return nodeGet(this.root, 0, hashOf(k), k) !== NOT_FOUND; }
   assoc(k, v) {
+    k = canonKey(k);
     const [r, added] = nodeAssoc(this.root, 0, hashOf(k), k, v);
     return r === this.root ? this : new HMap(added ? this.cnt + 1 : this.cnt, r, this.meta);
   }
   dissoc(k) {
+    k = canonKey(k);
     const r = nodeDissoc(this.root, 0, hashOf(k), k);
     if (r === this.root) return this;
     return new HMap(this.cnt - 1, r === null ? EMPTY_BNODE : r, this.meta);
@@ -472,12 +474,41 @@ function numHash(n) {
   return strHash(String(n));
 }
 
+const isKeyNum = (x) => typeof x === "number" || typeof x === "bigint" || x instanceof Flt || x instanceof Dec;
+/** The canonical representative of a numeric key (the BEAM's `hash_key`, Q3:
+    keys use value equality): an integral float or decimal is the integer; a
+    decimal without trailing zeros that is exactly a double is that float; any
+    other decimal drops its trailing zeros. Everything else is itself. */
+function canonNum(x) {
+  if (typeof x === "bigint") return x >= -9007199254740991n && x <= 9007199254740991n ? Number(x) : x;
+  if (x instanceof Flt) {
+    const v = x.v;
+    if (!Number.isInteger(v)) return x;
+    return Number.isSafeInteger(v) ? (v === 0 ? 0 : v) : BigInt(v);
+  }
+  if (x instanceof Dec) {
+    let u = x.u, s = x.s;
+    while (s > 0 && u % 10n === 0n) { u /= 10n; s--; }
+    if (s === 0) return canonNum(u);
+    const d = s === x.s ? x : new Dec(u, s);
+    const f = Number(d.plain());
+    return Number.isFinite(f) && decimalFloatCompare(d, f) === 0 ? canonNum(new Flt(f)) : d;
+  }
+  return x;
+}
+const canonKey = (k) => (isKeyNum(k) ? canonNum(k) : k);
+
 /** The hash_key hash: consistent with `keyEq`. */
 export function hashOf(x) {
   if (x === null || x === undefined) return 0;
+  if (typeof x === "object" && (x instanceof Flt || x instanceof Dec)) {
+    const c = canonNum(x);
+    if (c !== x && !(c instanceof Flt || c instanceof Dec)) return hashOf(c);
+    x = c;
+  }
   switch (typeof x) {
     case "number": return numHash(x);
-    case "bigint": return Number(BigInt.asIntN(32, x)) ^ Number(BigInt.asIntN(32, x / 4294967296n));
+    case "bigint": if (typeof canonNum(x) === "number") return numHash(Number(x)); return Number(BigInt.asIntN(32, x)) ^ Number(BigInt.asIntN(32, x / 4294967296n));
     case "string": return strHash(x);
     case "boolean": return x ? 1231 : 1237;
     case "function": return fnId(x);
@@ -502,12 +533,16 @@ function fnId(x) { let i = IDS.get(x); if (i === undefined) { i = nextId++; IDS.
 export function keyEq(a, b) {
   if (a === b) return true;
   if (a === null || b === null || a === undefined || b === undefined) return false;
-  const ta = typeof a;
-  if (ta !== "object" || typeof b !== "object") {
-    if ((ta === "number" || ta === "bigint") && (typeof b === "number" || typeof b === "bigint")) return a == b; // eslint-disable-line eqeqeq
-    return false;
+  const an = isKeyNum(a), bn = isKeyNum(b);
+  if (an || bn) {
+    if (!(an && bn)) return false;
+    a = canonNum(a); b = canonNum(b);
+    if (typeof a !== "object" || typeof b !== "object") return typeof a !== "object" && typeof b !== "object" && a == b; // eslint-disable-line eqeqeq
+    if (a instanceof Flt) return b instanceof Flt && (a.v === b.v || (a.v !== a.v && b.v !== b.v));
+    return a instanceof Dec && b instanceof Dec && a.u === b.u && a.s === b.s;
   }
-  if (a instanceof Flt) return b instanceof Flt && (a.v === b.v || (a.v !== a.v && b.v !== b.v));
+  const ta = typeof a;
+  if (ta !== "object" || typeof b !== "object") return false;
   if (a instanceof Vec) return b instanceof Vec && seqEqv(a, b, keyEq);
   if (a instanceof Cons || a === EMPTY) return (b instanceof Cons || b === EMPTY) && seqEqv(a, b, keyEq);
   if (a instanceof HMap) return b instanceof HMap && mapEqv(a, b, keyEq);
@@ -566,8 +601,10 @@ function atomName(x) { return x === null || x === undefined ? "nil" : x === true
 
 /** BL `=`, measured against BEAM (2026-10-03): lists and vectors are one
     sequential family, and numbers compare NUMERICALLY across int/float —
-    (= 1 1.0), (= [1] [1.0]) are true. Map/set KEYS do not: (get {1 :a} 1.0)
-    is nil, (contains? #{1} 1.0) is false — that is `keyEq`. */
+    (= 1 1.0), (= [1] [1.0]) are true. Map/set keys follow the same value
+    equality, with canonical representatives (see `canonNum`); (get {1 :a} 1.0)
+    was nil and (contains? #{1} 1.0) false until the BEAM's value-equal keys
+    (e1f2552e4, Q3): keys are canonical, so both now find the integer. */
 export function eqv(a, b) {
   if (a === b) return true;
   if (a instanceof Lazy) a = realize(a);
@@ -982,7 +1019,7 @@ export function printStr(x) {
     case "boolean": return x ? "true" : "false";
     case "function": return "#<fn " + (x.blName || x.name || "anonymous") + ">";
   }
-  if (x instanceof Flt) { const s = String(x.v); return /[.eEn]|Infinity/.test(s) ? s : s + ".0"; }
+  if (x instanceof Flt) { if (Object.is(x.v, -0)) return "-0.0"; const s = String(x.v); return /[.eEn]|Infinity/.test(s) ? s : s + ".0"; }
   if (x instanceof Dec) return x.plain() + "M";
   if (x instanceof Kw) return ":" + x.fq;
   if (isSym(x)) return x.items[1];
