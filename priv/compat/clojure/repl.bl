@@ -1,0 +1,103 @@
+; repl.bl — Clojure's clojure.repl, read from this image's own namespace table.
+;
+; Clojure's clojure.repl answers "what is there, and what does it say?" by
+; reflecting over Vars and reading source through the classpath. Here the same
+; answers come from what the language already knows about itself:
+;
+;   * which namespaces and public names exist: `BeamLisp.Env` (the table the
+;     compiler resolves against, so `apropos` never lists a name you cannot call);
+;   * where a namespace's source lives: `BeamLisp.Loader/source_path`, the same
+;     lookup `require` loads through — .bl, .bl.md or .bl.org;
+;   * what a definition's text is: the reader's positioned nodes, sliced back to
+;     the original bytes (`span-rewrite/slice-node`), so `source` prints the form
+;     as written, comments and spacing included. A literate module's program is
+;     its cells, as the loader reads them.
+;
+; The REPLs refer `apropos`, `dir`, `source` and `source-fn` into `user`, as
+; Clojure's REPL does; elsewhere, require them like any other namespace.
+
+(ns clojure.repl
+  (:require [span-rewrite :as sr] [reader-node :as rn]))
+
+(defn- nm [x] (if (string? x) x (str x)))
+
+(defn- resolve-name
+  "[ns name] for `sym` as it reads in namespace `here`: a qualified name through
+   the alias table, a bare name through refers, the namespace's own definitions,
+   then core."
+  [here sym]
+  (let [s (nm sym)
+        slash (index-of s "/")]
+    (if (and (some? slash) (pos? slash) (< (inc slash) (count s)))
+      (let [p (subs s 0 slash) n (subs s (inc slash))]
+        [(or (BeamLisp.Env/alias_target here p) p) n])
+      (let [refer (BeamLisp.Env/refer_source here s)]
+        (cond
+          (string? refer) [refer s]
+          (BeamLisp.Env/local_var? here s) [here s]
+          :else ["core" s])))))
+
+(defn- program-text
+  "The program text of namespace `ns`'s source file, or nil. The loader
+   already answers with a literate document's cells (its program), so a .bl,
+   .bl.md and .bl.org source all read the same way here."
+  [ns]
+  (BeamLisp.Loader/source_content ns))
+
+(defn- defined-name
+  "The name a top-level `(def… name …)` node defines, or nil."
+  [node]
+  (let [f (rn/node-form node)]
+    (when (= :list (rn/node-tag f))
+      (let [items (rn/node-items f)
+            head (when (not (empty? items)) (rn/node-form (first items)))]
+        (when (and (= :symbol (rn/node-tag head))
+                   (starts-with? (rn/node-name head) "def"))
+          (some (fn [item]
+                  (let [i (rn/node-form item)]
+                    (when (= :symbol (rn/node-tag i)) (rn/node-name i))))
+                (rest items)))))))
+
+(defn source-fn
+  "The source text of the definition `sym` names, as written, or nil when it
+   has no source file (a primitive, or a name defined only at the prompt)."
+  [sym]
+  (let [[ns n] (resolve-name (BeamLisp.Env/current_ns) sym)
+        src (program-text ns)]
+    (when (some? src)
+      (let [node (some (fn [f] (when (= n (defined-name f)) f))
+                       (BeamLisp.Reader/read_string src))]
+        (when (some? node)
+          (sr/slice-node src (into [] (String/codepoints src)) (sr/line-offsets src) node))))))
+
+(defn source
+  "Print the source of the definition `sym` names, or say why there is none."
+  [sym]
+  (let [s (source-fn sym)]
+    (println (or s (str "Source not found for " (nm sym))))))
+
+(defn apropos
+  "Every public name, in every loaded namespace, whose name contains `pattern`
+   (a string) or matches it (a regex): a sorted list of qualified symbols."
+  [pattern]
+  (let [hit? (if (string? pattern)
+               (fn [n] (some? (index-of n pattern)))
+               (fn [n] (Regex/match? pattern n)))]
+    (sort-by str
+             (for [ns (BeamLisp.Env/namespaces)
+                   n (BeamLisp.Env/public_names ns)
+                   :when (hit? n)]
+               (symbol ns n)))))
+
+(defn dir-fn
+  "The public names of namespace `sym` (an alias works), sorted."
+  [sym]
+  (let [here (BeamLisp.Env/current_ns)
+        n (nm sym)
+        ns (or (BeamLisp.Env/alias_target here n) n)]
+    (map symbol (sort (BeamLisp.Env/public_names ns)))))
+
+(defn dir
+  "Print the public names of namespace `sym`, one per line."
+  [sym]
+  (doseq [n (dir-fn sym)] (println (str n))))

@@ -25,6 +25,32 @@ takes a snapshot of public names at that point. Explicit loader calls initialize
 the requested namespace immediately. Concurrent first uses share loader
 ownership, and recursive requires use the same cycle guard.
 
+## Requiring at a prompt
+
+`require` is the same clause as a function, for the namespace that is current
+when it runs: a REPL session's `user`, a harness task's namespace, a script.
+The alias holds from the next form on.
+
+```clojure
+(require '[clojure.string :as s :refer [join]])
+(s/upper-case "ok")                 ; "OK"
+(require '[clojure [string :as s] set])
+(require '[clojure.set :as-alias cset])
+(require 'my.ns :reload)            ; through the coherent reload bundle
+```
+
+It loads immediately rather than on first use, so a mistake fails on the line
+that made it. Every check runs before anything is written: a taken alias
+(`:require/alias-taken`), a name that is not public (`:require/not-public`,
+with `:names`), or a namespace with no source (`:require/not-found`, with
+`:near` guesses) leaves the namespace as it was. A `.bl.org` or `.bl.md` file
+is a namespace like a `.bl` file; its cells are the program. `:reload-all`
+currently reloads only the named namespace.
+
+The table it writes reads back with `ns-aliases`, `ns-publics`, `all-ns` and
+`find-ns`. `clojure.repl` adds `apropos`, `dir`, `source` and `source-fn`;
+`bl repl` and the web REPL refer them into `user`.
+
 ## Editing and rebuilding
 
 `bl build` builds the complete configured inventory, including literate sources.

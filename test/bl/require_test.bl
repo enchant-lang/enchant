@@ -1,0 +1,102 @@
+; test/bl/require_test.bl — `require` as a function, and the namespace table
+; it writes (`all-ns`, `find-ns`, `ns-publics`, `ns-aliases`), plus the
+; clojure.repl readers over it (`apropos`, `dir-fn`, `source-fn`).
+; Run: ./bin/bl test test/bl/require_test.bl
+;
+; What these pin: Clojure's semantics where a plausible implementation drifts.
+; An alias made by a call must hold for the NEXT compiled form (the reason the
+; function exists at a prompt); a refused request must leave the table as it
+; was; a .bl.org literate module must load like any other source.
+
+(ns require-test
+  (:require [clojure.repl :as repl]))
+
+(defn- in-scratch
+  "Run `f` with a fresh current namespace, so each test owns its alias table."
+  [f]
+  (let [prev (BeamLisp.Env/current_ns)
+        n (str "require-test.scratch" (erlang/unique_integer (list :positive)))]
+    (BeamLisp.Env/declare_ns n)
+    (BeamLisp.Env/in_ns n)
+    (try (f n) (finally (BeamLisp.Env/in_ns prev)))))
+
+(defn- kind-of [thunk] (try (thunk) nil (catch e (:kind (ex-data e)))))
+
+(deftest an-alias-holds-in-the-next-compiled-form
+  (in-scratch
+    (fn [_]
+      (is (nil? (require '[clojure.string :as cs :refer [join]])))
+      (is (= "OK" (BeamLisp.Compiler/eval_string "(cs/upper-case \"ok\")")))
+      (is (= "a,b" (BeamLisp.Compiler/eval_string "(join \",\" [\"a\" \"b\"])"))))))
+
+(deftest the-table-reads-back-what-require-wrote
+  (in-scratch
+    (fn [here]
+      (require '[clojure.string :as cs] '[clojure.set :as-alias cset])
+      (is (= {'cs 'clojure.string 'cset 'clojure.set} (ns-aliases)))
+      (is (= {'cs 'clojure.string 'cset 'clojure.set} (ns-aliases (symbol here))))
+      (is (= 'clojure.string/join (get (ns-publics 'clojure.string) 'join)))
+      (is (= 'clojure.string (find-ns 'clojure.string)))
+      (is (nil? (find-ns 'clojure.strng)))
+      (is (some #{'clojure.string} (all-ns))))))
+
+(deftest requiring-twice-is-a-no-op-and-an-alias-cannot-move
+  (in-scratch
+    (fn [_]
+      (require '[clojure.string :as s])
+      (is (nil? (require '[clojure.string :as s])))
+      (is (= :require/alias-taken (kind-of #(require '[clojure.set :as s]))))
+      (is (= 'clojure.string (get (ns-aliases) 's))))))
+
+(deftest a-refused-request-changes-nothing
+  (in-scratch
+    (fn [_]
+      ; the second spec fails its refer check: the first spec's alias is not written
+      (is (= :require/not-public
+             (kind-of #(require '[clojure.set :as cset] '[clojure.string :refer [join no-such-fn]]))))
+      (is (= {} (ns-aliases)))
+      (let [data (try (require '[clojure.string :refer [nope]]) (catch e (ex-data e)))]
+        (is (= ['nope] (:names data)))))))
+
+(deftest a-missing-namespace-names-near-guesses
+  (in-scratch
+    (fn [_]
+      (let [data (try (require 'clojure.strng) nil (catch e (ex-data e)))]
+        (is (= :require/not-found (:kind data)))
+        (is (vector? (:near data)))))))
+
+(deftest prefix-lists-and-refer-all
+  (in-scratch
+    (fn [_]
+      (require '[clojure [string :as s] set])
+      (is (= 'clojure.string (get (ns-aliases) 's)))
+      (require '[clojure.string :refer :all])
+      (is (= "X" (BeamLisp.Compiler/eval_string "(upper-case \"x\")"))))))
+
+(deftest a-literate-module-is-a-namespace
+  (let [dir (str (System/tmp_dir!) "/require-test-" (erlang/unique_integer (list :positive)))
+        file (str dir "/require_lit/notes.bl.org")]
+    (File/mkdir_p! (str dir "/require_lit"))
+    (File/write! file (str "#+title: notes\n"
+                           "Prose is not code.\n"
+                           "#+begin_src beam-lisp :id a\n"
+                           "(ns require-lit.notes)\n"
+                           "(defn twice \"Doubles.\" [x] (* 2 x))\n"
+                           "#+end_src\n"))
+    (try
+      (BeamLisp.Loader/with_search_dir dir
+        (fn []
+          (in-scratch
+            (fn [_]
+              (require '[require-lit.notes :as notes])
+              (is (= 8 (BeamLisp.Compiler/eval_string "(notes/twice 4)")))
+              (is (= "(defn twice \"Doubles.\" [x] (* 2 x))" (repl/source-fn 'notes/twice)))))))
+      (finally (File/rm_rf! dir)))))
+
+(deftest repl-readers
+  (is (some #{'clojure.string/upper-case} (repl/apropos "upper-case")))
+  (is (some #{'clojure.string/upper-case} (repl/apropos #"^upper")))
+  (is (some #{'join} (repl/dir-fn 'clojure.string)))
+  (is (string? (repl/source-fn 'clojure.string/upper-case)))
+  (is (starts-with? (repl/source-fn 'clojure.string/upper-case) "(defn upper-case"))
+  (is (nil? (repl/source-fn 'clojure.string/no-such-fn))))

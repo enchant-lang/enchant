@@ -133,6 +133,7 @@ command ends — without a second async mechanism to keep in step.
   "The loop `bl repl` has always been: read a form, evaluate it, print it."
   []
   (BeamLisp.Env/in_ns "user")
+  (try (require '[clojure.repl :refer [apropos dir source source-fn]]) (catch _ nil))
   (println "beam-lisp on the BEAM — Ctrl+D to exit")
   (loop []
     (let [src (read-form)]

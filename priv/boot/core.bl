@@ -2138,3 +2138,169 @@
                    (not (and (erlang/is_tuple own) (= :ok (erlang/element 1 own)) (:doc (erlang/element 2 own)))))
           (BeamLisp.Env/put_meta "core" n {:doc d}))))
     true))
+
+;; ── require, and the namespace table it writes ────────────────────────────────
+;;
+;; `(require …)` is the `(:require …)` clause of `ns` as a function, for the
+;; namespace that is current when it RUNS: a REPL session's `user`, a harness
+;; task's namespace, a script. It does what the compiled clause does
+;; (compiler.bl `compile-ns`): load the target, then record aliases and refers
+;; in `BeamLisp.Env`. Later forms compile against that table, so an alias made
+;; at the prompt holds in the next form, exactly as after `(ns user (:require …))`.
+;;
+;; Unlike the clause it always loads now, rather than declaring a deferred load:
+;; at a prompt the reader wants the failure on this line, not at first use.
+;; A refused request changes nothing — every check runs before the first write.
+
+(defn- require-name [x] (if (string? x) x (str x)))
+
+(defn- require-near
+  "Up to five loaded namespaces whose names share the last segment of `target`
+   or start with its first one: the reader's next guess."
+  [target]
+  (let [parts (String/split target ".")
+        tail (last parts)
+        head (first parts)]
+    (vec (take 5 (sort (filter (fn [n] (or (some? (index-of n tail)) (starts-with? n (str head "."))))
+                               (BeamLisp.Env/namespaces)))))))
+
+(defn- require-present? [target]
+  (or (some? (BeamLisp.Loader/source_path target))
+      (some? (some (fn [n] (when (= n target) n)) (BeamLisp.Env/namespaces)))))
+
+(defn- require-reload!
+  "Reload `target` from its source through the coherent reload bundle
+   (`reload/stage` then `reload/commit`), so a reload that does not fit is
+   refused whole and the running code stays as it was."
+  [target]
+  (let [src (BeamLisp.Loader/source_content target)]
+    (when (nil? src)
+      (throw (ex-info (str "Cannot reload " target ": it has no source file")
+                      {:kind :require/no-source :ns (symbol target)})))
+    (BeamLisp.Loader/ensure_loaded "reload")
+    (BeamLisp.Ns.Rt/invoke (BeamLisp.Env/fetch! "reload" "stage") (list target src))
+    (let [r (BeamLisp.Ns.Rt/invoke (BeamLisp.Env/fetch! "reload" "commit") (list))]
+      (when (and (map? r) (contains? #{:held :blocked} (:status r)))
+        (throw (ex-info (str "Reload of " target " refused: " (pr-str (:errors r)))
+                        {:kind :require/reload-refused :ns (symbol target) :errors (:errors r)})))
+      r)))
+
+(defn- require-specs
+  "Flatten Clojure's prefix lists: `[clojure string [set :as s]]` names
+   `clojure.string` and `[clojure.set :as s]`. Any other spec is itself."
+  [spec]
+  (if (and (vector? spec) (> (count spec) 1)
+           (not (keyword? (second spec))))
+    (let [prefix (require-name (first spec))]
+      (map (fn [s]
+             (if (vector? s)
+               (vec (cons (symbol (str prefix "." (require-name (first s)))) (rest s)))
+               (symbol (str prefix "." (require-name s)))))
+           (rest spec)))
+    (list spec)))
+
+(defn- require-plan
+  "Check one spec against the namespace table without writing anything:
+   {:target :aliases [[alias target]…] :refer :all|[name…]|nil :load? bool}."
+  [here spec]
+  (let [parts (if (vector? spec) spec [spec])
+        target (require-name (first parts))
+        opts (apply hash-map (rest parts))
+        as (get opts :as)
+        as-alias (get opts :as-alias)
+        refer (get opts :refer)
+        aliases (vec (map (fn [a] [(require-name a) target]) (remove nil? [as as-alias])))]
+    (doseq [[a t] aliases]
+      (let [prev (BeamLisp.Env/alias_target here a)]
+        (when (and (some? prev) (not= prev t))
+          (throw (ex-info (str "Alias " a " already exists in namespace " here ", aliasing " prev)
+                          {:kind :require/alias-taken :alias (symbol a) :target (symbol prev)})))))
+    {:target target :aliases aliases :refer refer :load? (nil? as-alias)}))
+
+(defn require
+  "Load namespaces and make their names available in the current namespace,
+   with Clojure's `require` semantics. Each argument is a spec or a flag:
+
+     (require 'clojure.string)                    load it
+     (require '[clojure.string :as s])            … and alias it
+     (require '[clojure.string :refer [join]])    … and refer names
+     (require '[clojure.string :refer :all])      … every public name
+     (require '[clojure.string :as-alias s])      alias without loading
+     (require '[clojure [string :as s] set])      a prefix list
+     (require 'my.ns :reload)                     reload from source
+
+   A spec's namespace may live in a .bl, .bl.md or .bl.org file; a literate
+   module's cells are its namespace. Requiring a loaded namespace again only
+   updates aliases and refers. `:reload-all` reloads the named namespace like
+   `:reload`; its dependencies are not reloaded. Throws ex-info with `:kind`
+   :require/not-found (with `:near` guesses), :require/alias-taken,
+   :require/not-public or :require/reload-refused, before changing anything.
+   Returns nil."
+  [& args]
+  (let [here (BeamLisp.Env/current_ns)
+        flags (set (filter keyword? args))
+        reload? (or (contains? flags :reload) (contains? flags :reload-all))
+        specs (mapcat require-specs (remove keyword? args))
+        plans (vec (map (fn [s] (require-plan here s)) specs))]
+    (doseq [p plans]
+      (when (:load? p)
+        (let [t (:target p)
+              missing (fn [] (ex-info (str "Could not locate " t " (.bl, .bl.md or .bl.org) on the source path")
+                                      {:kind :require/not-found :ns (symbol t) :near (require-near t)}))]
+          (if reload?
+            (require-reload! t)
+            ;; the loader refuses an unknown namespace with a plain error; say it
+            ;; as data (`:kind`, `:near`) and let every other failure through
+            (try (BeamLisp.Loader/ensure_loaded t)
+                 (catch e
+                   (if (and (not (require-present? t))
+                            (starts-with? (str (ex-message e)) "namespace not found"))
+                     (throw (missing))
+                     (throw e)))))
+          (when-not (require-present? t) (throw (missing))))))
+    (doseq [p plans]
+      (let [r (:refer p) t (:target p)]
+        (when (and (some? r) (not= :all r))
+          (let [pub (set (BeamLisp.Env/public_names t))
+                missing (vec (remove (fn [s] (contains? pub (require-name s))) r))]
+            (when (not (empty? missing))
+              (throw (ex-info (str "Not public in " t ": " (pr-str missing))
+                              {:kind :require/not-public :ns (symbol t) :names missing})))))))
+    (doseq [p plans]
+      (let [r (:refer p) t (:target p)]
+        (doseq [[a target] (:aliases p)] (BeamLisp.Env/add_alias here a target))
+        (cond
+          (= :all r) (BeamLisp.Env/add_refer_all here t)
+          (some? r) (doseq [s r] (BeamLisp.Env/add_refer here (require-name s) t)))))
+    nil))
+
+(defn all-ns
+  "Every namespace that exists in this image, as sorted symbols."
+  []
+  (map symbol (sort (BeamLisp.Env/namespaces))))
+
+(defn find-ns
+  "The namespace named `sym` as a symbol, or nil when none exists."
+  [sym]
+  (let [n (require-name sym)]
+    (when (some (fn [x] (= x n)) (BeamLisp.Env/namespaces)) (symbol n))))
+
+(defn ns-publics
+  "The public vars of namespace `sym`: a map of each name to its qualified
+   symbol, `{join clojure.string/join …}`."
+  [sym]
+  (let [n (require-name sym)]
+    (into {} (map (fn [v] [(symbol v) (symbol n v)]) (BeamLisp.Env/public_names n)))))
+
+(defn ns-aliases
+  "The aliases recorded in namespace `sym` (default: the current one): a map
+   of alias symbol to namespace symbol."
+  ([] (ns-aliases (BeamLisp.Env/current_ns)))
+  ([sym]
+   (let [n (require-name sym)
+         rows (BeamLisp.Env/match (erlang/list_to_tuple
+                                   (list (erlang/list_to_tuple (list :alias n :$1)) :_)))]
+     (into {} (map (fn [row]
+                     (let [a (first row)]
+                       [(symbol a) (symbol (BeamLisp.Env/alias_target n a))]))
+                   rows)))))
