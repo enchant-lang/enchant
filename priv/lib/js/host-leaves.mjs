@@ -345,6 +345,9 @@ export class Regex {
     this.source = source; this.blStruct = kw("Elixir.Regex");
     try {
       if (!/^[imsu]*$/.test(options)) throw new Error("unsupported options " + options);
+      // PCRE start-of-pattern verbs ((*UTF8), (*UCP) …) only select Unicode
+      // matching, which the "u" flag always gives here: drop them.
+      source = source.replace(/^(\(\*(?:UTF8?|UCP)\))+/, "");
       // PCRE permits a leading flag declaration in addition to compile options.
       const leading = source.match(/^\(\?([ims]+)\)/);
       const flags = new Set("u" + options + (leading?.[1] ?? ""));
@@ -481,6 +484,8 @@ export const BEAM_ONLY = Object.fromEntries([
 ].map((k) => [k, beamOnly(k)]));
 
 export const HOST_LEAVES = { ...ERLANG, ...LISTS, ...STRING, ...REGEX, ...IO, ...BEAM_ONLY };
+// The helpers portable-leaves.mjs shares (one definition of each).
+export { reOpts, badarg, badarith, exactInteger, beamOnly };
 // (COLLECTIONS, NUMBERS, REFS_ERRORS are merged in below, where they are defined)
 
 // ─── collections: Vector / Set / Sorted / Transient ──────────────────────────

@@ -1,0 +1,37 @@
+(ns perf.sdk-inventory-walk-cost-test)
+
+;; A full SDK inventory walk used to read and hash every sealed artifact and
+;; Source again, and one cold start performs several. Once the files have
+;; settled and were hashed by a first walk, a later walk of the same image must
+;; hash none of them. The walk times are printed so a change can be compared.
+
+(def ^:private uncached (tuple :Elixir.BeamLisp.Env :sdk_file_digest_uncached 2))
+
+(defn- reads []
+ (let [count (elem (erlang/trace_info uncached :call_count) 1)]
+  (if (erlang/is_integer count) count 0)))
+
+(defn- timed [f]
+ (let [t (erlang/monotonic_time :millisecond) out (f)]
+  [(- (erlang/monotonic_time :millisecond) t) out]))
+
+(deftest a-second-walk-of-an-unchanged-image-hashes-no-files
+ (BeamLisp.Env/ensure_sdk_runtime!)
+ ;; Files copied or written moments ago are deliberately not trusted.
+ (Process/sleep 3500)
+ (try
+  (erlang/trace_pattern uncached true (list :local :call_count))
+  (let [start (reads)
+        [first-ms one] (timed #(BeamLisp.AOT/sdk_runtime_inventory! true))
+        after-first (reads)
+        [second-ms two] (timed #(BeamLisp.AOT/sdk_runtime_inventory! true))
+        after-second (reads)
+        [third-ms three] (timed #(BeamLisp.AOT/sdk_runtime_inventory! true))]
+   (println "SDK-WALK-COST first" first-ms "ms, second" second-ms "ms, third" third-ms
+            "ms; files hashed first" (- after-first start) "second" (- after-second after-first)
+            "third" (- (reads) after-second))
+   (is (= after-first after-second))
+   (is (= after-second (reads)))
+   (is (= one two))
+   (is (= one three)))
+  (finally (erlang/trace_pattern uncached false (list :local :call_count)))))

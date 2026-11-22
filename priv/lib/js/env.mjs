@@ -92,6 +92,19 @@ function resolve(ns, name, rowOf) {
 const varRow = (n, s) => key(T(n, s));
 const linkRow = (n, s) => key(T(kw("link"), n, s));
 
+/** The non-private var names of `ns`, sorted. */
+function publicNames(ns) {
+  const own = "s" + ns, out = [];
+  for (const k of ROWS.keys()) {
+    const parts = k.split("\u0001");
+    if (parts.length === 2 && parts[0] === own && parts[1].startsWith("s")) {
+      const name = parts[1].slice(1), m = get(T(kw("meta"), ns, name));
+      if (!(m && m.get && m.get(kw("private")) === true)) out.push(name);
+    }
+  }
+  return out.sort();
+}
+
 export const ENV = {
   env_id: () => R.list(R.kw("global")),
   current_ns: () => CURRENT_NS,
@@ -142,6 +155,13 @@ export const ENV = {
   add_alias: (ns, a, target) => putKey(T(kw("alias"), ns, a), target),
   alias_target: (ns, a) => { const v = get(T(kw("alias"), ns, a)); return v === undefined ? null : v; },
   add_refer: (ns, name, src) => putKey(T(kw("refer"), ns, name), src),
+  // `all-ns`, `ns-publics` and `(require … :refer :all)` (core, 2026-11-22)
+  // ask the registry what it holds: the namespaces declared on this page and
+  // the public vars of one of them.
+  namespaces: () => R.listFromArray([...new Set([...ROWS.keys()]
+    .filter((k) => k.startsWith(":ns\u0001s")).map((k) => k.slice(5)))].sort()),
+  public_names: (ns) => R.listFromArray(publicNames(ns)),
+  add_refer_all: (here, target) => { for (const n of publicNames(target)) putKey(T(kw("refer"), here, n), target); return OK; },
   refer_source: (ns, name) => { const v = get(T(kw("refer"), ns, name)); return v === undefined ? null : v; },
   add_import: (ns, short, q) => putKey(T(kw("import"), ns, short), q),
   import_target: (ns, short) => { const v = get(T(kw("import"), ns, short)); return v === undefined ? null : v; },
