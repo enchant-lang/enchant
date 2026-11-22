@@ -84,3 +84,51 @@
     (BeamLisp.Loader/source_record_candidate manifest root (str root "/b.bl") "abc")
     (is (not (File/regular? manifest)))
     (File/rm_rf! root)))
+
+(defn- realm-at
+  "A realm env whose project is `root`, declared the way vm.core marks one."
+  [root key]
+  (let [e (BeamLisp.Env/fork :global)]
+    (BeamLisp.Env/with_env e
+      (fn []
+        (BeamLisp.Env/put_key (tuple :realm_key) key)
+        (BeamLisp.Env/put_key (tuple :realm_decl)
+          {:shadow [] :uses {} :overrides (str root "/overrides")})))
+    e))
+
+(defn- resolve-in
+  "Resolve `ns` the way a load does, searching `dirs` in order, inside realm `e`."
+  [e dirs ns]
+  (BeamLisp.Env/with_env e
+    (fn [] (BeamLisp.Loader/with_ambient_dirs dirs (fn [] (BeamLisp.Loader/source_path ns))))))
+
+(deftest a-realm-resolution-is-written-to-its-manifest-and-stays-small
+  (let [root (scratch)
+        manifest (str root "/.bl/realm-sources.v1")
+        e (realm-at root "manifest-realm")]
+    (File/mkdir_p! (str root "/second/test/bl"))
+    (File/write! (str root "/second/test/bl/helper.bl") "(ns test.bl.helper)\n(def x 1)\n")
+    (File/write! (str root "/second/test/bl/other.bl") "(ns test.bl.other)\n(def y 2)\n")
+    (let [dirs (list (str root "/first") (str root "/second"))]
+      (is (= (str root "/second/test/bl/helper.bl") (resolve-in e dirs "test.bl.helper")))
+      (is (= (str root "/second/test/bl/other.bl") (resolve-in e dirs "test.bl.other")))
+      (is (= (str root "/second/test/bl/helper.bl") (resolve-in e dirs "test.bl.helper"))))
+    (let [ls (lines manifest)
+          digest (fn [s] (String/downcase (Base/encode16 (crypto/hash :sha256 s))))]
+      (is (= (str "bl-realm-sources 1\t" root) (first ls)))
+      (testing "the missing first root is one line however many names it failed to serve"
+        (is (= 1 (count (filter (fn [l] (= l (str "A\t" root "/first"))) ls)))))
+      (testing "what was loaded is listed with its digest"
+        (is (some (fn [l] (= l (str "L\t" (digest "(ns test.bl.helper)\n(def x 1)\n")
+                                    "\t" root "/second/test/bl/helper.bl"))) ls)))
+      (is (<= (count ls) 4) (str "small: " ls)))
+    (File/rm_rf! root)))
+
+(deftest outside-a-declared-realm-nothing-is-written
+  (let [root (scratch)
+        e (BeamLisp.Env/fork :global)]
+    (File/write! (str root "/solo.bl") "(ns solo)\n")
+    (BeamLisp.Env/with_env e
+      (fn [] (BeamLisp.Loader/with_ambient_dirs (list root) (fn [] (BeamLisp.Loader/source_path "solo")))))
+    (is (not (File/exists? (str root "/.bl"))))
+    (File/rm_rf! root)))
