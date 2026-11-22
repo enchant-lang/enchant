@@ -79,6 +79,32 @@
 (defn- owned-json! [path limit] (Jason/decode! (owned! path limit)))
 (defn- state-path [directory] (Path/join directory "foundry-state"))
 
+;; A failed job's own events hold the real cause (for example a cached remote
+;; build failure) while its status carries only "exited with code 1".
+(def failure-cap 1500)
+(defn- failure-causes [body]
+  (let [lines (keep (fn [line]
+                      (try (let [text (get (Jason/decode! line) "text")]
+                             (when (and (string? text) (String/contains? text "error:"))
+                               (String/trim (String/replace text "progress machine: " ""))))
+                           (catch error nil)))
+                    (String/split body "\n"))]
+    (take 3 (distinct lines))))
+(defn- failure-note [directory id]
+  ;; Best effort: an unreadable ledger must never hide the refusal itself.
+  (try
+    (let [path (Path/join (state-path directory) (str "ledger/events/" id ".jsonl"))
+          info (File/lstat! path)
+          causes (if (and (= :regular (:type info)) (<= (:size info) machine-limit))
+                   (failure-causes (File/read! path)) [])
+          text (Enum/join causes "\n  ")]
+      (if (empty? causes) ""
+        (str "\n  " (if (< failure-cap (erlang/byte_size text)) (erlang/binary_part text 0 failure-cap) text))))
+    (catch error "")))
+(defn- ended-message [directory status]
+  (str "Preparation ended " (get status "status") ": " (get status "error")
+       (when (= "failed" (get status "status")) (failure-note directory (get status "id")))))
+
 (defn- atomic-json! [path value]
   (let [temporary (str path ".tmp-" (Base/encode16 (crypto/strong_rand_bytes 16)))]
     (try
@@ -478,7 +504,7 @@
                             (= "preparation-result" (get receipt "kind"))
                             (= (tuple :ok (get receipt "output")) (File/read_link (get receipt "retention-root"))))
                 (refuse! "Completed preparation receipt disagrees")) receipt)
-          (contains? terminal state) (refuse! (str "Preparation ended " state ": " (get status "error")))
+          (contains? terminal state) (refuse! (ended-message directory status))
           (get status "needsRecovery") (refuse! "Preparation needs recovery; worker ownership is not established")
           (>= (System/monotonic_time :millisecond) until)
             (refuse! "Await deadline expired; durable preparation continues")
