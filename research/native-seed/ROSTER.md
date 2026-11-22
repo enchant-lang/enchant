@@ -197,7 +197,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
     with `ls test/bl | grep -E 'reload|execution|env'`.
 - **SDK build.** Yes (~14 min). Batch with U3.
 
-#### U5 ⏳ Where a cold start goes · S · measurement only
+#### U5 🔨 Where a cold start goes · S · measurement only
 - **Why.** Cold `bl run` of `(println 1)` takes 7.6 s, and nobody knows the
   split.
 - **Do.** Time phases of `./bin/bl --cold run /tmp/x.bl` under `work run`:
@@ -349,6 +349,28 @@ census to start from.
     green in under 5 minutes.
   - With a deliberate break in one host function, the same check fails.
   - The inner-loop table above gets a `priv/host` row with the measured cost.
+
+### W — the test runner
+
+#### W1 🔨 A multi-file `bl test` breaks after a realm-retirement test · S · BL
+- **Why.** On `main` (checked 2026-11-22 on the batch-2 SDK, without U1), `./bin/bl test` with
+  `test/bl/contextual_realm_retirement_test.bl` first and nine realm/seed/JS files after it:
+  - the first file fails one case, `shutdown-retains-pending-real-consumers-in-the-manager`
+    (expected `{:pending 1, :drained 0}`, actual `{:pending 1, :drained 1}`);
+  - every later file is INCOHERENT: `crashed while loading: undefined var: <ns>/deftest`.
+
+  Later errors in the same run include module `…Rn-lib`/`…Seed-support` "is not available".
+  Each file passes when run alone. One test leaves the warm VM's realm or test harness in a
+  state that the next file can't load in.
+- **Do.**
+  1. Bisect which earlier file breaks which later one; start with the retirement test then one
+     other.
+  2. Find what state survives: the ward's per-file realm, the test namespace's refers, the realm
+     manager.
+  3. Fix the isolation, not the test.
+- **Done when.** The ten files named above pass in one `bl test` call, in that order and reversed.
+- **Inner loop.** `scripts/check-runtime-hosts` for `priv/host`; otherwise a branch plus the
+  integration gate.
 
 ### J — JavaScript target
 
