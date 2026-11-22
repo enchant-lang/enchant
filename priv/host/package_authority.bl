@@ -554,8 +554,29 @@
                        (list (tuple :call-prepare-native 3) (tuple :call-prepare-generic 2)
                              (tuple :call-prepare-callback 2) (tuple :k-reduce 5) (tuple :lazy-fold-claimed 4))
                        (fn [mfa] (tuple mfa :guarded))))]
-      (Enum/reduce (factory_lambda_origins! module bytes factories) output
+      (Enum/reduce (kernel_factory_origins! module bytes md5 factories) output
        (fn [entry output] (Map/put output (tuple module (elem entry 0)) md5)))))))))
+
+(defn- kernel_factory_origins!
+ "`factory_lambda_origins!` for a kernel adapter module, computed once per VM.
+  The result is a pure function of the module's artifact bytes and of the
+  disassembling code. Re-deriving it disassembled the two kernel modules on every
+  inventory walk, and a cold start walks several times. The memo key binds the
+  module, its MD5 (the caller already equated it with the sealed row's and with
+  these very bytes), the digest of these bytes, and the MD5 of the modules that
+  perform the derivation, so a replaced decoder or different bytes recompute.
+  The caller still reads and MD5-checks the object code on every walk; only the
+  disassembly is reused."
+ [module bytes md5 factories]
+ (let [key (tuple :Elixir.BeamLisp.PackageAuthority :kernel_factory_origins module md5
+                  (crypto/hash :sha256 bytes) (erlang/term_to_binary factories (list :deterministic))
+                  (erlang/apply :Elixir.BeamLisp.AOT :module_info (list :md5))
+                  (erlang/apply :Elixir.BeamLisp.PackageAuthority :module_info (list :md5)))
+       hit (persistent_term/get key nil)]
+  (or hit
+   (let [value (factory_lambda_origins! module bytes factories)]
+    (persistent_term/put key value)
+    value))))
 
 (defn runtime_sdk_entries! [root]
  (let [path (Path/join root "sdk-code.term")]
