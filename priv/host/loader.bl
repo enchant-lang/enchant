@@ -535,11 +535,33 @@
   []
   (let [key (env_row (tuple :realm_key))
         decl (env_row (tuple :realm_decl))
-        paths (env_row (tuple :realm_uses_paths))]
+        paths (env_row (tuple :realm_uses_paths))
+        sources (env_row (tuple :realm_sources))]
     (if (and (erlang/== nil key) (erlang/== nil decl))
       nil
-      (let [facts (maps/put :key key (maps/put :decl decl (maps/new)))]
+      (let [facts (maps/put :key key (maps/put :decl decl (maps/new)))
+            facts (if (erlang/is_map sources) (maps/put :sources sources facts) facts)]
         (if (and paths (erlang/> (maps/size paths) 0)) (maps/put :uses-paths paths facts) facts)))))
+
+(defn- sources_row
+  "The recorder row of the calling realm (`vm.sources`), or nil."
+  []
+  (try
+    (let [realm (or (Process/get :bl_load_realm) (realm_facts))]
+      (if (erlang/is_map realm) (maps/get :sources realm nil) nil))
+    (catch _ nil)))
+
+(defn- note_source
+  "Tell the realm's source manifest that `path` was examined while resolving a
+   namespace: `raw` is its bytes, or nil when no such file exists. Observation
+   only: it never changes what is loaded, and it never raises."
+  [row path raw]
+  (when (erlang/is_map row)
+    (try
+      (let [f (BeamLisp.Env/lookup (tuple "vm.sources" "note!"))]
+        (when (and (erlang/is_tuple f) (erlang/== :ok (erlang/element 1 f)))
+          (BeamLisp.Ns.Rt/invoke (erlang/element 2 f) (list row path raw))))
+      (catch _ nil))))
 
 (defn- env_row
   "The value of a chain-walking env row, or nil."
@@ -1040,7 +1062,8 @@
          result)))))
   ([ns dirs]
   (when-not (erlang/== dirs (list))
-   (let [relatives (source_relatives ns)]
+   (let [relatives (source_relatives ns)
+         row (sources_row)]
     (Enum/reduce dirs nil
       (fn [dir acc]
         (if (ok-result? acc)
@@ -1053,12 +1076,13 @@
                   (if (File/regular? path)
                     (let [raw (File/read! path)
                           content (doc_content path raw)]
+                      (note_source row path raw)
                       (if (declares? content ns)
                         (tuple :ok path content)
                         (if (nil? acc2)
                           (tuple :wrong_ns path (declared_ns content))
                           acc2)))
-                    acc2))))))))))))
+                    (do (note_source row path nil) acc2)))))))))))))
 
 ; ── reading source: plain / literate / shebang ──────────────────────────────
 

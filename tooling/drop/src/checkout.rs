@@ -323,12 +323,12 @@ fn checkout_project_generation(
     evidence: Option<&engine_inputs::Snapshot>,
 ) -> std::io::Result<String> {
     let mut files = Vec::new();
-    if declared_roots(project).1 {
-        // The project declares its library roots: inventory exactly what the
-        // realm can load from them. They arrive in `extra_sources` below.
-        // Besides those: the project files themselves, the tree's
-        // `overrides/` root (a library root by convention) and the loose
-        // source files at the top of the tree (the realm's cwd root).
+    let sources = read_realm_sources(project);
+    if sources.is_some() {
+        // The realm recorded what it resolved (see `read_realm_sources`), so
+        // the walk is not needed: inventory the project's own files, its
+        // declared roots (`extra_sources`), `overrides/` and the loose
+        // sources at the top of the tree; the manifest adds the rest.
         for name in ["env.bl", ".env.local.bl"] {
             if project.join(name).is_file() {
                 files.push(project.join(name));
@@ -337,7 +337,8 @@ fn checkout_project_generation(
         checkout_top_level(project, &mut files)?;
         checkout_sources(&project.join("overrides"), &mut files)?;
     } else {
-        // No declared roots: the working tree is the root.
+        // No usable manifest (first request, or unreadable): the working tree
+        // is the root, and every file in it counts.
         checkout_sources(project, &mut files)?;
     }
     // The runtime pin already covers these trees. In an engine checkout,
@@ -349,7 +350,102 @@ fn checkout_project_generation(
     for path in extra_sources {
         checkout_sources(path, &mut files)?;
     }
-    checkout_hash_files(root, files, evidence)
+    let base = checkout_hash_files(root, files, evidence)?;
+    match sources {
+        None => Ok(base),
+        Some(sources) => Ok(fold_realm_sources(root, &base, &sources)),
+    }
+}
+
+/// What the warm realm wrote down about its own resolution, in
+/// `<project>/.bl/realm-sources.v1` (`priv/std/vm/sources.bl`). One entry per
+/// path, the first record wins: `Some(digest)` is a file the loader read and
+/// that digest of its bytes, `None` a candidate that did not exist, so a file
+/// appearing there would change what a namespace resolves to.
+struct RealmSources {
+    entries: std::collections::BTreeMap<PathBuf, Option<[u8; 32]>>,
+}
+
+const REALM_SOURCES: &str = ".bl/realm-sources.v1";
+
+/// The manifest of `project` (canonical), or `None` when it is missing, from
+/// another root, torn (no final newline), or holds anything unparseable or an
+/// `X` (unrecordable) line. `None` always means: do the full walk.
+fn read_realm_sources(project: &Path) -> Option<RealmSources> {
+    let text = std::fs::read_to_string(project.join(REALM_SOURCES)).ok()?;
+    if !text.ends_with('\n') {
+        return None;
+    }
+    let mut lines = text.lines();
+    let root = lines.next()?.strip_prefix("bl-realm-sources 1\t")?;
+    if std::fs::canonicalize(root).ok()?.as_path() != project {
+        return None;
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    for line in lines {
+        let mut parts = line.splitn(3, '\t');
+        let (path, digest) = match (parts.next()?, parts.next(), parts.next()) {
+            ("L", Some(hex), Some(path)) => (path, Some(parse_digest(hex)?)),
+            ("A", Some(path), None) => (path, None),
+            _ => return None,
+        };
+        if !Path::new(path).is_absolute() {
+            return None;
+        }
+        entries.entry(PathBuf::from(path)).or_insert(digest);
+    }
+    Some(RealmSources { entries })
+}
+
+fn parse_digest(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Fold the manifest into the project generation. A path contributes only when
+/// it differs from what the realm recorded: a file edited or deleted since it
+/// was read, or a candidate that did not exist and now does. Recording a new
+/// file therefore never changes the generation; changing one the realm used,
+/// or creating one it looked for, always does.
+fn fold_realm_sources(root: &Path, base: &str, sources: &RealmSources) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"checkout-realm-sources-v1\0");
+    hash.update(base.as_bytes());
+    // the runtime pin already covers the image's own trees
+    let sdk = root.join("priv");
+    let native = root.join("native");
+    for (path, recorded) in &sources.entries {
+        if path.starts_with(&sdk) || path.starts_with(&native) {
+            continue;
+        }
+        let current = match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => {
+                Some(engine_inputs::file_digest(path).unwrap_or([0xff; 32]))
+            }
+            _ => None,
+        };
+        if *recorded == current {
+            continue;
+        }
+        let name = path.as_os_str().as_encoded_bytes();
+        hash.update((name.len() as u64).to_be_bytes());
+        hash.update(name);
+        match current {
+            Some(digest) => {
+                hash.update([1]);
+                hash.update(digest);
+            }
+            None => hash.update([0]),
+        }
+    }
+    format!("{:x}", hash.finalize())
 }
 
 fn checkout_hash_files(root: &Path, mut files: Vec<PathBuf>, evidence: Option<&engine_inputs::Snapshot>) -> std::io::Result<String> {
@@ -675,8 +771,42 @@ mod checkout_tests {
         std::fs::write(root.join("examples/deep/app.bl"), "app 1").unwrap();
         std::fs::write(root.join("overrides/shim.bl"), "shim 1").unwrap();
         std::fs::write(root.join("top.bl"), "top 1").unwrap();
+        std::fs::create_dir_all(root.join("test/bl")).unwrap();
+        std::fs::write(root.join("test/bl/seed_support.bl"), "seed 1").unwrap();
+        // the realm loaded the helper from its cwd root and looked for it first
+        // in a directory where it was not
+        write_manifest(&root, &[
+            loaded(&root, "test/bl/seed_support.bl"),
+            absent(&root, "test/bl/seed_support.clj"),
+        ]);
         let project = std::fs::canonicalize(&root).unwrap();
         (root, project)
+    }
+
+    fn digest_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    /// Write a manifest the way the realm does: header, then entries.
+    fn write_manifest(root: &Path, entries: &[String]) {
+        let project = std::fs::canonicalize(root).unwrap();
+        std::fs::create_dir_all(project.join(".bl")).unwrap();
+        let mut text = format!("bl-realm-sources 1\t{}\n", project.display());
+        for line in entries {
+            text.push_str(line);
+            text.push('\n');
+        }
+        std::fs::write(project.join(REALM_SOURCES), text).unwrap();
+    }
+
+    fn loaded(root: &Path, relative: &str) -> String {
+        let path = std::fs::canonicalize(root).unwrap().join(relative);
+        format!("L\t{}\t{}", digest_hex(&std::fs::read(&path).unwrap()), path.display())
+    }
+
+    fn absent(root: &Path, relative: &str) -> String {
+        format!("A\t{}", std::fs::canonicalize(root).unwrap().join(relative).display())
     }
 
     fn generation(root: &Path) -> String {
@@ -714,6 +844,70 @@ mod checkout_tests {
         assert_eq!(before, generation(&root));
         std::fs::write(root.join("scratch/out/d7/nested/junk.bl"), "changed").unwrap();
         assert_eq!(before, generation(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_the_realm_loaded_outside_the_declared_roots_pins_the_generation() {
+        let (root, _) = declared_project("manifest-file");
+        let before = generation(&root);
+        std::fs::write(root.join("test/bl/seed_support.bl"), "seed 2").unwrap();
+        let edited = generation(&root);
+        assert_ne!(before, edited, "an edit to a manifest-listed file is a realm input");
+        std::fs::write(root.join("test/bl/seed_support.bl"), "seed 1").unwrap();
+        assert_eq!(before, generation(&root), "restored bytes restore the generation");
+        std::fs::remove_file(root.join("test/bl/seed_support.bl")).unwrap();
+        assert_ne!(before, generation(&root), "a deleted file is a change");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_candidate_the_realm_found_absent_changes_the_generation_when_it_appears() {
+        let (root, _) = declared_project("manifest-absent");
+        let before = generation(&root);
+        std::fs::write(root.join("test/bl/seed_support.clj"), "shadow").unwrap();
+        let appeared = generation(&root);
+        assert_ne!(before, appeared);
+        std::fs::write(root.join("test/bl/seed_support.clj"), "shadow 2").unwrap();
+        assert_ne!(appeared, generation(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recording_more_does_not_change_the_generation_and_bad_manifests_fall_back_to_the_walk() {
+        let (root, project) = declared_project("manifest-shape");
+        let before = generation(&root);
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("lib/x.bl"), "x").unwrap();
+        write_manifest(&root, &[
+            loaded(&root, "test/bl/seed_support.bl"),
+            absent(&root, "test/bl/seed_support.clj"),
+            loaded(&root, "lib/x.bl"),
+            absent(&root, "lib/y.bl"),
+        ]);
+        assert_eq!(before, generation(&root), "unchanged entries add nothing");
+        let manifest = project.join(REALM_SOURCES);
+        let good = std::fs::read_to_string(&manifest).unwrap();
+        // every unusable manifest means: walk everything. A junk file then counts.
+        std::fs::create_dir_all(root.join("scratch")).unwrap();
+        for bad in [
+            format!("{good}X\\t\\n"),
+            good.trim_end().to_string(),
+            good.replacen(&project.display().to_string(), "/elsewhere", 1),
+            format!("{good}L\\tnothex\\t/x\\n"),
+            format!("{good}A\\trelative.bl\\n"),
+        ] {
+            std::fs::write(&manifest, &bad).unwrap();
+            std::fs::write(root.join("scratch/junk.bl"), "1").unwrap();
+            let one = generation(&root);
+            std::fs::write(root.join("scratch/junk.bl"), "2").unwrap();
+            assert_ne!(one, generation(&root), "walk for: {bad:?}");
+        }
+        std::fs::remove_file(&manifest).unwrap();
+        std::fs::write(root.join("scratch/junk.bl"), "3").unwrap();
+        let one = generation(&root);
+        std::fs::write(root.join("scratch/junk.bl"), "4").unwrap();
+        assert_ne!(one, generation(&root), "no manifest, full walk");
         std::fs::remove_dir_all(root).unwrap();
     }
 

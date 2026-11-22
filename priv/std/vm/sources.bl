@@ -1,0 +1,116 @@
+; vm/sources.bl — what a realm actually resolved, written down for the client.
+;
+; The checkout client pins a realm to a SOURCE GENERATION: a hash of every
+; input the realm could load. Walking the tree for them costs in proportion to
+; the tree. The realm itself knows exactly which files it used: the loader
+; (`find_file`) tries candidate paths in search order, and the answer depends on
+; exactly two kinds of fact:
+;
+;   L <sha256> <path>   a candidate that exists, with the digest of the bytes the
+;                       loader read (the file it loaded, or one that declared
+;                       another namespace and was passed over)
+;   A <path>            an earlier candidate that did NOT exist; a file appearing
+;                       there would change what the namespace resolves to
+;   X                   something could not be recorded: the manifest is unusable
+;
+; Lines are appended, one write each, to `<root>/.bl/realm-sources.v1`, whose
+; first line is `bl-realm-sources 1<TAB><root>`. The client reads the file and
+; digests exactly these paths. The FIRST line for a path wins (it is what the
+; realm first saw); the client only adds a path to the generation when its
+; present state differs from that record, so recording a new file never changes
+; the generation by itself.
+;
+; Files under the image's tier dirs are the platform's own (the runtime pin
+; covers them) and are not recorded.
+;
+; `begin-era!` runs when a realm's env is forked; the `:realm_sources` row it
+; returns lives in that env and is gone with it. `note!` is called by the loader
+; for every candidate it examines. Neither may load code or raise: a failure
+; removes the manifest, which sends the client back to its full inventory.
+
+(ns vm.sources)
+
+(def MANIFEST ".bl/realm-sources.v1")
+(def HEADER "bl-realm-sources 1")
+(def SEEN :bl_realm_sources_seen)
+
+(defn manifest-path [root] (Path/join root MANIFEST))
+
+(defn header-line [root] (str HEADER "\t" root "\n"))
+
+(defn digest-hex [raw]
+  (Base/encode16 (crypto/hash :sha256 raw) (list (tuple :case :lower))))
+
+(defn recordable?
+  "A path that cannot sit on one tab-separated line cannot be recorded."
+  [path]
+  (not (or (String/contains? path "\n") (String/contains? path "\t"))))
+
+(defn entry-line
+  "One manifest line. `raw` is the bytes read, or nil for an absent candidate."
+  [path raw]
+  (cond
+    (not (recordable? path)) "X\n"
+    (nil? raw) (str "A\t" path "\n")
+    :else (str "L\t" (digest-hex raw) "\t" path "\n")))
+
+(defn under-any?
+  "Is `path` inside one of `dirs`?"
+  [path dirs]
+  (Enum/any? dirs (fn [d] (String/starts_with? path (str d "/")))))
+
+(defn- ensure-table! []
+  (when (= :undefined (ets/whereis SEEN))
+    (try (ets/new SEEN (list :named_table :public :set))
+      (catch _ nil))))
+
+(defn- forget-old!
+  "Drop the previous era's seen-set for this manifest and note the new token."
+  [path token]
+  (ensure-table!)
+  (let [old (ets/lookup SEEN (tuple :era path))]
+    (when (seq old)
+      (ets/match_delete SEEN (tuple (tuple (elem (first old) 1) :_) :_))))
+  (ets/insert SEEN (tuple (tuple :era path) token)))
+
+(defn- header-ok? [path header]
+  (and (File/regular? path)
+       (String/starts_with? (File/read! path) header)))
+
+(defn remove-manifest! [path]
+  (try (File/rm! path) (catch _ nil)))
+
+(defn begin-era!
+  "Start recording for a realm rooted at `root`: make sure the manifest exists
+   with this root's header, and return the row the loader will find in the
+   realm's env, or nil when nothing can be recorded (then no manifest remains)."
+  [root]
+  (if (not (and (string? root) (File/dir? root)))
+    nil
+    (let [path (manifest-path root)
+          header (header-line root)]
+      (try
+        (File/mkdir_p! (Path/dirname path))
+        (when-not (header-ok? path header)
+          (let [tmp (str path ".tmp" (erlang/unique_integer (list :positive)))]
+            (File/write! tmp header)
+            (File/rename! tmp path)))
+        (let [token (erlang/unique_integer (list :positive))]
+          (forget-old! path token)
+          {:path path :token token})
+        (catch _
+          (remove-manifest! path)
+          nil)))))
+
+(defn note!
+  "Record one candidate the loader examined: `raw` its bytes, or nil if absent."
+  [row path raw]
+  (try
+    (let [abs (Path/expand path)
+          key (tuple (:token row) abs)]
+      (ensure-table!)
+      (when-not (ets/member SEEN key)
+        (ets/insert SEEN (tuple key true))
+        (when-not (under-any? abs (Enum/map (BeamLisp.Tiers/dirs) (fn [d] (Path/expand d))))
+          (File/write! (:path row) (entry-line abs raw) (list :append)))))
+    (catch _ (remove-manifest! (:path row)))))
