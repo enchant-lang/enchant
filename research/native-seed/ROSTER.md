@@ -33,6 +33,7 @@ per batch, and runs the gate tests.** A card is ✅ only after that gate.
 ### Where an agent works
 - **In its own git worktree** on its own branch, never the shared checkout.
   Commit there freely, and finish with a clean, committed branch.
+- **Checks that don't change engine inputs:** prefix `$MAIN/bin/bl` with `BL_SDK_REUSE_CURRENT=1`, so they run on the current SDK instead of queueing behind a rebuild of a moving main.
 - **Never run the worktree's own `./bin/bl`.** It would prepare a whole SDK for
   that tree (~14 min on the 4-CPU build station, which is shared). Use the main
   checkout's client against the main SDK:
@@ -364,7 +365,7 @@ census to start from.
 
 ### W — the test runner
 
-#### W1 🔨 A multi-file `bl test` breaks after a realm-retirement test · S · BL
+#### W1 ✅ A multi-file `bl test` breaks after a realm-retirement test · S · BL
 - **Why.** On `main` (checked 2026-11-22 on the batch-2 SDK, without U1), `./bin/bl test` with
   `test/bl/contextual_realm_retirement_test.bl` first and nine realm/seed/JS files after it:
   - the first file fails one case, `shutdown-retains-pending-real-consumers-in-the-manager`
@@ -431,6 +432,8 @@ Cards in one lane conflict; lanes run at the same time.
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | W1: multi-file test runs stay isolated | `vm.manager` shutdown drained the realm running the tests (now per-file scope); the compiler baked a realm-local provider's platform module name ("module … is not available"). Ten realm/seed/JS files no longer go incoherent; an edited test helper is seen after a retirement | `e4973a0f3` |
+| ✅ | SDK lock wait visible and bounded | A waiter prints the holder and a heartbeat; `BL_SDK_LOCK_WAIT` bounds it (exit 75); `BL_SDK_REUSE_CURRENT=1` uses the current SDK; `realm stop` never queues. `checkout_sdk_lock_wait.py` passes | `e4973a0f3` (from another session, d9efc7f5d) |
 | ✅ | U5: where a cold start goes | 4.3 s at load ~4: `:beam_lisp` start + `vm.native` ~65–70%, repeated SDK tree sweeps ~35%; client + erts + deps < 8% | `33fd76cc4` |
 | ✅ | U4b: Env custody cleanup by exact key | Profile keys and handoff targets kept in the owner's own row; departure and offer lookups no longer scan 22,800-row tables. Env own time per spawn 1,904 → 971 µs, reductions 90k → 24k. 27 custody/execution/env files green with `BL_CUSTODY_SCAN_CHECK=1` | `90e0347ae` |
 | ✅ | T1: `scripts/check-runtime-hosts` works | Brings its own erlang/elixir, runs against a store SDK image: `priv/host` edits checked in ~40 s (+2.5 min when `env.bl` changes), a deliberate break fails | `e69f3863f` |
