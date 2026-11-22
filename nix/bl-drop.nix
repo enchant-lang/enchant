@@ -180,8 +180,11 @@ let
   };
   worker = workerFor false;
   producerTools = [ erlang elixir pkgs.patchelf pkgs.binutils pkgs.unzip pkgs.git pkgs.gnutar pkgs.gzip pkgs.findutils ];
+  # A layered image links its unit store to its library; read the library's own
+  # directory, since the archive refuses links.
   previousUnits = if previousMetadata == null then null else
-    builtins.storePath (previousMetadata.image or (toString previousSdk)) + "/unit-store";
+    builtins.storePath (previousMetadata.library or previousMetadata.image or (toString previousSdk))
+      + "/unit-store";
   previousUnitArchive = if previousUnits != null
       && builtins.pathExists (previousUnits + "/unit-index.json")
     then import ./sdk-unit-archive.nix { inherit pkgs; units = previousUnits; }
