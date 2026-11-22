@@ -104,7 +104,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
 ### U — the request path (what every user pays)
 
-#### U1 ⏳ The checkout client inventories declared inputs only · S · Rust
+#### U1 🔨 The checkout client inventories declared inputs only · S · Rust · branch `lane/client` (2026-11-22)
 - **Why.** Each `./bin/bl` request first hashes the project's sources so the
   warm VM can tell whether they changed.
   - `checkout_sources_walk` in `tooling/drop/src/checkout.rs` (~line 374)
@@ -139,7 +139,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   roots, never fewer.
 - **Conflicts with** U2 (both edit `tooling/drop`, one platform build).
 
-#### U2 ⏳ A warm VM that dies at start fails the request at once · S · Rust
+#### U2 🔨 A warm VM that dies at start fails the request at once · S · Rust · branch `lane/client` (2026-11-22)
 - **Why.** `retry_from_warm` → `wait_ready` (`tooling/drop/src/launcher.rs`
   ~line 525) waits the whole readiness deadline even when the VM it started
   has already exited. On 2026-11-22 the installed `bl` inside this checkout
@@ -157,7 +157,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
     exception text.
 - **Conflicts with** U1.
 
-#### U3 ⏳ A failed SDK preparation names its first cause · H/S · BL
+#### U3 🔨 A failed SDK preparation names its first cause · H/S · BL · branch `lane/tools` (2026-11-22)
 - **Why.** A failed preparation reports only
   `Preparation ended failed: exited with code 1` (`nix/preparation-operation.bl`
   line ~481). On 2026-11-22 the real cause, a cached nixbuild.net failure for
@@ -216,7 +216,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
 ### N — the native compiler on the default path
 
-#### N1 ⏳ `cerl` as data on the native host · S+ · native-only
+#### N1 🔨 `cerl` as data on the native host · S+ · native-only · branch `lane/cerl` (2026-11-22)
 - **Why.** The native image already carries `lower` and `lower-core`
   (`priv/boot/lower.bl`, `priv/boot/lower-core.bl`): bl-ANF → Core Erlang.
   They build Core through OTP's `cerl` module, which doesn't exist on Chez. No
@@ -306,7 +306,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
 ### C — native compile throughput (only matters for edits and SDK builds)
 
-#### C1 ⏳ Emitter `ident` without the per-character join · H · native-only
+#### C1 🔨 Emitter `ident` without the per-character join · H · native-only · branch `lane/native-speed` (2026-11-22)
 - **Why.** `ident` (`research/native-seed/src/native/scheme.bl` line 32) turns
   every emitted name into `"v"` plus `"_<code>"` per character. It maps over
   the characters and joins the list, for every name, every time.
@@ -318,7 +318,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - `pair` (256 runs: `--reps 8 --rounds 8`) shows the same bytes; report both
     medians. If it isn't faster, record that and don't merge.
 
-#### C2 ⏳ Interned names on the native host · S · native-only
+#### C2 🔨 Interned names on the native host · S · native-only · branch `lane/native-speed` (2026-11-22)
 - **Why.** `string-hash`/`equal-hash` take ~4–5% of the reader job. Names are
   strings, so every lookup and every memo pays a hash.
 - **Change.** The reader interns symbol and keyword names (one Chez symbol or
@@ -333,7 +333,7 @@ census to start from.
 
 ### T — tools
 
-#### T1 ⏳ A host check without an SDK build · S
+#### T1 🔨 A host check without an SDK build · S · branch `lane/tools` (2026-11-22)
 - **Why.** `priv/` edits have no inner loop. `scripts/check-runtime-hosts`
   compiles changed `priv/host` modules with the existing compiler and tests them
   in a capped VM. It fails before starting: `elixir is not on PATH`, and
@@ -351,7 +351,7 @@ census to start from.
 
 ### J — JavaScript target
 
-#### J1 ⏳ Four JS test files fail on `main` · S · BL (`priv/lib/js`)
+#### J1 🔨 Four JS test files fail on `main` · S · BL (`priv/lib/js`) · branch `lane/tools` (2026-11-22)
 - **Why.** These four fail at HEAD, both with and without the 2026-11-22
   shadowing fix. Both sessions checked:
   - `test/bl/js_compiled_core_test.bl`
