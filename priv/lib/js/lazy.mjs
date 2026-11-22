@@ -22,8 +22,9 @@
 //     it again — and re-raises the thunk's own error unchanged;
 //   * a thunk that forces its own node is TERMINAL `:recursive_force`, for
 //     that force and every later one;
-//   * a node whose COMPLETED value would contain itself is TERMINAL
-//     `:cyclic_memo` (the NIF's cycle guard: `(def s (lazy-seq (cons 1 s)))`);
+//   * a node whose COMPLETED value IS the node, or a chain of completed nodes
+//     leading back to it, is TERMINAL `:cyclic_memo`; a value that only
+//     embeds its node, `(def s (lazy-seq (cons 1 s)))`, is ordinary data;
 //   * a halted fold publishes nothing and hands the node back PENDING;
 //   * a lazy-seq body may return any seqable; the HEAD is normalized, the tail
 //     stays lazy; 100001 nested empty thunks is the realize-depth error.
@@ -120,66 +121,23 @@ export function force(l) {
   }
 }
 
-/** The cycle guard, as the NIF keeps it (native/lazy_memo would_cycle): each
-    node has EDGES — the native memo resources its published value reaches
-    directly (the walk stops AT a lazy node: that node's own edges are the
-    graph beyond it). Publishing `v` into `node` is a cycle when `node`'s memo
-    is reachable from `v`'s edges through the edge graph. Edges are the MEMO,
-    not the LazySeq value, so an alias added by `with-meta` is the same node.
-    Edges are found by walking `v` only down to its first lazy nodes, so a long
-    realised seq costs O(new cells) per publish, not a re-walk of everything
-    behind it. */
-function directEdges(v) {
-  // the NIF's pre-check (lazy_memo.bl dependencies): a scalar, or a proper
-  // list of scalars (a produced chunk), cannot reach a node — no walk
-  if (v === null || typeof v !== "object") return NO_EDGES;
-  if (v instanceof R.Cons) {
-    let p = v;
-    while (p instanceof R.Cons && (p.h === null || typeof p.h !== "object")) p = p.t;
-    if (p === R.EMPTY) return NO_EDGES;
-    // a produced chunk with a lazy tail — the shape of nearly every publish:
-    // the walk would stop AT that node, so it is the one edge
-    if (p instanceof LazySeq) return [p.memo];
-  }
-  const out = [];
-  const seen = new Set();
-  const stack = [v];
-  while (stack.length) {
-    const x = stack.pop();
-    if (x === null || typeof x !== "object" || seen.has(x)) continue;
-    seen.add(x);
-    if (x instanceof LazySeq) { if (!seen.has(x.memo)) out.push(x.memo); continue; }
-    if (x instanceof R.Cons) { stack.push(x.h, x.t); continue; }
-    if (x instanceof R.Tup) { for (const e of x.items) stack.push(e); continue; }
-    if (x instanceof R.Vec) { for (const e of x) stack.push(e); continue; }
-    if (x instanceof R.HMap) { for (const [k, w] of x.entries()) stack.push(k, w); continue; }
-    if (x instanceof R.HSet) { for (const e of x) stack.push(e); continue; }
-  }
-  return out;
-}
-const NO_EDGES = [];
-/** Would publishing a value whose edges are the memos `deps` into `node`
-    close a cycle? Node identity is the MEMO, so an alias is the same node. */
-function wouldCycle(node, deps) {
-  if (deps.length === 0) return false;
-  const target = node.memo;
-  if (deps.length === 1 && deps[0] !== target && !deps[0].edges) return false;
-  const seen = new Set();
-  const stack = deps.slice();
-  while (stack.length) {
-    const d = stack.pop();
-    if (d === target) return true;
-    if (seen.has(d)) continue;
-    seen.add(d);
-    if (d.edges) for (const e of d.edges) stack.push(e);
-  }
-  return false;
-}
-/** Publish-time check + edge record; true when it would cycle. */
+/** The cycle guard, as the BEAM keeps it now (host lazy_seq.bl `alias_cycle?`):
+    cycles are detected where they happen, and the memo graph has no edges. A
+    completed value is a cycle only when it IS the node, or is a node whose
+    completed value is, through a chain of completed nodes, the node itself. A
+    value that merely EMBEDS its node (`(cons 1 self)`, a vector holding it) is
+    ordinary data and is published as it is. A chain longer than `realize`'s
+    own bound counts as a cycle. */
 function reaches(v, node) {
-  const deps = directEdges(v);
-  if (wouldCycle(node, deps)) return true;
-  if (deps.length) node.edges = deps;
+  const target = node.memo;
+  let x = v;
+  for (let steps = 0; x instanceof LazySeq; steps++) {
+    if (x.memo === target) return true;
+    if (steps > 100000) return true;
+    const s = x.memo.s;
+    if (s[0] !== COMPLETED) return false;
+    x = s[1];
+  }
   return false;
 }
 
