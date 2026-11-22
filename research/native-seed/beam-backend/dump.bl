@@ -1,0 +1,76 @@
+; Card N2, BEAM side 1: the exact descriptors behind the SDK's unit store.
+;
+;   $MAIN/bin/bl run research/native-seed/beam-backend/dump.bl -- OUT FROM COUNT
+;
+; For units FROM..FROM+COUNT-1 of the unit index (sorted by namespace), prepare
+; each unit exactly as priv/build/unit-store.bl does (open_workspace version 2,
+; phase imports core and sugar, the SDK priv root, prepare_unit), then:
+;   * compile_unit it and compare every beam with the unit store's bytes;
+;   * write each plan descriptor as OUT/u/NAME/I.etf (term_to_binary) with
+;     the BEAM compiler's bytes for it as OUT/u/NAME/I.beam;
+;   * list beams the plan compiled itself (no descriptor exposed).
+; OUT/jobs.bl is the native run's job list, one [IN.etf OUT.core.etf] pair per
+; descriptor; OUT/dump.term the per-unit record (term_to_binary).
+(ns native-beam.dump)
+
+(defn- store [] (Path/join (Path/expand (System/fetch_env! "BL_UNIT_STORE")) ""))
+
+(defn- unit-rows [from n]
+ (let [index (Jason/decode! (File/read! (Path/join (store) "unit-index.json")))]
+  (take n (drop from (sort-by first (get index "units"))))))
+
+(defn- prepare [root namespace file]
+ (let [workspace (BeamLisp.AOT/open_workspace
+                  {:version 2 :phase-imports (list 'core 'sugar) :roots (list root)
+                   :sources (list {:namespace (symbol namespace) :file file})} {})]
+  (try (BeamLisp.AOT/prepare_unit workspace (symbol namespace))
+   (finally (BeamLisp.AOT/close_workspace! workspace)))))
+
+(defn- dump-unit [out root [namespace row]]
+ (try
+  (let [file (Path/join root (get row "file"))
+        prepared (prepare root namespace file)
+        compiled (BeamLisp.AOT/compile_unit prepared)
+        store-equal (mapv (fn [beam]
+                           (let [ref (Path/join (store) (str (Atom/to_string (elem beam 0)) ".beam"))]
+                            [(Atom/to_string (elem beam 0))
+                             (and (File/exists? ref) (= (File/read! ref) (elem beam 1)))]))
+                         (:beams compiled))
+        dir (Path/join (Path/join out "u") namespace)
+        _ (File/mkdir_p! dir)
+        descriptors (vec (mapcat :descriptors (:plans prepared)))
+        generated (vec (mapcat (fn [plan] (map (fn [b] (Atom/to_string (elem b 0))) (:generated-beams plan)))
+                               (:plans prepared)))
+        jobs (vec (map-indexed
+                   (fn [i d]
+                    (let [in (Path/join dir (str i ".etf"))
+                          beam (BeamLisp.Emit/compile_descriptor d)]
+                     (File/write! in (erlang/term_to_binary d))
+                     (File/write! (Path/join dir (str i ".beam")) (elem beam 1))
+                     {:in in :out (Path/join dir (str i ".core.etf")) :module (Atom/to_string (elem beam 0))}))
+                   descriptors))]
+   {:namespace namespace :ok true :beams (count (:beams compiled))
+    :store-equal (count (filter second store-equal))
+    :store-differs (vec (map first (remove second store-equal)))
+    :generated generated :jobs jobs})
+  (catch e {:namespace namespace :ok false :error (ex-message e)})))
+
+(defn run [[out from n]]
+ (let [out (Path/expand out)
+       root (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
+       rows (unit-rows (String/to_integer from) (String/to_integer n))
+       results (mapv #(dump-unit out root %) rows)]
+  (File/mkdir_p! out)
+  (File/write! (Path/join out "jobs.bl")
+   (str "(run-jobs [\n"
+        (apply str (mapcat (fn [r] (map (fn [j] (str " [" (pr-str (:in j)) " " (pr-str (:out j)) "]\n")) (:jobs r))) results))
+        "])\n"))
+  (File/write! (Path/join out "dump.term") (erlang/term_to_binary results))
+  (println (str "DUMP units " (count results) " prepared " (count (filter :ok results))
+                " descriptors " (reduce + (map #(count (:jobs %)) results))
+                " beams " (reduce + (map #(or (:beams %) 0) results))
+                " store-equal " (reduce + (map #(or (:store-equal %) 0) results))
+                " generated " (reduce + (map #(count (:generated %)) results))))
+  (doseq [r (remove :ok results)] (println (str "DUMP-FAIL " (:namespace r) " " (:error r))))))
+
+(run (vec (BeamLisp/argv)))

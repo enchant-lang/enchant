@@ -752,7 +752,6 @@
    "Elixir.BeamLisp.Record/declaration_kind/3"
    "Elixir.BeamLisp.Trace/trace/3" "Elixir.BeamLisp.Trace/trace/4" "Elixir.BeamLisp.Trace/untrace/2"
    "Elixir.BeamLisp.Refs/spawn_exec/1" "Elixir.BeamLisp.Refs/spawn_exec/2"
-   "erlang/term_to_binary/2" "erlang/binary_to_term/2"
    "Elixir.Code/ensure_loaded?/1" "crypto/hash/2" "Elixir.Base/encode16/1" "Elixir.Base/encode16/2"
    "Elixir.BeamLisp.Env/os_env_call/2" "erlang/monitor/2" "erlang/exit/2"))
 (define native-beam-seed-only-leaves

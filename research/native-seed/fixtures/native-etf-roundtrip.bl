@@ -1,0 +1,51 @@
+; Card N2, step 1: the native external term format against the BEAM's.
+;
+; One term list, three runs in research/native-seed/out/native-etf (create it
+; first; the native host has no mkdir):
+;   1. BEAM  $MAIN/bin/bl run THIS   writes beam-I.etf with OTP term_to_binary;
+;   2. Chez  qualify.bl -- eval --file THIS   decodes each beam-I.etf natively
+;      and checks it is = to its own term, then writes nat-I.etf with the
+;      native encoder (and checks its own round trip);
+;   3. BEAM  $MAIN/bin/bl run THIS   again: binary_to_term of each nat-I.etf
+;      must be =:= to the BEAM's own term (exact equality, not printing).
+; The host is told apart by the native-only leaf host/read-bytes/1.
+(ns native.etf-roundtrip)
+
+(def dir "research/native-seed/out/native-etf")
+
+(defn- terms []
+ [true false nil :ok (erlang/binary_to_atom "=:=") (erlang/binary_to_atom "héllo") (erlang/binary_to_atom "")
+  0 1 255 256 -1 2147483647 2147483648 -2147483648 -2147483649
+  18446744073709551616 (- 0 (erlang/bsl 1 200)) (erlang/bsl 1 2100)
+  1.5 -2.25 0.0 123456.789
+  "" "hi" "λ😀 tab\t" (list) (list 1 2 :three "four") (lists/append (list 1 2) 3)
+  (tuple) (tuple 1 :a "b") (erlang/make_tuple 300 :x)
+  {} {:a 1 "b" 2 3 :c (tuple 1) :d} {:nested {:deeper [1 2]}}
+  (into {} (map (fn [i] [i (* i i)]) (range 40)))
+  [] [1 2 3] (vec (range 40)) (with-meta [1] {:line 3})
+  #{} #{1 :two "three"} 1.50M
+  (list (tuple :c_literal (list) 1) (tuple :c_var (list 7 (tuple :file "f.bl")) (tuple :f 2)))])
+
+(defn- native? [] (erlang/function_exported :host :read-bytes 1))
+
+(defn- path [prefix i] (str dir "/" prefix "-" i ".etf"))
+
+(defn- native-run []
+ (doseq [[i t] (map-indexed vector (terms))]
+  (let [beam (erlang/binary_to_term (host/read-bytes (path "beam" i)))
+        own (erlang/term_to_binary t)]
+   (host/write-bytes (path "nat" i) own)
+   (println (str "ETF native " i " beam-decodes-equal " (= t beam)
+                 " own-roundtrip-equal " (= t (erlang/binary_to_term own)))))))
+
+(defn- beam-run []
+ (let [ts (terms)]
+  (if (File/exists? (path "nat" 0))
+   (doseq [[i t] (map-indexed vector ts)]
+    (let [decoded (erlang/binary_to_term (File/read! (path "nat" i)))]
+     (println (str "ETF beam " i " exact " (erlang/=:= t decoded)))))
+   (do (doseq [[i t] (map-indexed vector ts)] (File/write! (path "beam" i) (erlang/term_to_binary t)))
+       (println (str "ETF beam wrote " (count ts)))))))
+
+(if (native?) (native-run) (beam-run))
+(println "ETF-DONE")
