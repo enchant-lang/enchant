@@ -263,9 +263,11 @@
           "run = BeamLisp.Env.fetch!(\"build\", \"produce!\")"
           "select = BeamLisp.Env.fetch!(\"build\", \"namespace-sources\")"
           "sources = :erlang.apply(select, [stage]) |> Enum.reject(&BeamLisp.AOT.floor_file?/1) |> Enum.reject(fn p -> String.ends_with?(p, \"-fixture.bl\") end)"
-          ;; A shard (BL_SDK_SHARD="i/k") compiles every k-th source of the sorted
-          ;; selection into its own unit store; see run-library-child!.
-          "sources = case System.get_env(\"BL_SDK_SHARD\") do nil -> sources; spec -> [i, k] = spec |> String.split(\"/\") |> Enum.map(&String.to_integer/1); sources |> Enum.sort() |> Enum.with_index() |> Enum.filter(fn {_, n} -> rem(n, k) == i end) |> Enum.map(&elem(&1, 0)) end"
+          ;; A shard (BL_SDK_SHARD="i/k") compiles its share of the selection into
+          ;; its own unit store; see run-library-child!. Shares balance source
+          ;; bytes: largest first, each to the least-loaded shard (ties by index),
+          ;; so every child computes the same split from the same tree.
+          "sources = case System.get_env(\"BL_SDK_SHARD\") do nil -> sources; spec -> [i, k] = spec |> String.split(\"/\") |> Enum.map(&String.to_integer/1); sized = sources |> Enum.map(fn p -> {File.stat!(p).size, p} end) |> Enum.sort_by(fn {s, p} -> {-s, p} end); {buckets, _} = Enum.reduce(sized, {Map.new(0..(k - 1), &{&1, []}), Map.new(0..(k - 1), &{&1, 0})}, fn {s, p}, {b, l} -> j = Enum.min_by(0..(k - 1), &{l[&1], &1}); {Map.update!(b, j, &[p | &1]), Map.update!(l, j, &(&1 + s))} end); Enum.reverse(buckets[i]) end"
           "r = timed.(\"child-produce\", fn -> :erlang.apply(run, [%{:\"log-path\" => lpath, :\"sdk-artifacts?\" => true, sources: sources, root: stage, out: ebin, manifest: mpath, jobs: String.to_integer(jobs), log: &IO.puts/1}]) end)"
           "File.write!(result, :erlang.term_to_binary(Map.put(r, :sources, length(sources))))"
           "System.halt(if Enum.count(r[:errors]) == 0, do: 0, else: 1)")

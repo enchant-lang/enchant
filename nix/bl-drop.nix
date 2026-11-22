@@ -109,9 +109,7 @@ let
   cleanDirectory = directory: omitted:
     lib.fileset.difference directory
       (lib.fileset.unions (map (name: lib.fileset.maybeMissing (directory + "/${name}")) omitted));
-  src = lib.fileset.toSource {
-    root = ../.;
-    fileset = lib.fileset.unions [
+  srcFiles = lib.fileset.unions [
       ../bin
       (cleanDirectory ../priv [ "native" "z3" "formal" ".bl" "codegen.sources" "precompiled.term" "sdk-code.term" ])
       ../env.bl ../bl.lock
@@ -130,6 +128,15 @@ let
       (cleanDirectory ../native/ports/formal_worker [ "target" ".git" ".bl" ])
       ../tooling/drop/src ../tooling/drop/Cargo.toml ../tooling/drop/Cargo.lock
     ];
+  src = lib.fileset.toSource { root = ../.; fileset = srcFiles; };
+  # The producer checks prepared natives against their crate sources, but no
+  # library byte comes from an optional crate: the library identity names the
+  # producer tree without them (lazy_memo stays, as it does in libraryInputs).
+  optionalCrates = builtins.filter (crate: crate != "lazy_memo") nativeCrates;
+  librarySrc = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.difference srcFiles
+      (lib.fileset.unions (map (crate: lib.fileset.maybeMissing (../native + "/${crate}")) optionalCrates));
   };
 
   setupTree = ''
@@ -222,7 +229,7 @@ let
   # 3. Retain the native image. Portable ELF retargeting is an independent
   # requested product; ordinary SDK selection never forces it.
   native-image = workerFor true (pkgs.stdenv.mkDerivation {
-    pname = "beam-lisp-sdk-image";
+    pname = "beam-lisp-sdk-library";
     version = "0.1.0";
     inherit src;
     nativeBuildInputs = producerTools;
@@ -274,7 +281,6 @@ let
 
       export BL_PRODUCTION_LAUNCHER=${drop-tools}/bin/drop-launcher
       export BL_PRODUCTION_PACKER=$TMPDIR/drop
-      export BL_PRODUCTION_DROP_OUTPUT=$TMPDIR/selfbuilt.drop
       export BL_PRODUCTION_PAYLOAD=$TMPDIR/payload
       export BL_PRODUCTION_UNIT_STORE=$TMPDIR/unit-store
       ${lib.optionalString (previousUnitArchive != null) ''
@@ -303,58 +309,14 @@ let
       ./bin/bl --cold run scripts/produce-sdk.bl
       sdk_phase_end
 
-      sdk_phase_start copy-sdk-image
+      sdk_phase_start copy-sdk-library
       chmod -R u+w $TMPDIR/payload
-      # Keep the Nix-linked SDK before portable ELF retargeting. Its receiver
-      # checks the existing sealed metadata and actual bytes at load time.
-      sdk="$out"
-      mkdir -p "$sdk"
-      cp -a --no-preserve=ownership "$TMPDIR/unit-store" "$sdk/unit-store"
-      cp -a --reflink=auto --no-preserve=ownership "$TMPDIR/payload" "$sdk/payload"
-      ln -s payload/lib "$sdk/lib"
-      for application in "$sdk"/lib/beam_lisp-*; do
-        ln -s "lib/$(basename "$application")" "$sdk/image"
-      done
-      cp $TMPDIR/selfbuilt.drop "$sdk/bl"
-      chmod 555 "$sdk/bl"
-      mkdir -p "$sdk/bin"
-      cat > "$sdk/boot.exs" <<EOF
-      # The platform owns the running Elixir installation and its CLI scripts.
-      # The portable payload's ebin-only copy must not shadow that installation.
-      elixir_ebin = :code.lib_dir(:elixir, :ebin)
-      for path <- Path.wildcard("$sdk/lib/*/ebin"), do: Code.prepend_path(path)
-      Code.prepend_path(elixir_ebin)
-      Code.prepend_path("$sdk/image/ebin")
-      :code.del_path(~c".")
-      BeamLisp.Launcher.start_app!(System.argv(), %{})
-      EOF
-      cat > "$sdk/bin/bl" <<EOF
-      #!${pkgs.runtimeShell}
-      unset BL_INTERNAL_PRODUCER
-      export PATH=${buildCheckout}/bin:\$PATH
-      export BL_ARTIFACT_PLATFORM=${buildCheckout}/artifact-platform
-      export BL_PREPARATION_COORDINATOR=${coordinator}
-      export BL_SDK_PRODUCT="$sdk"
-      export BL_ROOT="$sdk/image" BL_EBIN="$sdk/image/ebin" BL_BUILD_ID=src BEAM_LISP_DEV=0
-      export BL_BIN=${buildCheckout}/bin/drop-launcher
-      export BL_PREPARED_NATIVES="$(readlink -f ${buildCheckout}/native-products)"
-      exec ${buildCheckout}/bin/elixir "$sdk/boot.exs" "\$@"
-      EOF
-      chmod 555 "$sdk/bin/bl"
-      printf '%s\n' '${builtins.toJSON {
-        version = 1;
-        kind = "sdk";
-        producerAPI = 2;
-        compiler = toString compiler;
-        dependencies = toString dependencies;
-        platform = toString buildCheckout;
-        coordinator = toString coordinator;
-        formalWorker = toString formalWorker;
-        target = "x86_64-linux";
-      }}' > "$sdk/artifact.json"
-      ${pkgs.jq}/bin/jq --arg source "$src" \
-        '. + {source: $source}' "$sdk/artifact.json" > "$sdk/artifact.tmp"
-      mv "$sdk/artifact.tmp" "$sdk/artifact.json"
+      # The library only: nix/sdk-join.nix installs the natives, packs the
+      # drop and writes the launchers, so a native edit never reruns this.
+      mkdir -p "$out"
+      cp -a --no-preserve=ownership "$TMPDIR/unit-store" "$out/unit-store"
+      cp -a --reflink=auto --no-preserve=ownership "$TMPDIR/payload" "$out/payload"
+      printf '%s\n' '${builtins.toJSON { version = 1; kind = "sdk-library"; inherit libraryIdentity; }}' > "$out/library.json"
       sdk_phase_end
       runHook postBuild
     '';
@@ -363,11 +325,16 @@ let
   });
   # SDK bytes depend on their producer inputs; command/coordinator recipes are
   # selection data. Provider-only edits can select the same qualified payload.
-  assemblyIdentity = builtins.hashString "sha256" (builtins.toJSON {
-    source = toString src;
+  #
+  # The library (payload and unit store) depends on the mandatory lazy_memo
+  # native only: units key on its build identity, and no library byte records
+  # an optional native host. Its identity names lazy_memo, not the native set,
+  # so a native edit reuses the previous library and reruns only the join.
+  libraryInputs = {
+    source = toString librarySrc;
     compiler = toString compiler;
     dependencies = toString dependencies;
-    natives = toString natives;
+    lazyMemo = toString nativeProducts.products.lazy_memo;
     executor = toString drop-tools;
     erlang = toString erlang;
     elixir = toString elixir;
@@ -380,10 +347,22 @@ let
     unitArchive = builtins.readFile ./sdk-unit-archive.nix;
     producerRecipe = builtins.readFile ./producer-product.nix;
     worker = builtins.readFile ./bounded-build.nix;
-  });
+  };
+  libraryIdentity = builtins.hashString "sha256" (builtins.toJSON libraryInputs);
+  assemblyIdentity = builtins.hashString "sha256" (builtins.toJSON (libraryInputs // {
+    natives = toString natives;
+    join = builtins.readFile ./sdk-join.nix;
+  }));
   reuseAssembly = previousMetadata != null
     && (previousMetadata.assemblyIdentity or null) == assemblyIdentity;
-  image = if reuseAssembly then builtins.storePath previousMetadata.image else native-image;
+  reuseLibrary = previousMetadata != null && previousMetadata ? library
+    && (previousMetadata.libraryIdentity or null) == libraryIdentity;
+  library = if reuseLibrary then builtins.storePath previousMetadata.library else native-image;
+  joined = import ./sdk-join.nix {
+    inherit pkgs library natives nativeCrates drop-tools buildCheckout coordinator
+      compiler dependencies formalWorker src libraryIdentity;
+  };
+  image = if reuseAssembly then builtins.storePath previousMetadata.image else joined;
   portable = import ./portable-product.nix { inherit pkgs image; tools = drop-tools; };
   coordinator = import ./coordinator-runtime.nix {
     inherit pkgs;
