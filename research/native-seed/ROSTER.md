@@ -5,7 +5,7 @@ No user-visible change. An unchanged request costs ~1 ms of fixed floor
 (200× warm BEAM's 158 ms). An edit costs in proportion to what it changes,
 when building `bl` and when using it, cold and hot.
 
-Status: ✅ done · 🔨 in progress · ⏳ ready to take · 🔒 waits on another card · 🅿️ parked.
+Status: ✅ done (passed the integration gate) · 🧪 branch ready, waiting for the gate · 🔨 in progress · ⏳ ready to take · 🔒 waits on another card · 🅿️ parked.
 The journal (`research/checked-tiles/journal/06-chez-substrate-and-user-path.bl.org`)
 holds the reasoning; `research/checked-tiles/evidence/` the measurements.
 
@@ -23,46 +23,72 @@ holds the reasoning; `research/checked-tiles/evidence/` the measurements.
 The one rule behind every card: a cost should scale with what changed, not
 with the size of the tree, the SDK or the compiler.
 
-## Rules for any agent taking a card
+## How a card gets done: work, check inside, one integration gate
 
-Read `/home/othman/AGENTS.md` and this repository's `AGENTS.md` first. In short:
+An agent does the whole card and checks it right where it works, in seconds to
+a few minutes. It never waits on an SDK build. **The integrator (the session
+that fanned the cards out) merges finished branches in batches, builds one SDK
+per batch, and runs the gate tests.** A card is ✅ only after that gate.
 
-- **Claim before working.** Set the card to 🔨 with your session name and date
-  in a commit that touches only this file. Two agents must never fix the same
-  bug (it happened on 2026-11-22: two sessions on one JS bug, uncommitted edits
-  in the shared checkout). Cards marked "conflicts with" must not run at once.
-- **Run checks through `work run`.** Use `work run --memory 4G --timeout S -- CMD`.
-  4G works; 6G is refused. At most two run at once per account. Use
-  `./bin/bl`, never the installed `bl`, inside this checkout.
-- **Commit, then check.** End commit messages with the attribution line the
-  harness gives you. Don't push.
-- **One SDK build at a time.** Any edit under `priv/`, `nix/`, `scripts/`,
-  `bin/`, `native/` or `tooling/drop/` changes the checkout SDK or platform.
-  The next `./bin/bl` request then rebuilds it: 82 s for a Rust edit, ~14 min
-  for a compiler or runtime edit, on the build station (4 CPUs).
-  - Batch those edits.
-  - Prepare explicitly: `work run --memory 4G --timeout 3000 -- scripts/prepare-checkout-sdk`.
-  - Never edit those trees while a preparation runs (`ls -lt .bl/sdks`; a
-    directory newer than `current-sdk` with an `active-job` is running).
-  - Use a git worktree for long SDK-input work, and record its owner and
-    retirement in this file.
-- **Native-only work needs no SDK build.** Under `research/native-seed/`
-  (`src/native/*.bl`, `host/*.scm`, `chez/*`), qualify with `qualify.bl`
-  against the base image `research/native-seed/out/chez-main`:
-  - compiler-source change: `./bin/bl run research/native-seed/chez/qualify.bl -- candidate --image research/native-seed/out/chez-main --out DIR`
-    (add `--codegen` when generated code changes);
-  - host Scheme change: `... -- derive --image research/native-seed/out/chez-main --out DIR`;
-  - speed: `... -- pair --base research/native-seed/out/chez-main/prelude.scm --cand DIR/prelude.scm --out DIR2`.
-    It interleaves runs and checks byte equality. Timings inside the native eval
-    use a virtual clock and mean nothing; only `pair` timings count.
-  - Accept only "13/13 gates" and byte-identical output. A qualified candidate
-    becomes the next `chez-main` only when its card says so.
-- **Don't touch other agents' files:** `priv/lib/scenario.bl`,
-  `test/bl/scenario/browser_world_verdict_test.bl`, `research/field-station/`.
-- **Stop what you start.** For VMs: `bl realm stop` in the tree that started them.
-- **Delete with explicit paths.** `rm` inside `bash -c` is blocked.
-- **Report numbers you measured**, with the command, in the card's evidence
-  file. Never estimate in a "Done" row.
+### Where an agent works
+- **In its own git worktree** on its own branch, never the shared checkout.
+  Commit there freely, and finish with a clean, committed branch.
+- **Never run the worktree's own `./bin/bl`.** It would prepare a whole SDK for
+  that tree (~14 min on the 4-CPU build station, which is shared). Use the main
+  checkout's client against the main SDK:
+  `MAIN=/home/othman/code/undefine/beam-lisp--execution-protocol` and
+  `$MAIN/bin/bl ...`.
+- **Run every check through `work run --memory 4G --timeout S -- ...`.** At
+  most two run at once per account; checks queue behind other agents'. Keep each
+  under ~10 minutes. Don't use 6G; it's refused.
+- **Don't touch** `priv/lib/scenario.bl`,
+  `test/bl/scenario/browser_world_verdict_test.bl` or `research/field-station/`.
+  Delete only by explicit path; `rm` inside `bash -c` is blocked.
+- **Stop VMs you start.** Use `$MAIN/bin/bl realm stop` from the directory
+  that started one.
+
+### The inner loop, per tree (measured 2026-11-22)
+
+| You changed | Check it inside, like this | Cost |
+|---|---|---|
+| `research/native-seed/src/native/*.bl` (compiler or emitter source) | `cd $WT && QUALIFY_ROOT=$WT work run --memory 4G --timeout 900 -- $MAIN/bin/bl run research/native-seed/chez/qualify.bl -- candidate --image $MAIN/research/native-seed/out/chez-main --out OUT --source-root $WT [--codegen]` | tens of seconds; first run of a new stage ~1 min |
+| `research/native-seed/host/*.scm` (native host) | the same, with `derive --image $MAIN/research/native-seed/out/chez-main --out OUT` | the same |
+| any native speed claim | `... -- pair --base $MAIN/research/native-seed/out/chez-main/prelude.scm --cand OUT/prelude.scm --out OUT2 --reps 8 --rounds 8` | a few minutes |
+| a native behaviour | `... -- eval --image OUT --file CHECK.bl` runs a BL file on the native image | seconds |
+| `tooling/drop/` (Rust client) | `cd $WT/tooling/drop && CARGO_TARGET_DIR=$WT/.cargo-target work run --memory 4G --timeout 1500 -- nix shell nixpkgs#cargo nixpkgs#rustc nixpkgs#gcc --command cargo test --release` | 66 s cold, seconds warm |
+| client speed or behaviour | run the binary cargo built, the way `bin/bl` does: `$WT/.cargo-target/release/drop-launcher --checkout $MAIN -- run /tmp/x.bl`, with `BL_CHECKOUT_PLATFORM`, `BL_BIN` and the rest exported as in `$MAIN/bin/bl` | ms |
+| a BL file the coordinator or a script runs directly (`nix/*.bl`, `scripts/*.bl`, `research/**.bl`) | `$MAIN/bin/bl run FILE ...` or a test file next to it, on the main SDK | seconds |
+| `priv/` code (runtime, library, compiler) | **No hot path:** reload refuses SDK namespaces (`sdk_forwarder_route_changed`), and `:shadow` only reaches callers inside the project, not library-to-library calls. Check the logic by copying the changed function into a scratch namespace under your own project dir and calling it from a test there (`$MAIN/bin/bl test`). Then hand the branch over with the exact gate test files listed. | seconds; the real check is the integration gate |
+| measurement only | `work run` the probe with 3+ runs; report median and spread and the machine load (`uptime`) | — |
+
+`scripts/check-runtime-hosts` is meant for host checks without an SDK, but it
+is stale: it needs Elixir on `PATH`, and the flake has no dev shell. Fixing it
+is card T1.
+
+### What an agent hands back
+1. A branch name, with each commit message ending in the attribution line the
+   harness gives you.
+2. What changed and why, in two or three sentences.
+3. Inner-loop results: exact commands and their outputs (numbers, gate counts,
+   test counts).
+4. **Gate tests:** the test files the integrator must run on the integration
+   SDK, and what each should show.
+5. Anything left undone, and why.
+
+Numbers in "Done" rows are measured, never estimated.
+
+### The integration gate (integrator only)
+For each batch:
+1. Merge the branches into `main`.
+2. Run `work run --memory 4G --timeout 3000 -- scripts/prepare-checkout-sdk`.
+   Only when `priv/`, `nix/`, `scripts/`, `bin/`, `native/` or `tooling/drop/`
+   changed. The two most recent runs took 862 s and 1301 s.
+3. Run every gate test the cards named, in one `./bin/bl test a.bl b.bl ...`.
+4. Run `qualify.bl -- qualify` for a new native base image, then make it the
+   next `chez-main`.
+5. Mark the cards ✅ with the measured result.
+
+If a gate fails, the card goes back to 🔨 with the failure.
 
 ## Cards
 
@@ -297,6 +323,24 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 #### C3 🅿️ Typed private IR (fixed-layout nodes, positions as one tuple)
 After N3. Journal 06, "What the lookup census says about the IR", has the
 census to start from.
+
+### T — tools
+
+#### T1 ⏳ A host check without an SDK build · S
+- **Why.** `priv/` edits have no inner loop. `scripts/check-runtime-hosts`
+  compiles changed `priv/host` modules with the existing compiler and tests them
+  in a capped VM. It fails before starting: `elixir is not on PATH`, and
+  `nix develop` has no shell to give it.
+- **Change.** Give it its tools the way the SDK producer does: the `erlang` and
+  `elixir` flake packages (`nix build .#erlang .#elixir`) put on `PATH` by the
+  script itself. Then make it work against the current SDK image:
+  `--sdk-image "$(readlink -f .bl/sdks/current-sdk)/image"`, or whatever the
+  script needs (it wants `priv/precompiled.term` and `ebin/`).
+- **Done when.**
+  - With an unchanged `priv/host`, it runs `test/bl/js_local_shadow_test.bl`
+    green in under 5 minutes.
+  - With a deliberate break in one host function, the same check fails.
+  - The inner-loop table above gets a `priv/host` row with the measured cost.
 
 ### J — JavaScript target
 
