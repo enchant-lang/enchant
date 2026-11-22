@@ -129,6 +129,8 @@ export function portableLeaves(lateModule) {
     "Elixir.File/rename!/2", "Elixir.File/cwd!/0"].map((k) => [k, beamOnly(k)])),
   // A page loads namespaces from its module graph, never from source files.
   "Elixir.BeamLisp.Loader/source_path/1": () => null,
+  // A page has no realms: every namespace is global, so no call is realm-local.
+  "Elixir.BeamLisp.Loader/ns_home/1": () => kw("global"),
   // A page has no process environment: every variable is unset.
   "Elixir.System/get_env/1": () => null,
   "Elixir.System/get_env/2": (_k, d) => d,
