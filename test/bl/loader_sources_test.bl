@@ -42,7 +42,7 @@
     (record (str root "/bl/test.bl") nil)
     (record (str root "/bl/test.bl.md") nil)
     (record (str root "/bl/x/y.bl") nil)
-    (is (= (str "bl-realm-sources 1\t" root) (first (lines manifest))))
+    (is (String/starts_with? (first (lines manifest)) (str "bl-realm-sources 1\t" root "\t")))
     (is (= [(str "L\t" ABC "\t" root "/lib/a.bl")
             (str "A\t" root "/lib/a.clj")
             (str "A\t" root "/bl")]
@@ -72,7 +72,7 @@
     (File/write! manifest "bl-realm-sources 1\t/elsewhere\nA\t/x\n")
     (BeamLisp.Loader/source_record_candidate manifest root (str root "/a.bl") "abc")
     (is (= 2 (count (lines manifest))))
-    (is (String/ends_with? (first (lines manifest)) root))
+    (is (String/starts_with? (first (lines manifest)) (str "bl-realm-sources 1\t" root "\t")))
     (File/rm_rf! root)))
 
 (deftest a-failed-write-removes-the-manifest
@@ -115,7 +115,7 @@
       (is (= (str root "/second/test/bl/helper.bl") (resolve-in e dirs "test.bl.helper"))))
     (let [ls (lines manifest)
           digest (fn [s] (String/downcase (Base/encode16 (crypto/hash :sha256 s))))]
-      (is (= (str "bl-realm-sources 1\t" root) (first ls)))
+      (is (String/starts_with? (first ls) (str "bl-realm-sources 1\t" root "\t")))
       (testing "the missing first root is one line however many names it failed to serve"
         (is (= 1 (count (filter (fn [l] (= l (str "A\t" root "/first"))) ls)))))
       (testing "what was loaded is listed with its digest"
@@ -136,7 +136,7 @@
 (deftest a-degenerate-manifest-is-started-over
   (let [root (scratch)
         manifest (str root "/.bl/realm-sources.v1")
-        header (str "bl-realm-sources 1\t" root "\n")
+        header (str "bl-realm-sources 1\t" root "\ttok\n")
         filler (apply str (repeat 5000 (str "A\t" root "/some/missing/directory/with/a/long/enough/name/x.bl\n")))]
     (File/mkdir_p! (str root "/.bl"))
     (File/write! manifest (str header filler))
@@ -146,7 +146,32 @@
   (let [root (scratch)
         manifest (str root "/.bl/realm-sources.v1")]
     (File/mkdir_p! (str root "/.bl"))
-    (File/write! manifest (str "bl-realm-sources 1\t" root "\nL\t" ABC "\t/x\nX\n"))
+    (File/write! manifest (str "bl-realm-sources 1\t" root "\ttok\nL\t" ABC "\t/x\nX\n"))
     (BeamLisp.Loader/source_record_candidate manifest root (str root "/a.bl") "abc")
     (is (= 2 (count (lines manifest))))
+    (File/rm_rf! root)))
+
+(deftest a-realm-start-creates-an-empty-manifest-with-a-token
+  (let [root (scratch)
+        manifest (str root "/.bl/realm-sources.v1")]
+    (BeamLisp.Loader/source_manifest_begin root)
+    (is (= 1 (count (lines manifest))))
+    (is (String/starts_with? (first (lines manifest)) (str "bl-realm-sources 1\t" root "\t")))
+    (let [before (first (lines manifest))]
+      (BeamLisp.Loader/source_manifest_begin root)
+      (is (= before (first (lines manifest))) "a second start keeps the file"))
+    (is (nil? (BeamLisp.Loader/source_manifest_begin "/nonexistent/loader-sources")))
+    (File/rm_rf! root)))
+
+(deftest a-manifest-deleted-under-a-live-vm-is-restarted-with-a-new-token
+  (let [root (scratch)
+        manifest (str root "/.bl/realm-sources.v1")
+        record (fn [path raw] (BeamLisp.Loader/source_record_candidate manifest root path raw))]
+    (record (str root "/a.bl") "abc")
+    (let [first-header (first (lines manifest))]
+      (File/rm! manifest)
+      (record (str root "/a.bl") "abc")
+      (is (File/regular? manifest) "recreated by the next recording")
+      (is (not= first-header (first (lines manifest))) "a new token: the client sees a new epoch")
+      (is (= 2 (count (lines manifest))) "what the live VM had recorded is recorded again"))
     (File/rm_rf! root)))

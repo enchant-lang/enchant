@@ -364,6 +364,8 @@ fn checkout_project_generation(
 /// its topmost missing ancestor, which may be a directory), so something
 /// appearing there would change what a namespace resolves to.
 struct RealmSources {
+    /// The header's token, new each time the manifest file is created.
+    token: String,
     entries: std::collections::BTreeMap<PathBuf, Option<[u8; 32]>>,
 }
 
@@ -378,7 +380,11 @@ fn read_realm_sources(project: &Path) -> Option<RealmSources> {
         return None;
     }
     let mut lines = text.lines();
-    let root = lines.next()?.strip_prefix("bl-realm-sources 1\t")?;
+    let header = lines.next()?.strip_prefix("bl-realm-sources 1\t")?;
+    let (root, token) = header.split_once('\t')?;
+    if token.is_empty() || token.contains('\t') {
+        return None;
+    }
     if std::fs::canonicalize(root).ok()?.as_path() != project {
         return None;
     }
@@ -395,7 +401,7 @@ fn read_realm_sources(project: &Path) -> Option<RealmSources> {
         }
         entries.entry(PathBuf::from(path)).or_insert(digest);
     }
-    Some(RealmSources { entries })
+    Some(RealmSources { token: token.to_string(), entries })
 }
 
 fn parse_digest(hex: &str) -> Option<[u8; 32]> {
@@ -419,6 +425,8 @@ fn fold_realm_sources(root: &Path, base: &str, sources: &RealmSources) -> String
     let mut hash = Sha256::new();
     hash.update(b"checkout-realm-sources-v1\0");
     hash.update(base.as_bytes());
+    hash.update(sources.token.as_bytes());
+    hash.update([0]);
     // the runtime pin already covers the image's own trees
     let sdk = root.join("priv");
     let native = root.join("native");
@@ -794,9 +802,13 @@ mod checkout_tests {
 
     /// Write a manifest the way the realm does: header, then entries.
     fn write_manifest(root: &Path, entries: &[String]) {
+        write_manifest_with(root, "epoch-1", entries)
+    }
+
+    fn write_manifest_with(root: &Path, token: &str, entries: &[String]) {
         let project = std::fs::canonicalize(root).unwrap();
         std::fs::create_dir_all(project.join(".bl")).unwrap();
-        let mut text = format!("bl-realm-sources 1\t{}\n", project.display());
+        let mut text = format!("bl-realm-sources 1\t{}\t{}\n", project.display(), token);
         for line in entries {
             text.push_str(line);
             text.push('\n');
@@ -874,6 +886,22 @@ mod checkout_tests {
         assert_ne!(before, appeared);
         std::fs::write(root.join("test/bl/seed_support.clj"), "shadow 2").unwrap();
         assert_ne!(appeared, generation(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_manifest_restarted_under_a_live_realm_is_a_new_generation() {
+        let (root, _) = declared_project("manifest-epoch");
+        let entries = [loaded(&root, "test/bl/seed_support.bl")];
+        write_manifest_with(&root, "epoch-1", &entries);
+        let first = generation(&root);
+        assert_eq!(first, generation(&root));
+        write_manifest_with(&root, "epoch-2", &entries);
+        assert_ne!(first, generation(&root), "the token is part of the generation");
+        // a header without a token is not a manifest
+        let project = std::fs::canonicalize(&root).unwrap();
+        std::fs::write(project.join(REALM_SOURCES), format!("bl-realm-sources 1\t{}\n", project.display())).unwrap();
+        assert!(read_realm_sources(&project).is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
