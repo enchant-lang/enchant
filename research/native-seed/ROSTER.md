@@ -106,7 +106,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
 ### U — the request path (what every user pays)
 
-#### U1 🔨 The checkout client inventories declared inputs only · S · Rust
+#### U1 ✅ The checkout client inventories declared inputs only · S · Rust
 - **Why.** Each `./bin/bl` request first hashes the project's sources so the
   warm VM can tell whether they changed.
   - `checkout_sources_walk` in `tooling/drop/src/checkout.rs` (~line 374)
@@ -373,6 +373,10 @@ census to start from.
 
 ### W — the test runner
 
+#### J4 ⏳ Two small JS disagreements · H · `priv/lib/js`
+- `(- 0.0)` prints `0.0` on JS, `-0.0` on the BEAM; `erlang/-/1` has no JS leaf.
+- **Done when.** Both answer as on the BEAM; a js_diff case for each.
+
 #### W1 ✅ A multi-file `bl test` breaks after a realm-retirement test · S · BL
 - **Why.** On `main` (checked 2026-11-22 on the batch-2 SDK, without U1), `./bin/bl test` with
   `test/bl/contextual_realm_retirement_test.bl` first and nine realm/seed/JS files after it:
@@ -440,6 +444,8 @@ Cards in one lane conflict; lanes run at the same time.
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | U1: the client digests what the realm loaded | The loader records each resolved source and absent candidate in `.bl/realm-sources.v1` (epoch token, self-healing); the client digests declared roots plus exactly those. An edited test helper is seen; warm run 152 → 87–96 ms, `--version` 77–80 ms. Next (U1c): 2,506 absent lines and ~35k statx per request | `2d71662e7` |
+| ✅ | `Loader/ns_home` answers in JavaScript | A page has no realms (`:global`); all 23 js_* files pass | `2d71662e7` |
 | ✅ | U6: SDK files hashed once per VM | Store files hashed once; artifact metadata and kernel disassembly reused; a warm inventory walk 118 → 98 ms; cold run paired with the previous SDK 3,594 → 3,483 ms median (load ~10). U5's "1.5 s of repeated walks" was too high: a repeat walk is ~100 ms | `c8a408a94` |
 | ✅ | J3: `js_compiled_core` passes | Fixed by W1's realm-local link fix: 11/11 | `c8a408a94` |
 | ✅ | Portable JS leaves, literate JS namespaces, `system.inputs` (from another session, lane/rich-edit) | `js_portable_leaves` 77/77, `system_inputs` 12/12, `js_boot_order` 3/3 | `c8a408a94` |
