@@ -518,13 +518,14 @@ fn retry_from_warm(bin: &std::path::Path, root: &std::path::Path, argv: &[String
     if t != Transport::Start && t != Transport::Require {
         return None;
     }
+    let mut started = None;
     if let Some(ep) = endpoints(root, shared) {
         if claim_start(&ep.starting, now_secs(), if checkout_root().is_some() { 360 } else { START_GRACE_SECS }) {
-            start_daemon_detached(bin, root, &build_id(), shared, true);
+            started = Some(start_daemon_child(bin, root, &build_id(), shared, true));
         }
     }
     if t == Transport::Require {
-        if !wait_ready(root, shared) {
+        if !wait_ready_for(root, shared, started.as_mut()) {
             if let Some(log) = log_path(root, &build_id(), shared) {
                 eprintln!("bl: required warm VM did not become ready; command was not run; log: {}", log.display());
             } else {
@@ -565,17 +566,23 @@ fn release_command(bin: &std::path::Path) -> Command {
 }
 
 /// Poll for an authenticated-reachable daemon, up to a startup deadline.
+/// Poll for an authenticated-reachable daemon, up to a startup deadline, and
+/// watch the VM this launcher started: once it has
+/// exited the wait ends at once and its log tail is printed.
 #[cfg(unix)]
-fn wait_ready(root: &std::path::Path, shared: bool) -> bool {
+fn wait_ready_for(root: &std::path::Path, shared: bool, mut vm: Option<&mut StartedVm>) -> bool {
+    // Checkouts may compile the session's SDK units on their first start.
     let attempts = if checkout_root().is_some() { 1800 } else { 600 };
-    for _ in 0..attempts {
-        // Checkouts may compile the session's SDK units on their first start.
-        if daemon_ready(root, shared) {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+    let outcome = wait_for_vm(
+        || daemon_ready(root, shared),
+        vm.as_mut().and_then(|v| v.child.as_mut()),
+        attempts,
+        std::time::Duration::from_millis(200),
+    );
+    if let (VmWait::Died(code), Some(vm)) = (&outcome, vm.as_ref()) {
+        report_dead_vm(vm, *code);
     }
-    false
+    outcome == VmWait::Ready
 }
 
 /// The launcher's own verbs, spelled once. They answer questions about WHICH build runs, which only
@@ -963,11 +970,13 @@ fn exec_payload(dest: &std::path::Path, sha8: &str, argv: &[String]) -> ! {
                     let log = log_path(root, &build_id(), shared);
                     let claimed = endpoints(root, shared)
                         .is_some_and(|e| claim_start(&e.starting, now_secs(), if checkout_root().is_some() { 360 } else { START_GRACE_SECS }));
-                    if claimed {
-                        start_daemon_detached(&bin, root, &build_id(), shared, false);
-                    }
+                    let mut started = if claimed {
+                        Some(start_daemon_child(&bin, root, &build_id(), shared, false))
+                    } else {
+                        None
+                    };
 
-                    if wait_ready(root, shared) {
+                    if wait_ready_for(root, shared, started.as_mut()) {
                         println!("bl: warm VM started — commands for this tree are now warm");
                         std::process::exit(0);
                     }
