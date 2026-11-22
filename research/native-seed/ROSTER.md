@@ -1,30 +1,319 @@
 # Native compiler roster
 
-One line per piece of work. Status: ✅ done · 🔨 in progress · ⏳ next · 🅿️ parked · 🧪 prototype only.
-The latest work is at the top of each section. The commit links the evidence;
-the journal (`research/checked-tiles/journal/06-chez-substrate-and-user-path.bl.org`)
-holds the reasoning.
+The goal: one self-hosted native compiler on Chez that `bl` uses by default.
+No user-visible change. An unchanged request costs ~1 ms of fixed floor
+(200× warm BEAM's 158 ms). An edit costs in proportion to what it changes,
+when building `bl` and when using it, cold and hot.
 
-## Now
+Status: ✅ done · 🔨 in progress · ⏳ ready to take · 🔒 waits on another card · 🅿️ parked.
+The journal (`research/checked-tiles/journal/06-chez-substrate-and-user-path.bl.org`)
+holds the reasoning; `research/checked-tiles/evidence/` the measurements.
 
-Ordered by what a user waits for. Measured 2026-11-22 unless noted.
+## Where it stands (measured 2026-11-22)
 
-| | Work | Why | Done when |
-|---|---|---|---|
-| ⏳ | Checkout client inventories declared inputs only | A warm `./bin/bl` request takes 550 ms, `--version` 525 ms: the client walks the whole checkout (52k `statx`, 302k `readlink`), 18k directories of them in untracked `research/native-seed/out` (32 GB). Installed `bl` warm: 80 ms | Project pin from declared roots (or a VM-side watcher), not every directory; request cost independent of scratch |
-| ⏳ | Errors reach the waiting client | A failed preparation says only `exited with code 1` (the cause was a cached nixbuild.net failure); a warm VM that dies at start (`Invalid native refresh project`) makes the client wait 120 s | The first cause is in the client's message within a second of the failure |
-| ⏳ | BEAM backend on Chez | The native compiler emits Scheme only; `lower` (bl-ANF → Core Erlang) builds `cerl` records and is refused on Chez | `cerl` as data, Core Erlang shipped as ETF, BEAM does only `from_core` + load; byte-identical `.beam` on all 662 SDK units |
-| ⏳ | Native compile service in shadow mode | Nothing in `bl` calls the native compiler | One Chez process per realm; a unit whose macros need BEAM-only code falls back with a named reason; both compile, outputs compared, BEAM's shipped until zero differences over SDK, Knowledger and Enchant |
-| ⏳ | Early cutoff in the SDK | A compiler-key rotation rebuilds all 662 units (862 s today) | Units recompiled by the native front end; downstream keyed on emitted bytes |
-| ⏳ | Request custody per change | ~84 publication-lock acquisitions per warm request (journal 06) | Custody work proportional to changed modules |
-| ⏳ | Cold path breakdown | Cold `bl run` 7.6 s (was 21.0 s) | Measured per phase; a plan for the largest |
-| ⏳ | Interned names on the native host | `string-hash`/`equal-hash` ~4–5% of the reader job | Byte-identical candidate; paired |
-| ⏳ | Emitter `ident` | One text per character for every emitted name | Byte-identical; paired |
+| What a user waits for | Now | Target |
+|---|---|---|
+| Warm `./bin/bl run` in this checkout | 550 ms before the scratch cleanup; remeasure (card U1) | ~1–5 ms |
+| Warm installed `bl run` of `(println 1)` | 80 ms | ~1–5 ms |
+| Cold `bl run` | 7.6 s | ≤ 1 s |
+| Compile the reader file (read + compile + emit) | native ~117 ms median, warm BEAM 158 ms | only matters on edits |
+| SDK after a compiler edit / a Rust edit | 862 s / 82 s | ~1 min / ~1 min |
+| Native compiler on the user path | **not at all**: it emits Scheme only | the default compiler, BEAM kept as fallback |
+
+The one rule behind every card: a cost should scale with what changed, not
+with the size of the tree, the SDK or the compiler.
+
+## Rules for any agent taking a card
+
+Read `/home/othman/AGENTS.md` and this repository's `AGENTS.md` first. In short:
+
+- **Claim before working.** Set the card to 🔨 with your session name and date
+  in a commit that touches only this file. Two agents must never fix the same
+  bug (it happened on 2026-11-22: two sessions on one JS bug, uncommitted edits
+  in the shared checkout). Cards marked "conflicts with" must not run at once.
+- **Run checks through `work run`.** Use `work run --memory 4G --timeout S -- CMD`.
+  4G works; 6G is refused. At most two run at once per account. Use
+  `./bin/bl`, never the installed `bl`, inside this checkout.
+- **Commit, then check.** End commit messages with the attribution line the
+  harness gives you. Don't push.
+- **One SDK build at a time.** Any edit under `priv/`, `nix/`, `scripts/`,
+  `bin/`, `native/` or `tooling/drop/` changes the checkout SDK or platform.
+  The next `./bin/bl` request then rebuilds it: 82 s for a Rust edit, ~14 min
+  for a compiler or runtime edit, on the build station (4 CPUs).
+  - Batch those edits.
+  - Prepare explicitly: `work run --memory 4G --timeout 3000 -- scripts/prepare-checkout-sdk`.
+  - Never edit those trees while a preparation runs (`ls -lt .bl/sdks`; a
+    directory newer than `current-sdk` with an `active-job` is running).
+  - Use a git worktree for long SDK-input work, and record its owner and
+    retirement in this file.
+- **Native-only work needs no SDK build.** Under `research/native-seed/`
+  (`src/native/*.bl`, `host/*.scm`, `chez/*`), qualify with `qualify.bl`
+  against the base image `research/native-seed/out/chez-main`:
+  - compiler-source change: `./bin/bl run research/native-seed/chez/qualify.bl -- candidate --image research/native-seed/out/chez-main --out DIR`
+    (add `--codegen` when generated code changes);
+  - host Scheme change: `... -- derive --image research/native-seed/out/chez-main --out DIR`;
+  - speed: `... -- pair --base research/native-seed/out/chez-main/prelude.scm --cand DIR/prelude.scm --out DIR2`.
+    It interleaves runs and checks byte equality. Timings inside the native eval
+    use a virtual clock and mean nothing; only `pair` timings count.
+  - Accept only "13/13 gates" and byte-identical output. A qualified candidate
+    becomes the next `chez-main` only when its card says so.
+- **Don't touch other agents' files:** `priv/lib/scenario.bl`,
+  `test/bl/scenario/browser_world_verdict_test.bl`, `research/field-station/`.
+- **Stop what you start.** For VMs: `bl realm stop` in the tree that started them.
+- **Delete with explicit paths.** `rm` inside `bash -c` is blocked.
+- **Report numbers you measured**, with the command, in the card's evidence
+  file. Never estimate in a "Done" row.
+
+## Cards
+
+Suggested model per card: **H** = Haiku can do it from this text; **S** =
+Sonnet; **S+** = Sonnet with a long budget, or Opus.
+
+### U — the request path (what every user pays)
+
+#### U1 ⏳ The checkout client inventories declared inputs only · S · Rust
+- **Why.** Each `./bin/bl` request first hashes the project's sources so the
+  warm VM can tell whether they changed.
+  - `checkout_sources_walk` in `tooling/drop/src/checkout.rs` (~line 374)
+    descends into every directory of the project. For this checkout that is the
+    whole repository, so request cost grew with untracked scratch: 52k `statx`
+    and 302k `readlink` per request, 18k directories under
+    `research/native-seed/out` alone (deleted 2026-11-22), and 2k under
+    `research/formal-logic/evidence`.
+  - It also calls `std::fs::canonicalize` for each directory and each file.
+- **Change.** Inventory exactly what the realm can load:
+  1. the project's `env.bl` `:paths` (this repo: `["examples" "examples/scene-renderer"]`);
+  2. `env.bl` and `.env.local.bl` themselves;
+  3. the explicit argv sources `checkout_extra_sources` already finds;
+  4. with no `:paths`, the realm's default search roots. Find them in
+     `priv/host/loader.bl` and `daemon.rs::project_dir`; don't guess.
+
+  Keep the runtime pin (`checkout_runtime_generation`, driven by
+  `nix/engine-inputs.json`) unchanged. Canonicalize once per root, not per file.
+- **Files.** `tooling/drop/src/checkout.rs` (and its tests, same file).
+- **Done when.**
+  - `cargo test` passes in `tooling/drop`, including the existing
+    `project_edits_change_the_realm_input_but_preserve_the_runtime_pin`.
+  - A new test adds 1,000 junk directories outside `:paths` and asserts that
+    the project generation is unchanged.
+  - After the platform rebuild (`scripts/prepare-checkout-platform`, run by
+    `./bin/bl`), seven warm `./bin/bl run /tmp/x.bl` requests have a median
+    under 100 ms (it was 550 ms).
+  - Editing a `.bl` under `examples/` still retires the realm: the next run
+    shows the edit.
+- **Pitfall.** A file the realm loads but the inventory misses means stale
+  code: the bug class this pin exists to prevent. When unsure, inventory more
+  roots, never fewer.
+- **Conflicts with** U2 (both edit `tooling/drop`, one platform build).
+
+#### U2 ⏳ A warm VM that dies at start fails the request at once · S · Rust
+- **Why.** `retry_from_warm` → `wait_ready` (`tooling/drop/src/launcher.rs`
+  ~line 525) waits the whole readiness deadline even when the VM it started
+  has already exited. On 2026-11-22 the installed `bl` inside this checkout
+  logged `** (BeamLisp.ExInfo) Invalid native refresh project` at once, and the
+  client still waited 120 s.
+- **Change.** While waiting, notice that the started VM exited (keep its pid
+  from `start_daemon_detached`, or watch the log for a `--- … bl vm start`
+  section followed by an `** (` line). Then return immediately and print the
+  last ~15 lines of that log section.
+- **Done when.**
+  - A unit test with a start command that exits 1 at once returns within 2 s,
+    with the log tail in stderr.
+  - `cargo test` passes.
+  - Rerunning the installed-`bl`-in-checkout case fails in under 5 s with the
+    exception text.
+- **Conflicts with** U1.
+
+#### U3 ⏳ A failed SDK preparation names its first cause · H/S · BL
+- **Why.** A failed preparation reports only
+  `Preparation ended failed: exited with code 1` (`nix/preparation-operation.bl`
+  line ~481). On 2026-11-22 the real cause, a cached nixbuild.net failure for
+  `beam-lisp-sdk-unit-archive.drv`, sat in
+  `.bl/sdks/<fp>/job-*/foundry-state/ledger/events/<job>.jsonl` as `"text"`
+  lines starting `progress machine: error:`. Two agents lost time to it.
+- **Change.** When `await!` sees a terminal failed state, read that job's
+  events file. Append the first 3 distinct lines containing `error:` (strip
+  `progress machine: `, cap at 1,500 bytes) to the refusal. The directory is
+  the preparation's own job directory, already known to `await!`.
+- **Done when.**
+  - A test under `test/scripts/` feeds a fixture events file and checks the
+    message contains `Cached build failure`.
+  - A real failed preparation shows its cause in the client message.
+  - The test fails without the change.
+- **Note.** `nix/` is an SDK input: batch this with other SDK-input cards.
+
+#### U4 🔒 Lock work per request proportional to change · S+ · BL runtime (after U1)
+- **Why.** Journal 06, "Where a warm request waits": ~84
+  `bl_native_publication_lock` acquisitions per warm request, through
+  `run_code_callback_entry!`, `retain_code_components!`,
+  `register_code_callback!`, `close_execution_registration!` and
+  `release_eval_module!` (all in `priv/host/env.bl`: lines ~3548, 951, 2957,
+  3120, 4080). They run for modules already loaded and unchanged.
+- **Change.** Measure first with the probes in `research/substrate-ab/floor/`
+  (`ab_wall.erl`, `ab_sampler.erl`; see the journal for how they were run).
+  Then make registration happen once per module version, keyed by the module's
+  md5, so that an unchanged request takes the lock zero times. Keep
+  dead-owner recovery.
+- **Done when.**
+  - On an unchanged warm request the lock is acquired 0 times (counted with the
+    same probe).
+  - Median warm request time is reported before and after.
+  - These test files pass: `test/bl/compiler_unit_store_test.bl` plus every
+    test file whose name contains `reload`, `execution` or `env`. List them
+    with `ls test/bl | grep -E 'reload|execution|env'`.
+- **SDK build.** Yes (~14 min). Batch with U3.
+
+#### U5 ⏳ Where a cold start goes · S · measurement only
+- **Why.** Cold `bl run` of `(println 1)` takes 7.6 s, and nobody knows the
+  split.
+- **Do.** Time phases of `./bin/bl --cold run /tmp/x.bl` under `work run`:
+  - launcher → `erl` exec;
+  - erts boot;
+  - application starts (the ~50 dependency apps);
+  - SDK module loading;
+  - realm setup;
+  - first user form.
+
+  Use `+S`-free `-init_debug` or `erlang:system_time` stamps that the launcher
+  passes through (`BL_*` env), and `:application.which_applications` timing.
+  Record in `research/checked-tiles/evidence/cold-start-phases.json`. Propose
+  the fix for the top phase: a lazy app start, a boot script, or a spare
+  pre-started VM per SDK. Change nothing.
+- **Done when.** The phases sum to within 10% of the measured total, over 3 runs.
+
+### N — the native compiler on the default path
+
+#### N1 ⏳ `cerl` as data on the native host · S+ · native-only
+- **Why.** The native image already carries `lower` and `lower-core`
+  (`priv/boot/lower.bl`, `priv/boot/lower-core.bl`): bl-ANF → Core Erlang.
+  They build Core through OTP's `cerl` module, which doesn't exist on Chez. No
+  native host file mentions `cerl`, so every call is refused today.
+- **Change.** Add a native leaf set with exactly the 42 `cerl/*` functions
+  `lower`/`lower-core` call. List them with
+  `grep -o "cerl/[a-z_]*" priv/boot/lower*.bl | cut -d: -f2 | sort -u`:
+  - constructors such as `c_var`, `c_fun`, `c_let`, `c_case`, `c_call`;
+  - accessors such as `let_body` and `clause_pats`;
+  - `get_ann`/`set_ann`, `type`, and `abstract`.
+
+  Each must build the **same tuple OTP's `cerl` builds**: Erlang records such
+  as `{c_var, Anno, Name}`. Read the field order from OTP's
+  `lib/compiler/src/core_parse.hrl` in the pinned Erlang
+  (`nix eval --raw .#erlang` or the store path under the SDK's `erts`).
+  `cerl:abstract/1` gives `c_literal` for any literal.
+  - **Where.** Follow how other leaves are registered (`host/native-data-bifs.scm`,
+    `host/host-leaves.scm`, the leaf registry in `chez-main/leaves.json`).
+- **Done when.**
+  - A BL check, run with `qualify.bl -- eval --image IMG --file F.bl` on the
+    derived image, lowers 20 small ANF forms to Core on Chez.
+  - The BEAM lowers the same forms with real `cerl`.
+  - Each pair of Core terms is `=` (print both with `inspect`, then diff).
+  - The derived image qualifies 13/13.
+- **Pitfall.** Annotations carry source positions; keep their order. Fresh
+  names come from the process dictionary (`erlang/put :bl_core_fresh_seq`), so
+  check the native host's `erlang/put` and `get` (`host-values.scm`).
+
+#### N2 🔒 Core Erlang from Chez to a loaded `.beam` · S+ (after N1)
+- **Why.** Turning Core into `.beam` (`compile:forms(M, [from_core, binary])`,
+  `lower.bl:474` and `:518`) must stay on the BEAM. The Core term therefore has
+  to cross over.
+- **Change.**
+  1. Add a native `erlang/term_to_binary` that writes external term format
+     (ETF) for atoms, integers, binaries, lists, tuples and maps.
+     `host/host-compiler.scm` already mentions ETF; start there.
+  2. Add a BEAM-side function (a new `priv/host` defn, or an existing compile
+     entry) taking `binary_to_term` → `compile:forms` from_core →
+     `code:load_binary`.
+- **Done when.**
+  - For every unit of the SDK (`$(readlink -f .bl/sdks/current-sdk)/unit-store`
+    lists them; 662), the native path gives a `.beam` byte-identical to the
+    BEAM compiler's, or the unit is listed with a named reason.
+  - The listed units are under 5% and each reason is one of a short enumerated set.
+  - Evidence goes in `research/checked-tiles/evidence/native-beam-backend.json`.
+- **SDK build.** Only for the BEAM-side function.
+
+#### N3 🔒 The native compile service, in shadow mode · S+ (after N2)
+- **Why.** Nothing in `bl` calls the native compiler.
+- **Change.**
+  - One Chez process per realm, started by the VM (0.86 s launch), speaking
+    length-prefixed ETF over a port.
+  - Request: namespace source plus the realm's macro environment. Answer: Core
+    ETF, or a refusal with a reason.
+  - A unit whose macros need BEAM-only code (hex libraries, OTP modules outside
+    the native leaves) is refused and compiled by the BEAM.
+  - **Shadow mode:** both compile, and the BEAM's output ships. Differences are
+    logged with the unit name and both hashes. A `:native-compiler` key in the
+    private operator config (`~/.config/beam-lisp/env.bl`) selects
+    off, shadow or on.
+- **Done when.**
+  - Shadow mode over the whole test suite, Knowledger and Enchant
+    (`/home/othman/projects/enchant`) logs zero differences.
+  - The refusal rate is reported per reason.
+  - Flipping to "on" passes the same suites.
+
+#### N4 🔒 The SDK rebuilds only what changed · S+ (after N2)
+- **Why.** A compiler edit rotates every unit's key, so all 662 units
+  recompile in a 4-CPU QEMU VM (862 s on 2026-11-22). The native compiler
+  compiles its own 1.8 MB bundle in 6.4 s.
+- **Change.**
+  - Front-end compile of SDK units through the native compiler, in parallel
+    across Work's 16 cores, outside QEMU.
+  - Downstream steps (`from_core`, packing, the unit store) keyed on the
+    emitted Core bytes, so an output that didn't change stops there
+    (early cutoff).
+  - The producer is `nix/bl-drop.nix` (`native-image` derivation) with
+    `priv/build/selfbuild.bl`.
+- **Done when.**
+  - A compiler edit that changes no output finishes an SDK in under 2 minutes.
+  - An edit that changes one unit's output rebuilds one unit.
+  - Both are measured end to end.
+- **Pitfall.** Two consecutive layered SDKs must both prepare. On 2026-11-22
+  the first layered SDK broke the next preparation (`d2cd91781`). Every
+  SDK-layout change is qualified by preparing twice in a row, across a
+  compiler-key rotation.
+
+### C — native compile throughput (only matters for edits and SDK builds)
+
+#### C1 ⏳ Emitter `ident` without the per-character join · H · native-only
+- **Why.** `ident` (`research/native-seed/src/native/scheme.bl` line 32) turns
+  every emitted name into `"v"` plus `"_<code>"` per character. It maps over
+  the characters and joins the list, for every name, every time.
+- **Change.** Keep the output byte-identical. Either memoize per input text in
+  the process dictionary (key: the binary), or build it with one
+  `erlang/iolist_to_binary` over the mapped list.
+- **Done when.**
+  - `candidate --codegen` passes 13/13 with a fixpoint.
+  - `pair` (256 runs: `--reps 8 --rounds 8`) shows the same bytes; report both
+    medians. If it isn't faster, record that and don't merge.
+
+#### C2 ⏳ Interned names on the native host · S · native-only
+- **Why.** `string-hash`/`equal-hash` take ~4–5% of the reader job. Names are
+  strings, so every lookup and every memo pays a hash.
+- **Change.** The reader interns symbol and keyword names (one Chez symbol or
+  canonical string per name), so host lookups can use `eq?` tables. Start
+  from `native-key-canon` and `native-raw-get` in `host/host-values.scm`.
+- **Done when.** `derive` qualifies 13/13, and `pair` shows the same bytes and a
+  measured gain.
+
+#### C3 🅿️ Typed private IR (fixed-layout nodes, positions as one tuple)
+After N3. Journal 06, "What the lookup census says about the IR", has the
+census to start from.
+
+## Parallel lanes
+
+Cards in one lane conflict; lanes run at the same time.
+
+| Lane | Cards | Shares |
+|---|---|---|
+| Platform (Rust) | U1 → U2 | one platform build |
+| SDK inputs (BL runtime, `nix/`) | U3, U4, then the BEAM half of N2 | one SDK build at a time |
+| Native only | C1, C2, N1 → N2 (native half) | `chez-main` as base; no SDK build |
+| Measurement | U5 | needs a quiet machine |
 
 ## Done
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | Scratch removed | `research/native-seed/out` 32 GB → 2.7 GB (kept `cutover-core-build-v3`, `chez-main`) | 2026-11-22 |
 | ✅ | SDK preparation from a layered previous SDK | The unit archive read the image's linked `unit-store` and refused the link, so every preparation after the first layered SDK failed; it reads the library's directory: 862 s key rotation, passes | `d2cd91781` and after |
 | ✅ | Disk floor | User timer `nix-store-floor` (every 15 min): below 40 GB free, a bounded `nix-store --gc` toward 80 GB; dry-run checked | `~/.config/systemd/user/nix-store-floor.timer` |
 | ✅ | Durable base image | Image links name resolved files; `research/native-seed/out/chez-main` (21 MB) qualifies on its own | (this batch) |
@@ -60,19 +349,3 @@ Ordered by what a user waits for. Measured 2026-11-22 unless noted.
 |---|---|---|
 | `research/native-seed/out/chez-main` | base image for candidates and pairs (matches `main`) | replaced by the next qualified image |
 
-## Numbers to beat
-
-| Measure | Now | Warm BEAM |
-|---|---|---|
-| Reader job (read + compile + emit) | ~110 ms min, ~117 ms median under load | 158 ms |
-| Warm request, checkout / installed | 550 ms / 80 ms | — |
-| Cold `bl run` | 7.6 s | — |
-| Native qualification, cold / repeat | 20.8 s / 0.4 s | — |
-| SDK build, native edit / compiler edit | 82 s / 13–14 min | — |
-
-## Parked
-
-| | Work | Why parked |
-|---|---|---|
-| 🅿️ | Python in `formal-logic`, `checked-tiles` and other research | Not on the critical path |
-| 🅿️ | Incremental per-namespace native AOT on Chez | Waits for the native export |
