@@ -229,11 +229,37 @@
       (and (some? path) (some? line)) (assoc :at (str path ":" line))
       (seq frames) (assoc :frames frames))))
 
+(def ^:private manager-name
+  "The node-registered name of the VM manager (`vm.manager/MANAGER`). Read here
+   as data: ward must not load the manager just to ask whether one is running."
+  :vm-manager)
+
+(defn- bind-manager-scope!
+  "Make `scope` (the file's own fork) the file's VM-manager scope. The manager is
+   one node-registered daemon whose table also holds the REAL realm this run
+   executes in; a file that calls `vm.manager/shutdown` (or lists, or drains) must
+   reach only the VMs it opened, never the realm that is running it. The row sits
+   in the fork, so it follows the fork into every process the file spawns and ends
+   with it (`vm.manager/shutdown` reads it)."
+  [scope]
+  (BeamLisp.Env/put_key (tuple :manager_scope) scope))
+
+(defn- close-manager-scope!
+  "End what a file left in the manager, once the file is over: its VMs are drained
+   exactly as `vm.manager/shutdown` does for this scope, so a file that fails
+   before its own cleanup cannot leave a realm behind for the next one. Nothing
+   happens when no manager runs — the common case pays one registry lookup."
+  []
+  (when (some? (Process/whereis manager-name))
+    (try ((BeamLisp.Env/fetch! "vm.manager" "shutdown"))
+         (catch _ nil))))
+
 (defn- evaluate-file [scope src ns path]
   (env/with-env scope
     (fn []
       (runtime/with-target scope
         (fn []
+          (bind-manager-scope! scope)
           (try
            (let [warns (check-source ns src)]
             (BeamLisp.TestRT/declarations
@@ -248,7 +274,8 @@
                :warnings warns}))
             (catch e
               {:ns ns :status :incoherent :warnings []
-               :errors [(load-crash-error e __STACKTRACE__ path)]})))))))
+               :errors [(load-crash-error e __STACKTRACE__ path)]})
+            (finally (close-manager-scope!))))))))
 
 (defn run-file
   "Run a source file in a fresh fork and an owned monitored worker with a clean
