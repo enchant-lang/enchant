@@ -358,9 +358,10 @@ fn checkout_project_generation(
 }
 
 /// What the warm realm wrote down about its own resolution, in
-/// `<project>/.bl/realm-sources.v1` (`priv/std/vm/sources.bl`). One entry per
+/// `<project>/.bl/realm-sources.v1` (`source_record_candidate` in `priv/host/loader.bl`). One entry per
 /// path, the first record wins: `Some(digest)` is a file the loader read and
-/// that digest of its bytes, `None` a candidate that did not exist, so a file
+/// that digest of its bytes, `None` a candidate that did not exist (collapsed to
+/// its topmost missing ancestor, which may be a directory), so something
 /// appearing there would change what a namespace resolves to.
 struct RealmSources {
     entries: std::collections::BTreeMap<PathBuf, Option<[u8; 32]>>,
@@ -425,11 +426,14 @@ fn fold_realm_sources(root: &Path, base: &str, sources: &RealmSources) -> String
         if path.starts_with(&sdk) || path.starts_with(&native) {
             continue;
         }
+        // An absent record can be a directory the realm never saw; whatever
+        // now exists there, file or not, differs from "absent".
         let current = match std::fs::metadata(path) {
             Ok(meta) if meta.is_file() => {
                 Some(engine_inputs::file_digest(path).unwrap_or([0xff; 32]))
             }
-            _ => None,
+            Ok(_) => Some([0xfe; 32]),
+            Err(_) => None,
         };
         if *recorded == current {
             continue;
@@ -870,6 +874,19 @@ mod checkout_tests {
         assert_ne!(before, appeared);
         std::fs::write(root.join("test/bl/seed_support.clj"), "shadow 2").unwrap();
         assert_ne!(appeared, generation(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_absent_directory_that_appears_changes_the_generation() {
+        let (root, _) = declared_project("manifest-dir");
+        write_manifest(&root, &[
+            loaded(&root, "test/bl/seed_support.bl"),
+            absent(&root, "missing-dir"),
+        ]);
+        let before = generation(&root);
+        std::fs::create_dir_all(root.join("missing-dir/inner")).unwrap();
+        assert_ne!(before, generation(&root));
         std::fs::remove_dir_all(root).unwrap();
     }
 

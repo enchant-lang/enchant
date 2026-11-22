@@ -1,0 +1,86 @@
+; loader_sources_test.bl — the realm's source manifest, written by the loader.
+;
+; The checkout client digests exactly the paths `<root>/.bl/realm-sources.v1`
+; lists (tooling/drop/src/checkout.rs `read_realm_sources`); this pins the line
+; format and the recording rules on the writer's side. Run: bin/bl test
+; test/bl/loader_sources_test.bl
+
+(ns loader-sources-test)
+
+(defn- scratch []
+  (let [dir (str "/tmp/loader-sources-test-" (erlang/unique_integer (list :positive)))]
+    (File/mkdir_p! dir)
+    dir))
+
+(defn- lines [path]
+  (vec (String/split (File/read! path) "\n" (list (tuple :trim true)))))
+
+(def ABC "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+(deftest entry-lines-are-the-client-grammar
+  (is (= (str "L\t" ABC "\t/p/a.bl\n") (BeamLisp.Loader/source_entry_line "/p/a.bl" "abc")))
+  (is (= "A\t/p/b.bl\n" (BeamLisp.Loader/source_entry_line "/p/b.bl" nil)))
+  (testing "a path that cannot sit on one line makes the manifest unusable"
+    (is (= "X\n" (BeamLisp.Loader/source_entry_line "/p/a\tb.bl" "abc")))
+    (is (= "X\n" (BeamLisp.Loader/source_entry_line "/p/a\nb.bl" nil)))))
+
+(deftest an-absent-candidate-collapses-to-its-highest-missing-ancestor
+  (let [root (scratch)]
+    (File/mkdir_p! (str root "/lib"))
+    (is (= (str root "/lib/a.bl") (BeamLisp.Loader/source_highest_missing (str root "/lib/a.bl"))))
+    (is (= (str root "/bl") (BeamLisp.Loader/source_highest_missing (str root "/bl/test/x.bl"))))
+    (File/rm_rf! root)))
+
+(deftest candidates-are-recorded-once-and-collapsed
+  (let [root (scratch)
+        manifest (str root "/.bl/realm-sources.v1")
+        record (fn [path raw] (BeamLisp.Loader/source_record_candidate manifest root path raw))]
+    (File/mkdir_p! (str root "/lib"))
+    (record (str root "/lib/a.bl") "abc")
+    (record (str root "/lib/a.bl") "abc")
+    (record (str root "/lib/a.clj") nil)
+    (record (str root "/bl/test.bl") nil)
+    (record (str root "/bl/test.bl.md") nil)
+    (record (str root "/bl/x/y.bl") nil)
+    (is (= (str "bl-realm-sources 1\t" root) (first (lines manifest))))
+    (is (= [(str "L\t" ABC "\t" root "/lib/a.bl")
+            (str "A\t" root "/lib/a.clj")
+            (str "A\t" root "/bl")]
+           (rest (lines manifest))))
+    (testing "the image's own tiers are not recorded"
+      (let [n (count (lines manifest))]
+        (record (str (first (BeamLisp.Tiers/dirs)) "/zz-not-there.bl") nil)
+        (is (= n (count (lines manifest))))))
+    (File/rm_rf! root)))
+
+(deftest a-later-process-starts-from-what-the-file-already-lists
+  (let [root (scratch)
+        manifest (str root "/.bl/realm-sources.v1")
+        record (fn [path raw] (BeamLisp.Loader/source_record_candidate manifest root path raw))]
+    (record (str root "/a.bl") "abc")
+    ;; forget this VM's memory of the manifest, as a restart does
+    (erlang/apply :ets :match_delete (list :bl_realm_sources_seen (tuple :_ :_)))
+    (record (str root "/a.bl") "abc")
+    (record (str root "/b.bl") "abc")
+    (is (= 3 (count (lines manifest))))
+    (File/rm_rf! root)))
+
+(deftest a-manifest-of-another-root-is-replaced
+  (let [root (scratch)
+        manifest (str root "/.bl/realm-sources.v1")]
+    (File/mkdir_p! (str root "/.bl"))
+    (File/write! manifest "bl-realm-sources 1\t/elsewhere\nA\t/x\n")
+    (BeamLisp.Loader/source_record_candidate manifest root (str root "/a.bl") "abc")
+    (is (= 2 (count (lines manifest))))
+    (is (String/ends_with? (first (lines manifest)) root))
+    (File/rm_rf! root)))
+
+(deftest a-failed-write-removes-the-manifest
+  (let [root (scratch)
+        manifest (str root "/.bl/realm-sources.v1")]
+    (BeamLisp.Loader/source_record_candidate manifest root (str root "/a.bl") "abc")
+    (File/rm! manifest)
+    (File/mkdir_p! manifest)
+    (BeamLisp.Loader/source_record_candidate manifest root (str root "/b.bl") "abc")
+    (is (not (File/regular? manifest)))
+    (File/rm_rf! root)))
