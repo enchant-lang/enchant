@@ -50,6 +50,33 @@
      (throw (ex-info "fixture journal CAS failed" {}))))
    (finally (close state)))))
 
+(deftest admitted-generation-remains-writable-after-key-refusal
+ (let [parent (str "/tmp/" (Path/basename (s/fresh-path ".key-admission")))
+       {:keys [app root]} (fixture-at parent (fn [_] nil))
+       owner (generation/claim! app root spec)]
+  (try
+   (save-activation! app (activation app root))
+   (is (generation/admit! owner))
+   ((fn []
+     (let [store (fj/open (str (:path root) "/control.fjall"))]
+      (try
+       (s/-put store "retained" :original)
+       (doseq [operation [:put :delete :cas :commit]]
+        (let [key (String/duplicate "x" 65536)]
+         (is (= :native-store-operation-failed
+               (kind #(case operation
+                        :put (s/-put store key :private)
+                        :delete (s/-delete store key)
+                        :cas (s/-update store key (fn [_] :private))
+                        :commit (s/-commit store [[:delete "retained"] [:put key :private]]))))))
+        (is (= :original (s/-get store "retained")))
+        (s/-put store "after-refusal" :accepted)
+        (is (= :accepted (s/-get store "after-refusal"))))
+       (is (= store (s/sync! store)))
+       (is (nil? (s/close store)))
+       (finally (s/close store))))))
+   (finally (release-closed! owner) (close root) (close app) (File/rm_rf! parent)))))
+
 (deftest only-the-actual-durable-host-journal-admits-existing-db-and-blob-handles
  ;; The VM runs this synthetic fixture as root, with protected /tmp ancestry.
  ;; /build is deliberately not authority: its worker directory is writable.

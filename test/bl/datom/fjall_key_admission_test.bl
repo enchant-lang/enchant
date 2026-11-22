@@ -1,0 +1,95 @@
+; Required native regression: no optional-backend skip. Run on the exact SDK
+; candidate, together with the durable queue and generation ownership suites.
+(ns datom.fjall-key-admission-test
+ (:require [datom :as d] [datom.conn :as conn] [datom.db :as db]
+           [datom.store :as s] [datom.store-fjall :as fj]))
+
+(defn refused [f]
+ (try (f) nil (catch error (:kind (ex-data error)))))
+
+(defn healthy! [store]
+ (s/-put store "after-refusal" :accepted)
+ (is (= :accepted (s/-get store "after-refusal")))
+ (is (= store (s/sync! store)))
+ (is (nil? (s/close store))))
+
+(deftest invalid-single-keys-leave-the-same-native-handle-usable
+ (doseq [key ["" (String/duplicate "x" 65536) (String/duplicate "é" 32768)]
+         operation [:put :delete :cas]]
+  (let [store (fj/open-fresh)]
+   (try
+    (is (= :native-store-operation-failed
+          (refused #(case operation
+                      :put (s/-put store key :private)
+                      :delete (s/-delete store key)
+                      :cas (s/-update store key (fn [_] :private))))))
+    (healthy! store)
+    (finally (s/close store))))))
+
+(deftest byte-boundary-roundtrips-through-put-cas-batch-and-delete
+ (let [store (fj/open-fresh) key (String/duplicate "x" 65535)
+       unicode (str (String/duplicate "é" 32767) "x")]
+  (try
+   (is (= 65535 (erlang/byte_size unicode)))
+   (doseq [k [key unicode]]
+    (s/-put store k :first)
+    (is (= :first (s/-get store k)))
+    (is (= :second (second (s/-update store k (fn [_] :second)))))
+    (s/-commit store [[:delete k] [:put k :third]])
+    (is (= :third (s/-get store k)))
+    (s/-delete store k)
+    (is (nil? (s/-get store k))))
+   (healthy! store)
+   (finally (s/close store)))))
+
+(deftest late-invalid-batch-operation-publishes-neither-put-nor-delete
+ (doseq [key ["" (String/duplicate "x" 65536)] operation [:put :delete]]
+  (let [store (fj/open-fresh)]
+   (try
+    (s/-put store "retained" :original)
+    (is (= :native-store-operation-failed
+          (refused #(s/-commit store
+                     [[:put "must-not-appear" :partial] [:delete "retained"]
+                      (if (= operation :put) [:put key :private] [:delete key])]))))
+    (is (nil? (s/-get store "must-not-appear")))
+    (is (= :original (s/-get store "retained")))
+    (healthy! store)
+    (finally (s/close store))))))
+
+(deftest raw-slot-writer-has-the-same-atomic-refusal
+ (let [store (fj/open-fresh)]
+  (try
+   (is (= :native-store-operation-failed
+         (refused #(fj/commit-raw! store
+                    [[:put "partial" "raw"] [:put (String/duplicate "x" 65536) "raw"]]))))
+   (is (nil? (fj/raw-get store "partial")))
+   (healthy! store)
+   (finally (s/close store)))))
+
+(deftest refused-datom-transaction-does-not-leak-into-a-later-basis
+ (let [store (fj/open-fresh)
+       schema [{:db/ident :probe/id :db/valueType :db.type/string :db/unique :db.unique/identity}
+               {:db/ident :probe/state :db/valueType :db.type/keyword}
+               {:db/ident :probe/result :db/valueType :db.type/any}]
+       c (d/connect-with store schema)]
+  (try
+   (d/transact! c [{:db/id -1 :probe/id "retained" :probe/state :queued}])
+   (let [e (:db/id (d/entity (d/db c) [:probe/id "retained"]))
+         before (d/basis-t (d/db c))]
+    (is (= :native-store-operation-failed
+          (refused #(d/transact! c
+                     [[:db/add e :probe/state :failed]
+                      [:db/add e :probe/result {:private (String/duplicate "synthetic" 16000)}]]))))
+    (is (= before (d/basis-t (d/db c))))
+    (is (= :queued (:probe/state (d/entity (d/db c) e))))
+    (d/transact! c [[:db/add e :probe/state :held]])
+    (is (> (d/basis-t (d/db c)) before))
+    (is (= :held (:probe/state (d/entity (d/db c) e))))
+    (is (nil? (:probe/result (d/entity (d/db c) e))))
+    ; Inspect the unfiltered physical index as well as the current Db. A
+    ; refused assertion must not reappear when a later transaction advances T.
+    (is (empty? (filter (fn [fact] (= :probe/result (get fact 1)))
+                        (s/scan-datoms store nil nil))))
+    (s/sync! store)
+    (is (nil? (conn/close! c))))
+   (finally (conn/close! c)))))

@@ -488,6 +488,24 @@ pub(crate) fn err(msg: impl std::fmt::Display) -> Error {
     Error::Term(Box::new(format!("{}", msg)))
 }
 
+// Fjall's Item constructor asserts these bounds rather than returning an error.
+// Refuse caller input before entering it: unwinding under DbHandle.lock would
+// poison the handle, including subsequent valid writes, sync and close. Errors
+// deliberately contain no key or value bytes.
+fn admit_key(key: &[u8]) -> NifResult<()> {
+    if key.is_empty() || key.len() > usize::from(u16::MAX) {
+        return Err(err("datom-key-length-out-of-range"));
+    }
+    Ok(())
+}
+
+fn admit_value(value: &[u8]) -> NifResult<()> {
+    if u32::try_from(value.len()).is_err() {
+        return Err(err("datom-value-length-out-of-range"));
+    }
+    Ok(())
+}
+
 fn to_binary<'a>(env: Env<'a>, bytes: &[u8]) -> NifResult<Binary<'a>> {
     let mut owned = OwnedBinary::new(bytes.len())
         .ok_or_else(|| err("could not allocate a binary"))?;
@@ -1596,6 +1614,8 @@ fn resolve_prefixes_impl<'a>(
 #[rustler::nif(schedule = "DirtyIo")]
 fn fjall_put(handle: ResourceArc<DbHandle>, key: Binary, value: Binary) -> NifResult<Atom> {
     let _offline = handle.offline_write_guard()?;
+    admit_key(key.as_slice())?;
+    admit_value(value.as_slice())?;
     let _g = handle.lock.lock().map_err(|e| err(e))?;
     handle
         .datoms
@@ -1609,6 +1629,7 @@ fn fjall_put(handle: ResourceArc<DbHandle>, key: Binary, value: Binary) -> NifRe
 #[rustler::nif(schedule = "DirtyIo")]
 fn fjall_delete(handle: ResourceArc<DbHandle>, key: Binary) -> NifResult<Atom> {
     let _offline = handle.offline_write_guard()?;
+    admit_key(key.as_slice())?;
     let _g = handle.lock.lock().map_err(|e| err(e))?;
     handle.datoms.remove(key.as_slice()).map_err(|e| err(e))?;
     Ok(atoms::ok())
@@ -1676,6 +1697,8 @@ fn fjall_cas<'a>(
     new: Binary,
 ) -> NifResult<Term<'a>> {
     let _offline = handle.offline_write_guard()?;
+    admit_key(key.as_slice())?;
+    admit_value(new.as_slice())?;
     let _g = handle.lock.lock().map_err(|e| err(e))?;
 
     let current: Option<Vec<u8>> = handle
@@ -1729,6 +1752,8 @@ fn fjall_commit(handle: ResourceArc<DbHandle>, ops: Vec<Term>) -> NifResult<Atom
                 }
                 let k: Binary = tuple[1].decode()?;
                 let v: Binary = tuple[2].decode()?;
+                admit_key(k.as_slice())?;
+                admit_value(v.as_slice())?;
                 batch.insert(&handle.datoms, k.as_slice(), v.as_slice());
             }
             2 => {
@@ -1737,6 +1762,7 @@ fn fjall_commit(handle: ResourceArc<DbHandle>, ops: Vec<Term>) -> NifResult<Atom
                     return Err(err("a 2-element op must be {:delete, key}"));
                 }
                 let k: Binary = tuple[1].decode()?;
+                admit_key(k.as_slice())?;
                 batch.remove(&handle.datoms, k.as_slice());
             }
             n => return Err(err(format!("an op must have 2 or 3 elements, got {}", n))),
