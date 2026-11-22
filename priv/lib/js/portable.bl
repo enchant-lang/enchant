@@ -1,0 +1,149 @@
+; js.portable — host functions ordinary programs call, with the BEAM's answers
+; on the JS value model. host-leaves.mjs dispatches the Erlang/Elixir names to
+; these definitions; the algorithms stay here, in Beam Lisp.
+;
+; Measured on the BEAM (2026-11-22): (erlang/binary_to_integer "ff" 16) 255,
+; (calendar/date_to_gregorian_days 1970 1 1) 719528,
+; (URI/encode_www_form "a b/é~") "a+b%2F%C3%A9~", (String/trim_trailing "a//" "/")
+; "a", (binary/match "abcabc" "c" (list (tuple :scope (tuple 3 3)))) {5,1}.
+; test/bl/js_portable_leaves_test.bl pins them against the BEAM.
+(ns ^:js js.portable)
+
+(def ^:private encoder (js/TextEncoder.))
+
+(defn- badarg [what]
+  (throw (ex-info (str "errors were found at the given arguments: " what) {:type :badarg})))
+
+; ─── integers and floats ─────────────────────────────────────────────────────
+
+(def ^:private digits "0123456789abcdefghijklmnopqrstuvwxyz")
+
+(defn parse-integer
+  "erlang:binary_to_integer/1,2 — an optional sign and digits of `base`
+   (2..36, either case), nothing else. Integers past 2^53 are the runtime's
+   BigInts, as BL arithmetic already promotes."
+  [text base]
+  (when-not (and (string? text) (integer? base) (<= 2 base 36)) (badarg "binary_to_integer"))
+  (let [s (.toLowerCase text) n (.-length s)
+        sign (when (> n 0) (.charAt s 0))
+        start (if (contains? #{"-" "+"} sign) 1 0)]
+    (when (>= start n) (badarg "binary_to_integer"))
+    (loop [i start acc 0]
+      (if (< i n)
+        (let [d (.indexOf digits (.charAt s i))]
+          (when (or (< d 0) (>= d base)) (badarg "binary_to_integer"))
+          (recur (inc i) (+ (* acc base) d)))
+        (if (= "-" sign) (- acc) acc)))))
+
+; ─── calendar ────────────────────────────────────────────────────────────────
+
+(defn gregorian-days
+  "calendar:date_to_gregorian_days/3: days since 0000-01-01 (proleptic
+   Gregorian). Civil-from-days, so years 0..99 are not shifted as Date.UTC does."
+  [y m d]
+  (when-not (and (integer? y) (integer? m) (integer? d) (<= 1 m 12) (<= 1 d 31)) (badarg "date_to_gregorian_days"))
+  (let [y (if (<= m 2) (dec y) y)
+        era (quot (if (>= y 0) y (- y 399)) 400)
+        yoe (- y (* era 400))
+        doy (+ (quot (+ (* 153 (+ m (if (> m 2) -3 9))) 2) 5) (dec d))
+        doe (+ (* yoe 365) (quot yoe 4) (- (quot yoe 100)) doy)]
+    ; days from 1970-01-01, then shifted to the Gregorian epoch
+    (+ (* era 146097) doe -719468 719528)))
+
+; ─── text ────────────────────────────────────────────────────────────────────
+
+(defn- hex2 [b] (let [h (.toUpperCase (.toString b 16))] (if (< b 16) (str "0" h) h)))
+
+(defn www-form-encode
+  "URI.encode_www_form/1: unreserved bytes kept, space as +, every other
+   UTF-8 byte as %XX."
+  [text]
+  (let [bytes (.encode encoder text) n (.-length bytes) keep (js/RegExp. "^[A-Za-z0-9._~-]$")]
+    (loop [i 0 out ""]
+      (if (< i n)
+        (let [b (aget bytes i) c (.fromCharCode js/String b)]
+          (recur (inc i) (str out (cond (= b 32) "+" (and (< b 128) (.test keep c)) c :else (str "%" (hex2 b))))))
+        out))))
+
+(defn www-form-decode
+  "URI.decode_www_form/1."
+  [text]
+  (js/decodeURIComponent (.replace text (js/RegExp. "\\+" "g") " ")))
+
+(defn trim-leading
+  "String.trim_leading/2: every leading copy of `to-trim`."
+  [s to-trim]
+  (if (= "" to-trim) s
+    (loop [s s] (if (.startsWith s to-trim) (recur (.slice s (.-length to-trim))) s))))
+
+(defn trim-trailing
+  "String.trim_trailing/2: every trailing copy of `to-trim`."
+  [s to-trim]
+  (if (= "" to-trim) s
+    (loop [s s] (if (.endsWith s to-trim) (recur (.slice s 0 (- (.-length s) (.-length to-trim)))) s))))
+
+(defn hex
+  "binary:encode_hex/1,2 of a text binary's UTF-8 bytes."
+  [text lower?]
+  (let [bytes (.encode encoder text) n (.-length bytes)]
+    (loop [i 0 out ""]
+      (if (< i n)
+        (recur (inc i) (str out (let [h (hex2 (aget bytes i))] (if lower? (.toLowerCase h) h))))
+        out))))
+
+(defn regex-split
+  "Regex.split/2,3 over a compiled global JS regex `re`: the pieces between
+   matches; `include?` keeps each WHOLE match between them (JS split would
+   splice in every capture group instead); `trim?` drops every empty piece
+   (Elixir's :trim); `parts` > 0 stops after that many pieces."
+  [re s include? trim? parts]
+  (let [ms (.from js/Array (.matchAll s re)) n (.-length ms)
+        limit (if (and parts (pos? parts)) parts 0)]
+    (loop [k 0 at 0 out [] pieces 1]
+      (if (and (< k n) (or (= 0 limit) (< pieces limit)))
+        (let [m (aget ms k) i (.-index m) w (aget m 0)]
+          (if (and (= 0 (.-length w)) (or (= i 0) (= i (.-length s))))
+            (recur (inc k) at out pieces)
+            (recur (inc k) (+ i (.-length w))
+                   (cond-> (conj out (.slice s at i)) include? (conj w))
+                   (inc pieces))))
+        (let [v (conj out (.slice s at))
+              v (if trim? (filterv #(not= "" %) v) v)]
+          (to-list v))))))
+
+; ─── paths (pure text; a page has no filesystem) ─────────────────────────────
+
+(defn- trim-slashes [s] (loop [s s] (if (and (> (.-length s) 1) (.endsWith s "/")) (recur (.slice s 0 -1)) s)))
+
+(defn path-join
+  "Path.join/2: one separator between the parts; the right part's leading
+   slashes are dropped (Path.join(\"a\", \"/b\") is \"a/b\")."
+  [a b]
+  (let [b (loop [b b] (if (.startsWith b "/") (recur (.slice b 1)) b))]
+    (cond (= "" a) (trim-slashes b)
+          (= "" b) (trim-slashes a)
+          :else (trim-slashes (str (if (= "/" a) "" (trim-slashes a)) "/" b)))))
+
+(defn path-basename
+  "Path.basename/1: the last segment, trailing slashes ignored."
+  [p]
+  (let [p (trim-slashes p) i (.lastIndexOf p "/")]
+    (if (and (= p "/")) "" (.slice p (inc i)))))
+
+(defn path-dirname
+  "Path.dirname/1: everything before the last segment; \".\" for a bare name,
+   \"/\" at the root."
+  [p]
+  (let [p (trim-slashes p) i (.lastIndexOf p "/")]
+    (cond (< i 0) "." (= i 0) "/" :else (trim-slashes (.slice p 0 i)))))
+
+(defn path-extname
+  "Path.extname/1: the last segment's extension with its dot, or \"\"."
+  [p]
+  (let [b (path-basename p) i (.lastIndexOf b ".")]
+    (if (<= i 0) "" (.slice b i))))
+
+(defn path-rootname
+  "Path.rootname/1: the path without its extension."
+  [p]
+  (let [e (path-extname p)] (if (= "" e) p (.slice p 0 (- (.-length p) (.-length e))))))

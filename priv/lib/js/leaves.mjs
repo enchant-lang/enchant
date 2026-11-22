@@ -26,6 +26,7 @@ import * as C from "./actor/module.mjs";
 import { exactCandidates, ENV } from "./env.mjs";
 import { LAZY_LEAVES, cell, LazySeq, Delay, SeqCursor } from "./lazy.mjs";
 import { HOST_LEAVES, bindTable, registerModule, resolveRemote, mangle } from "./host-leaves.mjs";
+import { portableLeaves } from "./portable-leaves.mjs";
 import { LINKS, RETURN_CONSTRUCTOR_SHAPES } from "./core-links.mjs";
 const { EMPTY, Cons, Tup, Kw, HMap, Vec, BLError } = R;
 
@@ -748,6 +749,8 @@ const LEAF_OWNER = new Map(Object.keys(LEAVES).map((k) => [k, "leaves.mjs"]));
 addLeaves("lazy.mjs", Object.entries(LAZY_LEAVES));
 // what compiled core.bl/rt.bl reach, incl. the struct-aware map_get/maps.get
 addLeaves("host-leaves.mjs", Object.entries(HOST_LEAVES));
+// renderer-level host functions (rounding, number parsing, URI, Regex.split …)
+addLeaves("portable-leaves.mjs", Object.entries(portableLeaves(lateModule)));
 // BeamLisp.Env — the namespace/var registry, every function at the arity the
 // BL sources call it with
 addLeaves("env.mjs", Object.entries(ENV).map(([name, fn]) => ["Elixir.BeamLisp.Env/" + name + "/" + fn.length, fn]));

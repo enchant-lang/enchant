@@ -1,0 +1,267 @@
+; system/inputs.bl — what a function reads from its arguments, and what it
+; does with each value, from its compiled code.
+;
+; For every function of a program (one or several sources), over the same ANF
+; system.analyze compiles:
+;
+;   reads     every key path read off a parameter: `(:attrs b)` then `(:title a)`
+;             is path [:attrs :title] of parameter 0
+;   domains   per path, the literals it is compared with (`case`, `=`), the
+;             defaults it falls back to (`(get m :k d)`, `(or x d)`), and how it
+;             is consumed: :number (parse-long …), :boolean (= "true" x),
+;             :text (str, string ops), :truthy (tested for presence)
+;   dispatch  a chain of literal comparisons on one path, and the functions
+;             each literal leads to: `(case (:lang nd) "job" (job-h nd) …)`
+;   flows     a parameter path passed on to another function's parameter
+;
+; `program` composes them across functions and namespaces: a callee's reads
+; on the parameter it was handed become the caller's reads under that path,
+; and a callee's dispatch on that parameter becomes the caller's. So the
+; question "which block types does page/node-tree draw, and which attributes
+; does each read" is answered from the code, for any kit or host, with no
+; annotations. A path that leaves the analysis (stored, sent to an unknown
+; function) is simply not followed: the answer under-approximates; a caller
+; that needs certainty confirms dynamically (render probes).
+(ns system.inputs
+  (:require [system.analyze :as an]))
+
+; ─── abstract values ─────────────────────────────────────────────────────────
+; {:param i :path [k …]}  a value read off parameter i
+; {:lit v}                a literal
+; nil                     anything else
+
+(defn- path-val? [v] (and (map? v) (contains? v :param)))
+(defn- lit-val? [v] (and (map? v) (contains? v :lit)))
+
+(defn- args-of
+  "The argument nodes of an :invoke (a cons chain) or a :remote (a list)."
+  [n]
+  (case (:op n)
+    :remote (vec (:args n))
+    :invoke (loop [c (:arguments n) out []]
+              (if (= :cons (:op c)) (recur (:tail c) (conj out (:head c))) out))
+    []))
+
+(def ^:private number-fns #{"parse-long" "parse-double" "parse-int" "long" "int" "double" "bigdec"})
+(def ^:private text-fns #{"str" "upper-case" "lower-case" "capitalize" "trim" "blank?" "split"
+                          "starts-with?" "ends-with?" "includes?" "subs" "replace" "join"})
+(def ^:private remote-number #{[:erlang :binary_to_integer] [:erlang :binary_to_float]
+                               [:Elixir.String :to_integer] [:Elixir.String :to_float]})
+
+(defn- qualified [callee]
+  (when (= :global (:op callee)) (str (:ns callee) "/" (:name callee))))
+
+; ─── one function ────────────────────────────────────────────────────────────
+
+(defn- fact! [acc kind path x] (swap! acc update-in [:domains path kind] (fnil conj #{}) x))
+(defn- read! [acc path] (swap! acc update :reads (fnil conj #{}) path))
+
+(declare walk)
+
+(defn- each-node
+  "Call f on every ANF node directly under value x, through nested vectors
+   and lists (a :struct's :fields are [key node] pairs, a :tuple's :elems a list)."
+  [f x]
+  (cond (map? x) (if (contains? x :op) (f x) (doseq [v (vals x)] (each-node f v)))
+        (sequential? x) (doseq [y x] (each-node f y))
+        :else nil))
+
+(defn- eqv-test
+  "[path-value literal] when node is (eqv x lit) or (eqv lit x) over a path."
+  [env n]
+  (when (and (= :remote (:op n)) (contains? #{:eqv := :== :=:=} (:fun n)))
+    (let [[a b] (args-of n) va (walk nil env a) vb (walk nil env b)]
+      (cond (and (path-val? va) (lit-val? vb)) [va (:lit vb)]
+            (and (lit-val? va) (path-val? vb)) [vb (:lit va)]))))
+
+(defn- chain
+  "A literal-comparison chain on one path: [[path lit then-node] … else-node]."
+  [env n]
+  (loop [n n cases [] on nil]
+    (let [t (when (= :if (:op n)) (eqv-test env (:test n)))]
+      (if (and t (or (nil? on) (= (select-keys (first t) [:param :path]) on)))
+        (recur (:else n) (conj cases [(second t) (:then n)]) (select-keys (first t) [:param :path]))
+        [on cases n]))))
+
+(defn- callees
+  "Functions called (directly) anywhere under node n, with the path-valued
+   arguments they receive."
+  [env n]
+  (let [out (atom [])]
+    (letfn [(go [env n]
+              (when (map? n)
+                (when (= :invoke (:op n))
+                  (when-let [q (qualified (:callee n))] (swap! out conj q)))
+                (if (= :let (:op n))
+                  (do (go env (:init n)) (go env (:body n)))
+                  (doseq [[k c] n :when (not= :ann k)] (each-node #(go env %) c)))))]
+      (go env n))
+    (vec (distinct @out))))
+
+(defn walk
+  "The abstract value of ANF node n under env {local → value}; records facts
+   into atom acc (nil: evaluate only)."
+  [acc env n]
+  (when (map? n)
+    (case (:op n)
+      :var (get env (:name n))
+      :lit {:lit (:val n)}
+      :let (let [v (walk acc env (:init n))]
+             (walk acc (assoc env (:name n) v) (:body n)))
+      :invoke
+      (let [callee (:callee n) args (args-of n)
+            vals (mapv #(walk acc env %) args)]
+        (cond
+          ; (:k x) — a key read
+          (and (= :lit (:op callee)) (keyword? (:val callee)) (path-val? (first vals)))
+          (let [p (update (first vals) :path conj (:val callee))]
+            (when acc (read! acc (select-keys p [:param :path])))
+            (when (and acc (lit-val? (second vals))) (fact! acc :defaults (select-keys p [:param :path]) (:lit (second vals))))
+            p)
+          :else
+          (let [q (qualified callee)]
+            (when acc
+              (doseq [[j v] (map-indexed (fn [i v] [i v]) vals) :when (path-val? v)]
+                (let [p (select-keys v [:param :path])]
+                  (cond (contains? number-fns (:name callee)) (fact! acc :uses p :number)
+                        (contains? text-fns (:name callee)) (fact! acc :uses p :text)
+                        q (swap! acc update :flows (fnil conj #{}) {:callee q :arg j :from p})))))
+            nil)))
+      :remote
+      (let [args (args-of n) vals (mapv #(walk acc env %) args)]
+        (cond
+          (and (= :get (:fun n)) (path-val? (first vals)) (lit-val? (second vals)) (keyword? (:lit (second vals))))
+          (let [p (update (first vals) :path conj (:lit (second vals)))]
+            (when acc
+              (read! acc (select-keys p [:param :path]))
+              (when (lit-val? (nth vals 2 nil)) (fact! acc :defaults (select-keys p [:param :path]) (:lit (nth vals 2)))))
+            p)
+          :else
+          (do (when acc
+                (if-let [[pv lit] (eqv-test env n)]
+                  (let [p (select-keys pv [:param :path])]
+                    (fact! acc :compared p lit)
+                    (when (contains? #{"true" "false" true false} lit) (fact! acc :uses p :boolean)))
+                  (doseq [v vals :when (path-val? v)]
+                    (when (contains? remote-number [(:mod n) (:fun n)]) (fact! acc :uses (select-keys v [:param :path]) :number)))))
+              nil)))
+      :if
+      (let [[on cases tail] (chain env n)]
+        (if (and acc on (seq cases))
+          (do
+            (doseq [[lit then] cases]
+              (fact! acc :compared on lit)
+              (swap! acc update-in [:dispatch on lit] (fnil into []) (callees env then))
+              (walk acc env then))
+            (walk acc env tail)
+            nil)
+          (let [t (walk acc env (:test n))]
+            (when (and acc (path-val? t)) (fact! acc :uses (select-keys t [:param :path]) :truthy))
+            (let [a (walk acc env (:then n)) b (walk acc env (:else n))]
+              ; (or x lit): the test var IS the then value; the else is its default
+              (when (and acc (path-val? t) (= t a) (lit-val? b))
+                (fact! acc :defaults (select-keys t [:param :path]) (:lit b)))
+              ; one branch is the value, the other a literal or unknown fallback
+              ; (`or`, a destructuring coercion): the value flows on
+              (cond (= a b) a
+                    (and (path-val? a) (or (nil? b) (lit-val? b))) a
+                    (and (path-val? b) (or (nil? a) (lit-val? a))) b
+                    :else nil)))))
+      :case
+      (let [subj (walk acc env (:subj n))]
+        (doseq [cl (:clauses n)]
+          (let [pat (first (:pats cl))]
+            (when (and acc (path-val? subj) (= :plit (:pop pat)))
+              (let [on (select-keys subj [:param :path])]
+                (fact! acc :compared on (:val pat))
+                (swap! acc update-in [:dispatch on (:val pat)] (fnil into []) (callees env (:body cl)))))
+            (walk acc (if (= :pvar (:pop pat)) (assoc env (:name pat) subj) env) (:body cl))))
+        nil)
+      ; everything else: walk children for their facts
+      (do (when acc
+            (doseq [[k c] n :when (not= :ann k)] (each-node #(walk acc env %) c)))
+          nil))))
+
+(defn function
+  "Facts of one compiled function {:params [names] :clauses […]}."
+  [body]
+  (let [acc (atom {:reads #{} :domains {} :dispatch {} :flows #{}})]
+    (doseq [cl (or (:clauses body) [body])]
+      (let [env (into {} (map-indexed (fn [i p] [p {:param i :path []}]) (:params cl)))]
+        (walk acc env (:body cl))))
+    @acc))
+
+; ─── a program ───────────────────────────────────────────────────────────────
+
+(defn source
+  "{\"ns/name\" facts} for every defn of one source text in namespace ns.
+   Calls between functions of the same source are qualified with ns too."
+  [ns src]
+  (let [bodies (an/fn-bodies src)
+        local (set (keys bodies))
+        requal (fn [q] (let [[qn nm] (split q "/")] (if (and (= qn "system.analyze.program") (contains? local nm)) (str ns "/" nm) q)))
+        fix (fn [facts]
+              (-> facts
+                  (update :flows (fn [fs] (set (map #(update % :callee requal) fs))))
+                  (update :dispatch (fn [d] (into {} (for [[on m] d] [on (into {} (for [[lit cs] m] [lit (mapv requal cs)]))]))))))]
+    (into {} (for [[nm body] bodies :when (not= "<top>" nm)]
+               [(str ns "/" nm) (fix (function body))]))))
+
+(def ^:private max-depth
+  "Paths longer than this are not followed (a renderer that recurses into
+   its children would otherwise grow them without end)."
+  6)
+
+(defn- reroot [base p] {:param (:param base) :path (vec (take max-depth (into (:path base) (:path p))))})
+
+(defn- lift
+  "Callee facts g, about its parameter `arg`, seen from a caller that passed
+   path `from`."
+  [g arg from]
+  (let [mine? #(= arg (:param %))]
+    {:reads (set (map #(reroot from %) (filter mine? (:reads g))))
+     :domains (into {} (for [[p d] (:domains g) :when (mine? p)] [(reroot from p) d]))
+     :dispatch (into {} (for [[p d] (:dispatch g) :when (mine? p)] [(reroot from p) d]))}))
+
+(defn- merge-facts [a b]
+  {:reads (into (:reads a #{}) (:reads b))
+   :domains (merge-with (fn [x y] (merge-with into x y)) (:domains a {}) (:domains b))
+   :dispatch (merge-with (fn [x y] (merge-with (comp vec distinct into) x y)) (:dispatch a {}) (:dispatch b))
+   :flows (:flows a #{})})
+
+(declare compose)
+
+(defn program
+  "Facts of every function of `sources` ([[ns src] …]), each composed with
+   the facts of the functions it hands its parameters to (`compose`)."
+  ([sources] (program sources 8))
+  ([sources depth] (compose (into {} (mapcat (fn [[ns src]] (source ns src)) sources)) depth)))
+
+(defn compose
+  "`own` ({fn facts}, from `source`) with each function's facts extended by
+   those of the functions it hands its parameters to, to a fixpoint bounded
+   by `depth` rounds."
+  ([own] (compose own 8))
+  ([own depth]
+     (loop [facts own k 0]
+       (let [next (into {} (for [[f fx] facts]
+                             [f (reduce (fn [acc {:keys [callee arg from]}]
+                                          (if-let [g (get facts callee)] (merge-facts acc (lift g arg from)) acc))
+                                        (get own f) (:flows fx))]))]
+         (if (or (= next facts) (>= k depth)) next (recur next (inc k)))))))
+
+(defn dispatch-table
+  "For function f of composed `facts` and its parameter path `on`
+   ({:param i :path [...]}), {literal → [handler fn names]}."
+  [facts f on]
+  (get-in facts [f :dispatch on] {}))
+
+(defn parameters
+  "The inputs function f reads under path `under` of parameter `param`:
+   {[k …] {:compared #{…} :defaults #{…} :uses #{…}}} — the relative path of
+   each key read below `under`, with what the code does with it."
+  [facts f param under]
+  (let [fx (get facts f) n (count under)
+        below? (fn [p] (and (= param (:param p)) (> (count (:path p)) n) (= under (vec (take n (:path p))))))]
+    (into {} (for [p (:reads fx) :when (below? p)]
+               [(vec (drop n (:path p))) (get-in fx [:domains p] {})]))))

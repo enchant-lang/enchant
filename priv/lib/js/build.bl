@@ -43,14 +43,32 @@
 (defn- sym? [n s] (and (= :symbol (rn-tag n)) (or (nil? s) (= s (rn-name n)))))
 (defn- kw-node? [n s] (and (= :keyword (rn-tag n)) (= s (rn-name n))))
 
+(defn twin-root
+  "Where a namespace's JS TWIN lives: priv/lib/js/twin/<path>. A twin is the
+   same namespace (same name, same public functions, same answers) written
+   for the page, for a library whose BEAM implementation reaches what a page
+   does not have (bl.json's NIF). The BEAM never loads it; a build always
+   prefers it."
+  []
+  (str (Path/dirname (BeamLisp.Loader/source_path "js.build")) "/twin"))
+
+(defn- literate? [path] (or (ends-with? path ".bl.org") (ends-with? path ".bl.md")))
+
 (defn ns-path
-  "The `.bl` file for namespace `ns` under one of `roots`, by the loader's own
+  "The source file for namespace `ns` under one of `roots`, by the loader's own
    rule (`Loader/source_relatives`): the dotted spelling first, then Clojure's
    dash→underscore munging — `reader-node` is `reader-node.bl`, `ed.text` is
-   `ed/text.bl`."
+   `ed/text.bl`. A literate namespace (`.bl.org`, `.bl.md`) resolves too, as
+   on the BEAM; `source-text` reads its tangled cells."
   [roots ns]
-  (let [rels (filter (fn [r] (ends-with? r ".bl")) (BeamLisp.Loader/source_relatives ns))]
-    (first (for [r roots rel rels :let [p (str r "/" rel)] :when (File/regular? p)] p))))
+  (let [rels (filter (fn [r] (or (ends-with? r ".bl") (literate? r))) (BeamLisp.Loader/source_relatives ns))]
+    (first (for [r (cons (twin-root) roots) rel rels :let [p (str r "/" rel)] :when (File/regular? p)] p))))
+
+(defn source-text
+  "The program text of a namespace file: the file itself, or a literate
+   file's tangled `beam-lisp` cells exactly as the BEAM loader reads them."
+  [path]
+  (if (literate? path) (BeamLisp.Loader/read_source path) (File/read! path)))
 
 (defn- ns-head
  "Project the compiler/AOT namespace header into the JS dependency table."
@@ -133,7 +151,7 @@
    included (harmless to `eval_string`), the form's own end exact even when
    several forms share a line, or a syntax-quote shrinks the node's end
    position. No position metadata, no second parser."
-  ([path] (read-forms+text path (File/read! path)))
+  ([path] (read-forms+text path (source-text path)))
   ([path source]
   (loop [st (BeamLisp.Ns.Reader/stream source path) out []]
     (let [r (BeamLisp.Ns.Reader/read-next st)]
@@ -274,7 +292,7 @@
   ([path] (prepare-ns path {}))
   ([path options]
    (admission/check!)
-   (let [source (File/read! path)]
+   (let [source (source-text path)]
      (stage-forms path source (read-forms+text path source) options))))
 
 (defn compile-prepared
@@ -609,7 +627,7 @@
               (recur (rest todo) (conj seen ns) order compiled pending)   ; not ours: core or BEAM-only
               (let [{:keys [source texts head] :as parsed}
                       (or (get pending path)
-                          (let [source (File/read! path) texts (read-forms+text path source)]
+                          (let [source (source-text path) texts (read-forms+text path source)]
                             {:source source :texts texts :head (ns-head (mapv first texts))}))
                     deps (vec (filter (fn [d] (and (not (contains? seen d)) (not (contains? stubs d)) (some? (ns-path roots d))))
                                       ; core's seed boundary imports rt even
@@ -622,7 +640,7 @@
                 (if (empty? deps)
                   (do
                     (admission/check!)
-                    (when-not (= source (File/read! path))
+                    (when-not (= source (source-text path))
                       (throw (ex-info "js.build: Source changed after dependency discovery" {:path path})))
                     (let [c (compile-prepared (stage-forms path source texts {}))]
                       (recur (rest todo) (conj seen ns) (conj order ns)

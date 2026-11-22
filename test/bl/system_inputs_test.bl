@@ -1,0 +1,43 @@
+; test/bl/system_inputs_test.bl — system.inputs: what functions read from their
+; arguments and what they do with each value, from compiled code, across
+; namespaces.
+(ns system.inputs-test
+  (:require [system.inputs :as in]))
+
+(def ^:private views
+  "(ns demo.views)
+(defn badge [a] (case (:tone a) \"warm\" [:b.warm] \"cool\" [:b.cool] [:b]))
+(defn card [b]
+  (let [a (:attrs b) n (parse-long (or (:count a) \"0\"))]
+    [:div (:title a) (get a :subtitle \"untitled\") (when (= \"true\" (:open a)) [:i]) n (badge a)]))
+(defn quote-h [b] [:blockquote (:by (:attrs b))])
+(defn fallback [b] (case (:lang b) \"quote\" (quote-h b) [:pre (:lang b)]))")
+
+(def ^:private page
+  "(ns demo.page (:require [demo.views :as v]))
+(defn node [nd]
+  (case (:t nd)
+    :block (case (:lang nd) \"card\" (v/card nd) (v/fallback nd))
+    [:p (:text nd)]))")
+
+(defn- facts [] (in/compose (merge (in/source "demo.views" views) (in/source "demo.page" page))))
+
+(deftest a-dispatch-names-each-literal-and-its-handlers-across-namespaces
+  (let [f (facts) table (in/dispatch-table f "demo.page/node" {:param 0 :path [:lang]})]
+    (is (= ["demo.views/card"] (get table "card")))
+    (is (= ["demo.views/quote-h"] (get table "quote")) "the fallback's own dispatch joins the caller's")
+    (is (= #{:block} (get-in f ["demo.page/node" :domains {:param 0 :path [:t]} :compared])))))
+
+(deftest a-handler-names-the-keys-it-reads-and-how-it-uses-them
+  (let [ps (in/parameters (facts) "demo.views/card" 0 [:attrs])]
+    (is (= #{[:title] [:subtitle] [:count] [:open] [:tone]} (set (keys ps))) "tone is read by badge, which card calls")
+    (is (= #{"untitled"} (get-in ps [[:subtitle] :defaults])) "(get m :k default)")
+    (is (= #{"0"} (get-in ps [[:count] :defaults])) "(or x default)")
+    (is (contains? (get-in ps [[:count] :uses]) :number) "parse-long")
+    (is (contains? (get-in ps [[:open] :uses]) :boolean) "(= \"true\" x)")
+    (is (= #{"warm" "cool"} (get-in ps [[:tone] :compared])) "case literals are its domain")))
+
+(deftest a-caller-reads-what-it-hands-on
+  (let [ps (in/parameters (facts) "demo.page/node" 0 [:attrs])]
+    (is (contains? ps [:title]) "node passes nd to card, which reads (:title (:attrs nd))")
+    (is (contains? ps [:by]) "and to fallback → quote-h")))

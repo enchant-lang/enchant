@@ -1,0 +1,38 @@
+; test/bl/js_portable_leaves_test.bl — the host functions a renderer reaches
+; (rounding, number parsing, calendar days, URI forms, Regex.split, scoped
+; binary:match …) answer in JS exactly as on the BEAM. The corpus
+; test/js/portable/portable/leafcases.bl runs here first, then through the SAME
+; build `bl js build` runs; Node prints the JS side. Skipped when node is absent.
+(ns bl.js.portable-leaves-test
+  (:require [bl.js :as js] [bl.util :as u]))
+
+(def ^:private dir "test/js/portable")
+
+(defn- lines [pairs] (join "\n" (map (fn [[label v]] (str label "\t" v)) pairs)))
+
+(deftest renderer-host-functions-answer-as-on-the-beam
+  (if (nil? (System/find_executable "node"))
+    (is true "node not installed: skipped")
+    (let [root (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd))
+          src (str root "/" dir)
+          out (str (System/tmp_dir!) "/bl-js-portable-" (System/unique_integer (u/to-list [:positive])))
+          _ (BeamLisp.Env/add_search_path src)
+          _ (BeamLisp.Loader/ensure_loaded "portable.leafcases")
+          beam (lines ((BeamLisp.Env/fetch! "portable.leafcases" "all")))]
+      (try
+        (js/build! "portable.leafcases" {:paths (list src) :out out})
+        (let [script (str out "/side.mjs")
+              _ (File/write! script
+                  (str "const C = await import('./ns/portable.leafcases.mjs');\n"
+                       "const R = await import('./rt.mjs');\n"
+                       "const rows = C.d_all();\n"
+                       "const out = [];\n"
+                       "for (const row of rows) { const [label, v] = [...row]; out.push(label + '\\t' + v); }\n"
+                       "process.stdout.write(out.join('\\n'));\n"))
+              [jsout code] (u/to-list (erlang/tuple_to_list (System/cmd "node" (u/to-list [script]) (u/kw [:stderr_to_stdout true]))))]
+          (is (= 0 code) jsout)
+          (let [b (split beam "\n") j (split jsout "\n")]
+            (is (= (count b) (count j)) (str "case count " (count b) " vs " (count j)))
+            (doseq [[x y] (map vector b j)]
+              (is (= x y) (str "BEAM " x "  |  JS " y)))))
+        (finally (File/rm_rf! out))))))
