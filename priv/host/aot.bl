@@ -2438,6 +2438,7 @@
                  (Map/has_key? entries provider) (erlang/is_list (Map/get body :val))
                  (<= (erlang/length (Map/get body :val)) 2048))
    (erlang/error :unattested_source_kernel_abi))
+  (let [preloaded (set (erlang/pre_loaded))]
   (Enum/reduce (Map/get body :val) {}
    (fn [row output]
     (when-not (and (erlang/is_list row) (= 5 (erlang/length row)))
@@ -2448,7 +2449,7 @@
     ;; skipped. Requiring it to be an entry made every boot die here.
     (if (and (erlang/is_atom (nth row 1)) (not= :rt (nth row 1))
              (not (Map/has_key? entries (nth row 1)))
-             (contains? (set (erlang/pre_loaded)) (nth row 1)))
+             (contains? preloaded (nth row 1)))
      output
     (let [name (nth row 0) module (if (= :rt (nth row 1)) shim (nth row 1))
           fixed (nth row 2) variadic (nth row 3)]
@@ -2467,7 +2468,7 @@
                                     (erlang/is_integer (first variadic)) (let [arity (first variadic)] (and (erlang/=< 0 arity) (erlang/=< arity 254)))
                                     (erlang/is_atom (second variadic))) (erlang/error :invalid_source_kernel_abi))
                      (cons (tuple module (second variadic) (inc (first variadic))) routes)))]
-      (Map/put output name routes))))))))
+      (Map/put output name routes)))))))))
 
 (defn sdk_inert_reduced_anf?
  "Pure finite proof over already authenticated kernel declaration IR. This
@@ -3611,10 +3612,12 @@
 (defn- image_sdk_entry! [root identity row]
   ;; Only a selected root/import is loaded. The full image manifest remains
   ;; provenance for unrelated units; it is never an eager execution schedule.
-  (let [bytes (File/read! (sdk_image_artifact_path root identity))
-        ;; The metadata owner hashes and checks these actual bytes once,
-        ;; including on a memo hit. Never substitute a supplied digest.
-        decoded (BeamLisp.Env/sdk_image_metadata! identity row bytes)
+  (let [;; The metadata owner hashes these actual bytes and compares them with
+        ;; the sealed row's digest. A file it already hashed in this VM is not
+        ;; hashed again while it is provably unchanged (see
+        ;; Env/sdk_file_digest!); a supplied digest is never accepted.
+        decoded (BeamLisp.Env/sdk_image_metadata_at! identity row
+                  (sdk_image_artifact_path root identity))
         mod (erlang/element 1 decoded)]
     ;; Loading can execute native on_load. Keep it OUTSIDE the metadata cache's
     ;; owner turn; that cache only decodes authenticated bytes into inert data.
@@ -3643,7 +3646,7 @@
        relative (when source (Path/relative_to source root))]
   (and source (erlang/== name relative) (String/starts_with? source (erlang/iolist_to_binary (list root "/")))
        (if (File/exists? source)
-        (erlang/== (crypto/hash :sha256 (BeamLisp.Loader/read_source source)) (Map/get row :source-digest))
+        (erlang/== (BeamLisp.Env/sdk_file_digest! source :source) (Map/get row :source-digest))
         (let [path (Path/join root "sdk-code.term")
               raw (when (File/regular? path) (inventory_row path module))]
          (and raw
@@ -3883,7 +3886,7 @@
     (when image?
       (let [path (Path/join (Path/dirname root)
                    (erlang/iolist_to_binary (list "ebin/" (Atom/to_string mod) ".beam")))]
-        (when-not (erlang/== (crypto/hash :sha256 (File/read! path)) (Map/get row :sha256))
+        (when-not (erlang/== (BeamLisp.Env/sdk_file_digest! path :bytes) (Map/get row :sha256))
           (erlang/error :framework_artifact_changed))))
     (when-not (and (erlang/module_loaded mod)
                   (erlang/== (erlang/apply mod :module_info (list :md5)) (Map/get row :md5)))
