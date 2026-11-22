@@ -11,7 +11,9 @@
 ;             is consumed: :number (parse-long …), :boolean (= "true" x),
 ;             :text (str, string ops), :truthy (tested for presence)
 ;   dispatch  a chain of literal comparisons on one path, and the functions
-;             each literal leads to: `(case (:lang nd) "job" (job-h nd) …)`
+;             each literal leads to: `(case (:lang nd) "job" (job-h nd) …)`,
+;             or a literal table of functions looked up by that path:
+;             `(get {"job" job-h …} (:lang nd))`
 ;   flows     a parameter path passed on to another function's parameter
 ;
 ; `program` composes them across functions and namespaces: a callee's reads
@@ -28,10 +30,21 @@
 ; ─── abstract values ─────────────────────────────────────────────────────────
 ; {:param i :path [k …]}  a value read off parameter i
 ; {:lit v}                a literal
+; {:table {lit "ns/fn"}}  a literal map from literals to functions
 ; nil                     anything else
 
 (defn- path-val? [v] (and (map? v) (contains? v :param)))
 (defn- lit-val? [v] (and (map? v) (contains? v :lit)))
+(defn- table-val? [v] (and (map? v) (contains? v :table)))
+
+(defn- table-dispatch!
+  "A function table looked up by a parameter path: each literal dispatches."
+  [acc table pv]
+  (let [on (select-keys pv [:param :path])]
+    (read! acc on)
+    (doseq [[lit q] (:table table)]
+      (fact! acc :compared on lit)
+      (swap! acc update-in [:dispatch on lit] (fnil (comp vec distinct conj) []) q))))
 
 (defn- args-of
   "The argument nodes of an :invoke (a cons chain) or a :remote (a list)."
@@ -110,8 +123,12 @@
              (walk acc (assoc env (:name n) v) (:body n)))
       :invoke
       (let [callee (:callee n) args (args-of n)
-            vals (mapv #(walk acc env %) args)]
+            vals (mapv #(walk acc env %) args)
+            cv (when (= :var (:op callee)) (get env (:name callee)))]
         (cond
+          ; (table (:k x)) — a literal function table called with a path
+          (and (table-val? cv) (path-val? (first vals)))
+          (do (when acc (table-dispatch! acc cv (first vals))) nil)
           ; (:k x) — a key read
           (and (= :lit (:op callee)) (keyword? (:val callee)) (path-val? (first vals)))
           (let [p (update (first vals) :path conj (:val callee))]
@@ -130,6 +147,9 @@
       :remote
       (let [args (args-of n) vals (mapv #(walk acc env %) args)]
         (cond
+          ; (get table (:k x)) — a literal function table looked up by a path
+          (and (= :get (:fun n)) (table-val? (first vals)) (path-val? (second vals)))
+          (do (when acc (table-dispatch! acc (first vals) (second vals))) nil)
           (and (= :get (:fun n)) (path-val? (first vals)) (lit-val? (second vals)) (keyword? (:lit (second vals))))
           (let [p (update (first vals) :path conj (:lit (second vals)))]
             (when acc
@@ -169,6 +189,27 @@
                     (and (path-val? a) (or (nil? b) (lit-val? b))) a
                     (and (path-val? b) (or (nil? a) (lit-val? a))) b
                     :else nil)))))
+      ; an inner function (a mapv callback over nodes): its parameters are
+      ; roots of their own, so what it reads and dispatches on is recorded
+      :fn
+      (do (when acc
+            (doseq [cl (:clauses n)]
+              (let [names (or (seq (:params cl))
+                              (map (fn [pat] (when (= :pvar (:pop pat)) (:name pat))) (:pats cl)))
+                    env' (into env (keep-indexed (fn [i nm] (when (string? nm) [nm {:param [:fn i] :path []}])) names))]
+                (walk acc env' (:body cl)))))
+          nil)
+      :map
+      (let [pairs (vec (:pairs n))
+            ; a map literal's keys arrive as (Rt/hash_key lit)
+            unwrap (fn [k] (if (and (= :remote (:op k)) (= :hash_key (:fun k)) (= 1 (count (:args k)))) (first (:args k)) k))
+            ks (mapv #(walk nil env (unwrap (first %))) pairs)
+            fs (mapv #(qualified (second %)) pairs)]
+        (when acc (doseq [[_ v] pairs] (walk acc env v)))
+        ; the entries whose value names a function (an inline fn is skipped)
+        (let [named (filter (fn [[k f]] (and (lit-val? k) f)) (map (fn [k f] [k f]) ks fs))]
+          (when (and (seq named) (every? lit-val? ks))
+            {:table (into {} (map (fn [[k f]] [(:lit k) f]) named))})))
       :case
       (let [subj (walk acc env (:subj n))]
         (doseq [cl (:clauses n)]
