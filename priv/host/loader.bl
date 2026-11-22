@@ -557,7 +557,8 @@
 ;; Each path is recorded once (a public ETS set, heired by the loader server, is
 ;; seeded from the file the first time a manifest is used in this VM). The
 ;; client keeps the first line for a path. Image tier directories are not
-;; recorded: the runtime pin covers them. A failed write removes the manifest;
+;; recorded: the runtime pin covers them. A manifest that outgrew 256 KiB or ends
+;; in X is started over by the next VM. A failed write removes the manifest;
 ;; past 1 MiB an `X` line makes it unusable. Either way the client
 ;; walks the tree. Nothing here changes what is loaded, and nothing raises.
 
@@ -599,7 +600,13 @@
       (File/mkdir_p! (Path/dirname manifest))
       (if (File/regular? manifest)
         (let [text (File/read! manifest)]
-          (if (String/starts_with? text header)
+          ;; A header of this root is kept, unless the file is degenerate (it
+          ;; outgrew what a realm legitimately lists, or holds an X line): a
+          ;; VM starting its records over is better than a manifest the client
+          ;; can never use again.
+          (if (and (String/starts_with? text header)
+                   (erlang/< (erlang/byte_size text) 262144)
+                   (erlang/not (String/contains? text "\nX\n")))
             (Enum/each (String/split text "\n" (list (tuple :trim true)))
               (fn [line]
                 (let [parts (String/split line "\t")]
