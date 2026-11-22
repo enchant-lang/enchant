@@ -6,11 +6,12 @@
 ;   start-turn  task in  →  blocks appended      →  a turn runs async (the model)
 ;   steer-turn  task in  →  blocks appended      →  the running turn reads them
 ;
-; Input is `.bl` (one cell) or `.bl.md` (prose + ```beam-lisp cells). Output is
+; Input is `.bl` (one cell), `.bl.org` or `.bl.md` (prose + cells). Output is
 ; the same thing: every cell is appended to the session document followed by
-; the ```bl-result its evaluation produced (see harness.doc). The document at
-; `.local/harness/<session>.bl.md` is the whole state — the transcript you
-; read, the context the model reads, a livebook `bl.doc` can slice.
+; the result block its evaluation produced (see harness.doc). The document at
+; `.local/harness/<session>.bl.org` is the whole state — the transcript you
+; read, the context the model reads, a livebook `bl.doc` can slice. A session
+; that already has a `.bl.md` document keeps appending to it in Markdown.
 ;
 ; ══ ONE VM PER PROJECT ══════════════════════════════════════════════════════
 ;
@@ -60,30 +61,42 @@
 
 ;; ── the keeper ──────────────────────────────────────────────────────────────
 
-(defn- doc-path [root sid] (str root "/.local/harness/" sid ".bl.md"))
+(defn- doc-path
+  "The session document: an existing `.bl.md` keeps its format; a new session
+   is `.bl.org`, or `.bl.md` when the keeper was started with `:format :md`."
+  [root sid fmt]
+  (let [base (str root "/.local/harness/" sid)
+        md (str base ".bl.md")]
+    (cond
+      (File/exists? md) md
+      (= fmt :md) md
+      :else (str base ".bl.org"))))
+
+(defn- path-format [path] (if (ends-with? path ".bl.org") :org :md))
 
 (defn- cells-in
   "How many cells a session document already holds, so ids keep counting
    across a daemon restart instead of starting over at c1."
   [path]
-  (dec (count (String/split (File/read! path) "```beam-lisp id=c"))))
+  (dec (count (String/split (File/read! path) (hd/cell-marker (path-format path))))))
 
 (defn- ensure-session [st sid]
   (if (contains? (:sessions st) sid)
     st
-    (let [path (doc-path (:root st) sid)
+    (let [path (doc-path (:root st) sid (:format st))
+          fmt (path-format path)
           ns (str "harness.session." sid)]
       (when-not (File/exists? path)
         (File/mkdir_p! (Path/dirname path))
-        (File/write! path (hd/preamble sid ns)))
+        (File/write! path (hd/preamble fmt sid ns)))
       (assoc-in st [:sessions sid]
-                {:id sid :path path :ns ns :root (:root st)
+                {:id sid :path path :format fmt :ns ns :root (:root st)
                  :next (cells-in path) :turns 0 :turn nil :last nil}))))
 
 (defn- session-view
   "A session as data a caller can hold: no pids, no refs."
   [s]
-  {:id (:id s) :doc (:path s) :ns (:ns s) :turns (:turns s)
+  {:id (:id s) :doc (:path s) :format (:format s) :ns (:ns s) :turns (:turns s)
    :turn (when-let [t (:turn s)] (select-keys t [:id :steers :started-ms]))
    :last (:last s)})
 
@@ -106,21 +119,31 @@
   (File/write (get-in st [:sessions sid :path]) text (list :append)))
 
 (defn- render-section
-  "A titled section's text, numbering its cells from `n`: [md ids next-n].
+  "A titled section's text in `fmt`, numbering its cells from `n`: [text ids next-n].
    `blocks` are {:kind :prose :text} and {:kind :cell :src :result}."
-  [title blocks n]
+  [fmt title blocks n]
   (reduce
    (fn [[md ids n] b]
      (if (= :prose (:kind b))
-       [(str md "\n" (hd/safe-prose (:text b)) "\n") ids n]
+       [(str md "\n" (hd/safe-prose fmt (:text b)) "\n") ids n]
        (let [id (str "c" (inc n))]
-         [(str md "\n" (hd/cell-block id (:src b)) "\n" (hd/result-block id (:result b)))
+         [(str md "\n" (hd/cell-block fmt id (:src b)) "\n" (hd/result-block fmt id (:result b)))
           (conj ids id) (inc n)])))
-   [(hd/heading title) [] n]
+   [(hd/heading fmt title) [] n]
    blocks))
+
+(defn- fenced
+  "A literal block of `text` in the session's format."
+  [fmt text]
+  (if (= fmt :org)
+    (str "\n#+begin_example\n" text "\n#+end_example\n")
+    (str "\n```\n" text "\n```\n")))
 
 (defserver keeper
   (init [opts] (ok {:root (:root opts) :vm (:vm opts) :sessions {}
+                    ;; the format of a NEW session's document: :org unless the
+                    ;; starter asks for :md (an existing document keeps its own)
+                    :format (or (:format opts) :org)
                     ;; (fn [root ns document] → {:ok text} | {:error …}): the
                     ;; model. DeepSeek unless the starter supplies another.
                     :step (or (:step opts) model/reply)}))
@@ -139,7 +162,8 @@
   ;; interleave and ids always count up in document order.
   (handle-call [:post sid title blocks] [_from st]
     (let [st (ensure-session st sid)
-          [md ids n] (render-section title blocks (get-in st [:sessions sid :next]))]
+          [md ids n] (render-section (get-in st [:sessions sid :format]) title blocks
+                                     (get-in st [:sessions sid :next]))]
       (append-to st sid md)
       (reply {:md md :ids ids} (assoc-in st [:sessions sid :next] n))))
 
@@ -187,7 +211,8 @@
       (if (nil? t)
         (reply :idle st)
         (do (erlang/exit (:pid t) :kill)
-            (append-to st sid (str (hd/heading (str "turn " (:id t) " stopped")) "\nStopped by the operator.\n"))
+            (append-to st sid (str (hd/heading (get-in st [:sessions sid :format]) (str "turn " (:id t) " stopped"))
+                                   "\nStopped by the operator.\n"))
             (reply :stopped (close-turn st sid :stopped))))))
 
   ;; A worker that dies without saying so (a crash, a kill from outside) still
@@ -198,9 +223,10 @@
                     (vals (:sessions st)))]
       (if (nil? sid)
         (noreply st)
-        (let [tid (get-in st [:sessions sid :turn :id])]
-          (append-to st sid (str (hd/heading (str "turn " tid " crashed"))
-                                 "\n```\n" (pr-str reason) "\n```\n"))
+        (let [tid (get-in st [:sessions sid :turn :id])
+              fmt (get-in st [:sessions sid :format])]
+          (append-to st sid (str (hd/heading fmt (str "turn " tid " crashed"))
+                                 (fenced fmt (pr-str reason))))
           (noreply (close-turn st sid :crashed)))))))
 
 (defn running? [] (some? (Process/whereis KEEPER)))
@@ -312,9 +338,11 @@
               reply (step-fn (:root s) (:ns s) (File/read! (:path s)))]
           (if (contains? reply :error)
             (do (keep! [:post sid (str "model · " tid " failed")
-                        [{:kind :prose :text (str "```\n" (pr-str (:error reply)) "\n```")}]])
+                        [{:kind :prose :text (trim (fenced (:format s) (pr-str (:error reply))))}]])
                 (keep! [:end sid :failed nil]))
-            (let [ps (hd/parts (:ok reply) :md)]
+            ;; a reply is read in the format it was written in: a model asked
+            ;; for Org may still answer with Markdown fences, and its cells run
+            (let [ps (hd/parts (:ok reply) (hd/format-of (:ok reply) nil nil (:format s)))]
               (post! sid (str "model · " tid " · " step) ps EVAL-TIMEOUT-MS)
               (if (or (hd/cells? ps) (= :steered (keep! [:end sid :done seen])))
                 (recur (inc step))

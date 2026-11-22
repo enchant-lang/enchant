@@ -1,19 +1,22 @@
 ; harness/doc.bl — the session document: what comes in, what gets appended.
 ;
-; A harness session IS a `.bl.md` livebook. Everything that happens in it — a
-; task, a steer, an evaluation, a model's reply — arrives as blocks and is
-; APPENDED, never rewritten: prose stays prose, code becomes a ```beam-lisp
-; cell, and every cell is followed by the ```bl-result block its evaluation
-; produced. So one file is the transcript a person reads, the context a model
-; reads, and a document `bl.doc` can slice.
+; A harness session IS a literate document: `.bl.org` for every new session,
+; `.bl.md` for a session that already has one on disk. Everything that happens
+; in it — a task, a steer, an evaluation, a model's reply — arrives as blocks
+; and is APPENDED, never rewritten: prose stays prose, code becomes a
+; beam-lisp cell (`#+begin_src beam-lisp :id cN` / ```beam-lisp id=cN), and
+; every cell is followed by the result block its evaluation produced
+; (`#+RESULTS: cN` / ```bl-result cN). So one file is the transcript a person
+; reads, the context a model reads, and a document `bl.doc` can slice.
 ;
-; Input is `.bl` (code: one cell) or `.bl.md` (prose + ```beam-lisp cells).
-; Reading a `.bl.md` is `bl.doc`'s job — the SAME slicer the loader and the
+; Input is `.bl` (code: one cell), `.bl.org` or `.bl.md` (prose + cells).
+; Reading a document is `bl.doc`'s job — the SAME slicer the loader and the
 ; livebook runner use, so the harness and the language cannot disagree about
-; where a cell begins.
+; where a cell begins. Input format and session format are independent: an
+; Org session appends a Markdown input's cells as Org cells.
 
 (ns harness.doc
-  (:require [bl.doc :as doc]))
+  (:require [bl.doc :as doc] [bl.doc.spans :as spans]))
 
 (def RESULT-CHARS
   "The most of one result a document keeps. A model reads the whole document on
@@ -21,40 +24,50 @@
   16000)
 
 (defn format-of
-  "The format of an input: `:bl` or `:md`.
+  "The format of an input: `:bl`, `:org` or `:md`.
 
-   An explicit `fmt` (\"bl\" / \"bl.md\") wins, then the path's extension, then
-   the text itself — a ```beam-lisp fence means a document. With none of those,
-   `default` decides: code for `eval`, a document for a task (plain prose IS a
-   valid `.bl.md`, and a task is usually prose)."
+   An explicit `fmt` (\"bl\" / \"bl.org\" / \"bl.md\") wins, then the path's
+   extension, then the text itself — an Org or Markdown beam-lisp block means a
+   document. With none of those, `default` decides: code for `eval`, a document
+   for a task (plain prose IS a valid document, and a task is usually prose)."
   [text path fmt default]
   (cond
     (= fmt "bl") :bl
+    (or (= fmt "bl.org") (= fmt "org")) :org
     (or (= fmt "bl.md") (= fmt "md")) :md
-    (and (string? path) (ends-with? path ".bl.md")) :md
+    (and (string? path) (ends-with? path ".org")) :org
     (and (string? path) (ends-with? path ".md")) :md
     (and (string? path) (ends-with? path ".bl")) :bl
+    (includes? text "#+begin_src beam-lisp") :org
     (includes? text "```beam-lisp") :md
     :else default))
+
+(defn document-format
+  "The format of a session document's TEXT: `:org` when it opens with an Org
+   keyword line (`#+title:` …), else `:md`."
+  [text]
+  (if (starts-with? (trim (or text "")) "#+") :org :md))
+
+(defn- closer [fmt] (if (= fmt :org) "\n#+end_src" "\n```"))
 
 (defn parts
   "Input text → its blocks, in order: `{:kind :cell :src s}` and
    `{:kind :prose :text s}`.
 
-   A `.bl` input is one cell. A `.bl.md` is sliced by `bl.doc`: cells become
-   cells, prose and other fenced code stay prose, and a `bl-result` block is
-   DROPPED — a result is something evaluation produces, never something an
-   author (or a model) gets to assert.
+   A `.bl` input is one cell. A document is sliced by `bl.doc`: cells become
+   cells, prose and other blocks stay prose, and a result block is DROPPED — a
+   result is something evaluation produces, never something an author (or a
+   model) gets to assert.
 
-   A document that ends inside a fence (a model cut off mid-cell) is closed and
+   A document that ends inside a block (a model cut off mid-cell) is closed and
    sliced again, so its cells still run. One the slicer still refuses is kept
    whole as prose rather than lost."
   [text fmt]
   (let [text (or text "")]
     (if (= fmt :bl)
       (if (blank? text) [] [{:kind :cell :src (trim text)}])
-      (let [r (doc/slice-text text :md)
-            r (if (contains? r :error) (doc/slice-text (str text "\n```") :md) r)]
+      (let [r (doc/slice-text text fmt)
+            r (if (contains? r :error) (doc/slice-text (str text (closer fmt)) fmt) r)]
         (if (contains? r :error)
           [{:kind :prose :text (trim text)}]
           (vec
@@ -95,34 +108,73 @@
        (blank? out) (str (:value r))
        :else (str out (:value r))))))
 
-(defn cell-block [id src]
-  (str "```beam-lisp id=" id "\n" src "\n```\n"))
+(defn cell-marker
+  "The text every cell header starts with, in `fmt`: what `cells-in` counts."
+  [fmt]
+  (if (= fmt :org) "#+begin_src beam-lisp :id c" "```beam-lisp id=c"))
 
-(defn result-block [id text]
-  (str "```bl-result " id "\n" text "\n```\n"))
+(defn cell-block
+  ([id src] (cell-block :md id src))
+  ([fmt id src]
+   (if (= fmt :org)
+     (str "#+begin_src beam-lisp :id " id "\n" src "\n#+end_src\n")
+     (str "```beam-lisp id=" id "\n" src "\n```\n"))))
+
+(defn result-block
+  "A result as `bl.doc` itself writes it (`bl.doc.spans/result-lines`)."
+  ([id text] (result-block :md id text))
+  ([fmt id text]
+   (str (join "\n" (spans/result-lines fmt id text)) (if (= fmt :org) "" "\n"))))
+
+(defn- heading-prefix [fmt] (if (= fmt :org) "* " "## "))
 
 (defn section-heading?
   "Headings generated by the harness, not headings inside operator/model prose."
-  [line]
-  (or (= line "## task") (= line "## steer") (= line "## eval")
-      (starts-with? line "## model · t")
-      (starts-with? line "## turn ")))
+  ([line] (or (section-heading? :md line) (section-heading? :org line)))
+  ([fmt line]
+   (let [p (heading-prefix fmt)]
+     (or (= line (str p "task")) (= line (str p "steer")) (= line (str p "eval"))
+         (starts-with? line (str p "model · t"))
+         (starts-with? line (str p "turn "))))))
+
+(def ^:private ORG-HEADING (Regex/compile! "^\\*+ "))
+(def ^:private ORG-BLOCK (Regex/compile! "(?i)^\\s*#\\+(results|begin_src|end_src)"))
+(def ^:private MD-BLOCK (Regex/compile! "^\\s*```(beam-lisp|bl-result)"))
 
 (defn safe-prose
-  "Keep user/model prose from forging a generated section heading. Escaped
-   Markdown renders the same text, but history reconstruction keeps its role."
-  [text]
-  (join "\n" (map (fn [line]
-                     (if (section-heading? line) (str "\\" line) line))
-                   (split text "\n"))))
+  "Keep user/model prose from forging a generated section heading, a cell or
+   a result once it is appended in `fmt`. Input prose may come from the other
+   format, where those lines were plain text. In Org every heading line is
+   indented one space (the operator's and the model's outlines stay inside
+   their section) and a src/RESULTS line takes Org's comma escape; in Markdown
+   a generated heading or a fence line is backslash-escaped. History
+   reconstruction keeps each role."
+  ([text] (safe-prose :md text))
+  ([fmt text]
+   (join "\n" (map (fn [line]
+                     (cond
+                       (and (= fmt :org) (Regex/match? ORG-HEADING line)) (str " " line)
+                       (and (= fmt :org) (Regex/match? ORG-BLOCK line)) (str "," line)
+                       (and (= fmt :md) (section-heading? :md line)) (str "\\" line)
+                       (and (= fmt :md) (Regex/match? MD-BLOCK line)) (str "\\" line)
+                       :else line))
+                   (split text "\n")))))
 
-(defn heading [title]
-  (str "\n## " title "\n"))
+(defn heading
+  ([title] (heading :md title))
+  ([fmt title] (str "\n" (heading-prefix fmt) title "\n")))
 
 (defn preamble
   "The first lines of a new session document."
-  [sid ns]
-  (str "# harness · " sid "\n\n"
-       "A beam-lisp session. Every block is appended: `## task`/`## steer` come "
-       "from the operator, `## eval` is code the operator ran, `## model` is the "
-       "model. Cells evaluate in `" ns "`, in the project's warm VM.\n"))
+  ([sid ns] (preamble :md sid ns))
+  ([fmt sid ns]
+   (if (= fmt :org)
+     (str "#+title: harness · " sid "\n"
+          "#+property: harness-ns " ns "\n\n"
+          "A beam-lisp session. Every block is appended: =* task= and =* steer= come "
+          "from the operator, =* eval= is code the operator ran, =* model= is the "
+          "model. Cells evaluate in =" ns "=, in the project's warm VM.\n")
+     (str "# harness · " sid "\n\n"
+          "A beam-lisp session. Every block is appended: `## task`/`## steer` come "
+          "from the operator, `## eval` is code the operator ran, `## model` is the "
+          "model. Cells evaluate in `" ns "`, in the project's warm VM.\n"))))
