@@ -1,7 +1,7 @@
 ; Required native regression: no optional-backend skip. Run on the exact SDK
 ; candidate, together with the durable queue and generation ownership suites.
 (ns datom.fjall-key-admission-test
- (:require [datom :as d] [datom.conn :as conn] [datom.db :as db]
+ (:require [datom :as d] [datom.conn :as conn]
            [datom.store :as s] [datom.store-fjall :as fj]))
 
 (defn refused [f]
@@ -42,6 +42,17 @@
    (healthy! store)
    (finally (s/close store)))))
 
+(deftest point-read-and-direct-native-cas-refuse-oversized-keys
+ (let [store (fj/open-fresh)]
+  (try
+   (is (nil? (s/-get store "")))
+   (doseq [key [(String/duplicate "x" 65536) (String/duplicate "é" 32768)]]
+    (is (= :native-store-operation-failed (refused #(s/-get store key))))
+    (is (= (tuple :error "datom-key-length-out-of-range")
+           (BeamLisp.Native.Datom.StoreFjall/fjall_cas (:handle store) key nil "private")))
+    (healthy! store))
+   (finally (s/close store)))))
+
 (deftest late-invalid-batch-operation-publishes-neither-put-nor-delete
  (doseq [key ["" (String/duplicate "x" 65536)] operation [:put :delete]]
   (let [store (fj/open-fresh)]
@@ -70,7 +81,7 @@
  (let [store (fj/open-fresh)
        schema [{:db/ident :probe/id :db/valueType :db.type/string :db/unique :db.unique/identity}
                {:db/ident :probe/state :db/valueType :db.type/keyword}
-               {:db/ident :probe/result :db/valueType :db.type/any}]
+               {:db/ident :probe/result :db/valueType :db.type/term}]
        c (d/connect-with store schema)]
   (try
    (d/transact! c [{:db/id -1 :probe/id "retained" :probe/state :queued}])

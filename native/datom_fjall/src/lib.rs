@@ -493,7 +493,17 @@ pub(crate) fn err(msg: impl std::fmt::Display) -> Error {
 // poison the handle, including subsequent valid writes, sync and close. Errors
 // deliberately contain no key or value bytes.
 fn admit_key(key: &[u8]) -> NifResult<()> {
-    if key.is_empty() || key.len() > usize::from(u16::MAX) {
+    if key.is_empty() {
+        return Err(err("datom-key-length-out-of-range"));
+    }
+    admit_key_size(key)
+}
+
+// Point reads also construct an LSM InternalKey, whose constructor asserts the
+// upper bound. Empty read keys remain valid absent-key probes. In particular,
+// Store.-update reads before CAS, so guarding only the CAS misses this path.
+fn admit_key_size(key: &[u8]) -> NifResult<()> {
+    if key.len() > usize::from(u16::MAX) {
         return Err(err("datom-key-length-out-of-range"));
     }
     Ok(())
@@ -596,6 +606,7 @@ fn fjall_canonical_path<'a>(env: Env<'a>, path: String) -> NifResult<Term<'a>> {
 #[rustler::nif(schedule = "DirtyIo")]
 fn fjall_get<'a>(env: Env<'a>, handle: ResourceArc<DbHandle>, key: Binary) -> NifResult<Term<'a>> {
     handle.offline_read_admit()?;
+    admit_key_size(key.as_slice())?;
     match handle.datoms.get(key.as_slice()).map_err(|e| err(e))? {
         Some(v) => Ok(to_binary(env, &v)?.to_term(env)),
         None => Ok(atoms::nil().to_term(env)),
