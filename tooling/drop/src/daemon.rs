@@ -583,9 +583,25 @@ fn write_log_header(file: &mut std::fs::File, root: &Path) {
 /// a start. Returns the log path when one was opened.
 #[cfg(unix)]
 fn start_daemon_detached(bin: &Path, root: &Path, build: &str, shared: bool, commands_only: bool) -> Option<PathBuf> {
+    start_daemon_child(bin, root, build, shared, commands_only).log
+}
+
+/// A VM this launcher started: its log, where this start's section of that log
+/// begins, and the child process, so a waiter can tell that it already exited.
+#[cfg(unix)]
+struct StartedVm {
+    log: Option<PathBuf>,
+    section: u64,
+    child: Option<std::process::Child>,
+}
+
+/// `start_daemon_detached`, keeping the child and the start of its log section.
+#[cfg(unix)]
+fn start_daemon_child(bin: &Path, root: &Path, build: &str, shared: bool, commands_only: bool) -> StartedVm {
     use std::process::Stdio;
     let log = log_path(root, build, shared);
     let mut file = log.as_deref().and_then(open_log);
+    let section = file.as_ref().and_then(|f| f.metadata().ok()).map_or(0, |m| m.len());
     if let Some(f) = file.as_mut() {
         write_log_header(f, root);
     }
@@ -613,11 +629,74 @@ fn start_daemon_detached(bin: &Path, root: &Path, build: &str, shared: bool, com
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
     }
-    let _ = cmd.spawn();
-    if opened {
-        log
-    } else {
-        None
+    let child = cmd.spawn().ok();
+    StartedVm { log: if opened { log } else { None }, section, child }
+}
+
+/// How a wait for a started VM ended.
+#[cfg(unix)]
+#[derive(Debug, PartialEq)]
+enum VmWait {
+    Ready,
+    /// The VM exited without becoming ready; the code is `None` for a signal.
+    Died(Option<i32>),
+    TimedOut,
+}
+
+/// Poll `ready` until it holds, `attempts` run out, or the started VM has
+/// exited unsuccessfully: a VM that died at start will never become ready, so
+/// waiting out the deadline only delays the failure. A zero exit is not death:
+/// a start command may hand the VM to a detached process and return.
+#[cfg(unix)]
+fn wait_for_vm(
+    mut ready: impl FnMut() -> bool,
+    mut vm: Option<&mut std::process::Child>,
+    attempts: u32,
+    interval: std::time::Duration,
+) -> VmWait {
+    for _ in 0..attempts {
+        if ready() {
+            return VmWait::Ready;
+        }
+        if let Some(Ok(Some(status))) = vm.as_mut().map(|c| c.try_wait()) {
+            if !status.success() {
+                // it may have become ready just before exiting
+                return if ready() { VmWait::Ready } else { VmWait::Died(status.code()) };
+            }
+            vm = None;
+        }
+        std::thread::sleep(interval);
+    }
+    VmWait::TimedOut
+}
+
+/// The last `lines` lines of the log from byte `section` on: what the VM said
+/// since this start's header.
+#[cfg(unix)]
+fn log_section_tail(log: &Path, section: u64, lines: usize) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(log) else { return String::new() };
+    if file.seek(SeekFrom::Start(section)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    let _ = file.read_to_end(&mut bytes);
+    let text = String::from_utf8_lossy(&bytes);
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(lines)..].join("\n")
+}
+
+/// Report a VM that exited before it was ready: its exit and the tail of its log.
+#[cfg(unix)]
+fn report_dead_vm(vm: &StartedVm, code: Option<i32>) {
+    let how = code.map_or("was killed".to_string(), |c| format!("exited with code {c}"));
+    eprintln!("bl: the warm VM {how} before it was ready");
+    if let Some(log) = vm.log.as_deref() {
+        let tail = log_section_tail(log, vm.section, 15);
+        if !tail.is_empty() {
+            eprintln!("{tail}");
+        }
+        eprintln!("bl: log: {}", log.display());
     }
 }
 
@@ -1177,6 +1256,52 @@ fn is_reject(t: &[Term], reason: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_vm_that_dies_at_start_ends_the_wait_with_its_log_tail() {
+        use std::process::{Command, Stdio};
+        let dir = std::env::temp_dir().join(format!("vm-dies-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("vm.log");
+        std::fs::write(&log, "--- 1 bl vm start (/old) ---\nold section line\n").unwrap();
+        let section = std::fs::metadata(&log).unwrap().len();
+        let file = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        {
+            use std::io::Write;
+            writeln!(&file, "--- 2 bl vm start (/tree) ---").unwrap();
+        }
+        let child = Command::new("sh")
+            .args(["-c", "echo '** (BeamLisp.ExInfo) Invalid native refresh project' >&2; exit 1"])
+            .stdout(Stdio::from(file.try_clone().unwrap()))
+            .stderr(Stdio::from(file))
+            .spawn()
+            .unwrap();
+        let mut vm = StartedVm { log: Some(log.clone()), section, child: Some(child) };
+        let started = std::time::Instant::now();
+        // a deadline of 10 minutes: only the exit can end this wait early
+        let outcome = wait_for_vm(|| false, vm.child.as_mut(), 3000, std::time::Duration::from_millis(200));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "took {:?}", started.elapsed());
+        assert_eq!(outcome, VmWait::Died(Some(1)));
+        let tail = log_section_tail(&log, vm.section, 15);
+        assert!(tail.contains("Invalid native refresh project"), "{tail}");
+        assert!(tail.contains("bl vm start (/tree)"));
+        assert!(!tail.contains("old section line"), "only this start's section: {tail}");
+        // a VM that exits 0 (handed off) is not death; a VM that is ready is ready
+        let mut handoff = Command::new("true").spawn().unwrap();
+        assert_eq!(
+            wait_for_vm(|| false, Some(&mut handoff), 3, std::time::Duration::from_millis(50)),
+            VmWait::TimedOut
+        );
+        let mut live = Command::new("sleep").arg("5").spawn().unwrap();
+        assert_eq!(
+            wait_for_vm(|| true, Some(&mut live), 3, std::time::Duration::from_millis(50)),
+            VmWait::Ready
+        );
+        let _ = live.kill();
+        let _ = live.wait();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn a_project_is_found_by_its_env_file_from_any_subdirectory() {
