@@ -230,8 +230,14 @@ fn checkout_generation(root: &Path, project: &Path) -> std::io::Result<String> {
     ))
 }
 
-fn checkout_extra_sources(project: &Path, cwd: &Path, argv: &[String]) -> Vec<PathBuf> {
+/// The roots env.bl / .env.local.bl declare with `:paths`, `:path` and `:run`,
+/// and whether any file declared `:paths` at all. Without `:paths` the realm's
+/// only project root is the working tree itself (loader.bl `ambient_dirs`:
+/// the cwd, then `BEAM_LISP_PATH`; `cli.bl` `with-project` adds `:paths` and
+/// the tree's `overrides/`).
+fn declared_roots(project: &Path) -> (Vec<PathBuf>, bool) {
     let mut roots = Vec::new();
+    let mut paths_declared = false;
     for file in ["env.bl", ".env.local.bl"] {
         if let Ok(text) = std::fs::read_to_string(project.join(file)) {
             let tokens = literal_tokens(&text);
@@ -240,6 +246,7 @@ fn checkout_extra_sources(project: &Path, cwd: &Path, argv: &[String]) -> Vec<Pa
                     continue;
                 };
                 if key == ":paths" && next == "[" {
+                    paths_declared = true;
                     for (d, value) in &tokens[i + 2..] {
                         if d <= depth {
                             break;
@@ -257,6 +264,16 @@ fn checkout_extra_sources(project: &Path, cwd: &Path, argv: &[String]) -> Vec<Pa
                 }
             }
         }
+    }
+    (roots, paths_declared)
+}
+
+fn checkout_extra_sources(project: &Path, cwd: &Path, argv: &[String]) -> Vec<PathBuf> {
+    let (mut roots, _) = declared_roots(project);
+    // The realm also searches the request's cwd. At the project root that is
+    // covered by the shallow top-level inventory; a deeper cwd is a root of its own.
+    if cwd != project {
+        roots.push(cwd.to_path_buf());
     }
     for path in collect_env_paths() {
         roots.push(cwd.join(path));
@@ -306,7 +323,23 @@ fn checkout_project_generation(
     evidence: Option<&engine_inputs::Snapshot>,
 ) -> std::io::Result<String> {
     let mut files = Vec::new();
-    checkout_sources(project, &mut files)?;
+    if declared_roots(project).1 {
+        // The project declares its library roots: inventory exactly what the
+        // realm can load from them. They arrive in `extra_sources` below.
+        // Besides those: the project files themselves, the tree's
+        // `overrides/` root (a library root by convention) and the loose
+        // source files at the top of the tree (the realm's cwd root).
+        for name in ["env.bl", ".env.local.bl"] {
+            if project.join(name).is_file() {
+                files.push(project.join(name));
+            }
+        }
+        checkout_top_level(project, &mut files)?;
+        checkout_sources(&project.join("overrides"), &mut files)?;
+    } else {
+        // No declared roots: the working tree is the root.
+        checkout_sources(project, &mut files)?;
+    }
     // The runtime pin already covers these trees. In an engine checkout,
     // avoid reading its SDK and native binaries again for the project pin.
     // Explicit extra paths below retain their own complete inventory.
@@ -349,13 +382,26 @@ fn checkout_hash_files(root: &Path, mut files: Vec<PathBuf>, evidence: Option<&e
         hash.update(std::env::var_os(key).unwrap_or_default().as_encoded_bytes());
         hash.update([0]);
     }
+    let mut parents = std::collections::HashMap::<PathBuf, PathBuf>::new();
     for path in files {
         let digest = if let Some(digest) = evidence.and_then(|snapshot| snapshot.digest(&path)) {
             *digest
         } else {
             engine_inputs::file_digest(&path)?
         };
-        let canonical = std::fs::canonicalize(&path)?;
+        // Canonicalize each directory once; a file needs its own resolution
+        // only when it is itself a symlink.
+        let canonical = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name))
+                if !std::fs::symlink_metadata(&path)?.file_type().is_symlink() =>
+            {
+                if !parents.contains_key(parent) {
+                    parents.insert(parent.to_path_buf(), std::fs::canonicalize(parent)?);
+                }
+                parents[parent].join(name)
+            }
+            _ => std::fs::canonicalize(&path)?,
+        };
         let physical = canonical.as_os_str().as_encoded_bytes();
         hash.update((physical.len() as u64).to_be_bytes());
         hash.update(physical);
@@ -367,15 +413,25 @@ fn checkout_hash_files(root: &Path, mut files: Vec<PathBuf>, evidence: Option<&e
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn checkout_sources(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    checkout_sources_walk(dir, files, &mut std::collections::BTreeSet::new())
+/// The loose source files directly in `dir`, without descending.
+fn checkout_top_level(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if (name.ends_with(".bl") || name.ends_with(".bl.md") || name.ends_with(".bl.org"))
+            && std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file())
+        {
+            files.push(entry.path());
+        }
+    }
+    Ok(())
 }
 
-fn checkout_sources_walk(
-    dir: &Path,
-    files: &mut Vec<PathBuf>,
-    visited: &mut std::collections::BTreeSet<PathBuf>,
-) -> std::io::Result<()> {
+fn checkout_sources(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if !dir.exists() {
         return Ok(());
     }
@@ -383,7 +439,20 @@ fn checkout_sources_walk(
         files.push(dir.to_path_buf());
         return Ok(());
     }
-    if !visited.insert(std::fs::canonicalize(dir)?) {
+    // One canonicalization per root. Below it a real directory's physical
+    // path is its parent's plus its name; only a symlinked directory needs
+    // resolving again, to catch cycles.
+    let physical = std::fs::canonicalize(dir)?;
+    checkout_sources_walk(dir, &physical, files, &mut std::collections::BTreeSet::new())
+}
+
+fn checkout_sources_walk(
+    dir: &Path,
+    physical: &Path,
+    files: &mut Vec<PathBuf>,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> std::io::Result<()> {
+    if !visited.insert(physical.to_path_buf()) {
         return Ok(());
     }
     for entry in std::fs::read_dir(dir)? {
@@ -397,7 +466,12 @@ fn checkout_sources_walk(
                 && !(name == "build" && dir.file_name().is_none_or(|n| n != "priv"))
                 && !["_build", "target", "deps", "node_modules", "tmp"].contains(&name.as_ref())
             {
-                checkout_sources_walk(&path, files, visited)?;
+                let below = if kind.is_symlink() {
+                    std::fs::canonicalize(&path)?
+                } else {
+                    physical.join(entry.file_name())
+                };
+                checkout_sources_walk(&path, &below, files, visited)?;
             }
         } else if (kind.is_file() || (kind.is_symlink() && path.is_file()))
             && (name.ends_with(".bl")
@@ -588,6 +662,75 @@ mod checkout_tests {
         std::fs::write(root.join("env.bl"), "{:deps []}").unwrap();
         assert_ne!(configured, checkout_runtime_generation(&root, None).unwrap());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn declared_project(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("checkout-declared-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("priv")).unwrap();
+        std::fs::create_dir_all(root.join("examples/deep")).unwrap();
+        std::fs::create_dir_all(root.join("overrides")).unwrap();
+        std::fs::write(root.join("priv/runtime.bl"), "runtime").unwrap();
+        std::fs::write(root.join("env.bl"), r#"{:name "t" :paths ["examples"]}"#).unwrap();
+        std::fs::write(root.join("examples/deep/app.bl"), "app 1").unwrap();
+        std::fs::write(root.join("overrides/shim.bl"), "shim 1").unwrap();
+        std::fs::write(root.join("top.bl"), "top 1").unwrap();
+        let project = std::fs::canonicalize(&root).unwrap();
+        (root, project)
+    }
+
+    fn generation(root: &Path) -> String {
+        let project = std::fs::canonicalize(root).unwrap();
+        checkout_generation(&project, &project).unwrap()
+    }
+
+    #[test]
+    fn editing_a_declared_root_file_changes_the_project_generation() {
+        let (root, _) = declared_project("edit");
+        let before = generation(&root);
+        for (file, text) in [
+            ("examples/deep/app.bl", "app 2"),
+            ("overrides/shim.bl", "shim 2"),
+            ("top.bl", "top 2"),
+            ("env.bl", r#"{:name "t" :paths ["examples" "extra"]}"#),
+        ] {
+            let was = generation(&root);
+            std::fs::write(root.join(file), text).unwrap();
+            assert_ne!(was, generation(&root), "{file} is a realm input");
+        }
+        assert_ne!(before, generation(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn junk_outside_the_declared_roots_does_not_change_the_project_generation() {
+        let (root, _) = declared_project("junk");
+        let before = generation(&root);
+        for i in 0..1000 {
+            let dir = root.join(format!("scratch/out/d{i}/nested"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("junk.bl"), format!("junk {i}")).unwrap();
+        }
+        assert_eq!(before, generation(&root));
+        std::fs::write(root.join("scratch/out/d7/nested/junk.bl"), "changed").unwrap();
+        assert_eq!(before, generation(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_declared_roots_and_cycles_are_followed_once() {
+        let (root, _) = declared_project("link");
+        let outside = std::env::temp_dir().join(format!("checkout-linked-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("lib.bl"), "lib 1").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("examples/linked")).unwrap();
+        std::os::unix::fs::symlink(root.join("examples"), root.join("examples/deep/loop")).unwrap();
+        let before = generation(&root);
+        std::fs::write(outside.join("lib.bl"), "lib 2").unwrap();
+        assert_ne!(before, generation(&root), "a symlinked root's files are inventoried");
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
