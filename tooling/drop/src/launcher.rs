@@ -566,12 +566,8 @@ fn release_command(bin: &std::path::Path) -> Command {
 }
 
 /// Poll for an authenticated-reachable daemon, up to a startup deadline.
-#[cfg(unix)]
-fn wait_ready(root: &std::path::Path, shared: bool) -> bool {
-    wait_ready_for(root, shared, None)
-}
-
-/// `wait_ready` that also watches the VM this launcher started: once it has
+/// Poll for an authenticated-reachable daemon, up to a startup deadline, and
+/// watch the VM this launcher started: once it has
 /// exited the wait ends at once and its log tail is printed.
 #[cfg(unix)]
 fn wait_ready_for(root: &std::path::Path, shared: bool, mut vm: Option<&mut StartedVm>) -> bool {
