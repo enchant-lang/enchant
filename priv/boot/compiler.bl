@@ -43,13 +43,26 @@
     {:ns ns :locals {} :recur nil :tail true :target :beam
      :js-interop (and (erlang/is_tuple grant) (= true (erlang/element 2 grant)))}))
 
+(defn- position-key? [k]
+  (case k :line true :col true :file true :offset true :end-line true :end-col true :end-offset true false))
+
+(defn- positions-only?
+  "Whether every key of map `m` is a reader location key."
+  [m]
+  (loop [it (maps/next (maps/iterator m))]
+    (cond (erlang/=:= :none it) true
+          (position-key? (erlang/element 1 it)) (recur (maps/next (erlang/element 3 it)))
+          :else false)))
+
 (defn- author-meta
   "Reader locations describe code, never the value that code evaluates to.
    These are the location keys from diag/position-keys, repeated here because
-   the compiler must parse diag's own source before its vars can be interned."
+   the compiler must parse diag's own source before its vars can be interned.
+   A map of locations only, what the reader attaches to most forms, has no
+   author keys at all and is answered without rebuilding it."
   [m]
   (if (erlang/is_map m)
-    (maps/without (list :line :col :file :offset :end-line :end-col :end-offset) m)
+    (if (positions-only? m) {} (maps/without (list :line :col :file :offset :end-line :end-col :end-offset) m))
     {}))
 
 (defn- with-ann
@@ -489,7 +502,7 @@
    ordinary lowercase dotted name, or a class the java manifest owns, is
    untouched."
   [env name]
-  (if (or (has-slash? name) (nil? (index-of name ".")))
+  (if (or (has-slash? name) (not (String/contains? name ".")))
     nil
     (let [parts (split-dots name)
           tail (lists/last parts)
@@ -530,7 +543,7 @@
 
 (defn- java-spelled?
   [s]
-  (or (= 0 (index-of s "java.")) (= 0 (index-of s "javax.")) (= 0 (index-of s "clojure.lang."))))
+  (or (String/starts_with? s "java.") (String/starts_with? s "javax.") (String/starts_with? s "clojure.lang.")))
 
 (defn- java-manifest
   "Ask the interop manifest (`priv/lib/java/manifest.bl`) a question by name.
@@ -930,7 +943,7 @@
    A name written the Clojure way (`clojure.core/map`) refers to the same
    thing as beam-lisp's own `core/map`, so link lookup normalizes it first."
   [name]
-  (if (some? (index-of name "clojure.core/"))
+  (if (String/starts_with? name "clojure.core/")
     (str "core/" (subs name (count "clojure.core/")))
     name))
 
@@ -1020,6 +1033,15 @@
   (let [kind (if (erlang/function_exported :Elixir.BeamLisp.AOT :staged_macro_kind 2)
                (BeamLisp.AOT/staged_macro_kind (:ns env) name) :inactive)]
    (if (= :inactive kind) (some? (macro-lookup (:ns env) name)) (= :macro kind))))
+
+(defn- call-macro-fn
+  "The expanding function of call head `name` when `macro?` would say it is a
+   macro, else nil: the same staged-kind decision, answered with the function
+   so the compiler looks the head up once."
+  [env name]
+  (let [kind (if (erlang/function_exported :Elixir.BeamLisp.AOT :staged_macro_kind 2)
+               (BeamLisp.AOT/staged_macro_kind (:ns env) name) :inactive)]
+   (when (or (= :inactive kind) (= :macro kind)) (macro-lookup (:ns env) name))))
 
 (defn- deftype-field-name
   "The field name a `.-x` / `.x` head reads, or nil when `name` is not a
@@ -2450,8 +2472,7 @@
    a real beam-lisp vector, a keyword becomes its atom, and a plain literal is
    itself. Source-location wrappers are peeled first."
   [form]
-  (let [tag (rn/node-tag form)]
-    (cond
+  (case (rn/node-tag form)
       ; a metadata wrapper carries two kinds of key. POSITIONAL keys
       ; (:line/:col/:file) are the compiler's source channel and are dropped
       ; here (a {:meta list m} wrapper would break rest-based macros like `->`).
@@ -2461,13 +2482,14 @@
       ; existing form metadata wrapper. A defining macro must receive the
       ; name's author metadata, including ^:private. List metadata stays
       ; dropped so rest-based macros such as -> keep ordinary list inputs.
-      (= tag :meta)
-        (let [m (rn/node-pos form)
-              author (if (erlang/is_map m) (author-meta m) {})
-              base (datum (rn/node-form form))]
+      ; Only a vector or a symbol keeps author metadata, so the position keys
+      ; are filtered only for those: a list wrapper, the common case, skips it.
+      :meta
+        (let [base (datum (rn/node-form form))
+              m (when (or (vector? base) (erlang/=:= :symbol (rn/node-tag base))) (rn/node-pos form))
+              author (if (erlang/is_map m) (author-meta m) {})]
           (if (and (erlang/is_map author)
-                   (pos? (maps/size author))
-                   (or (vector? base) (= :symbol (rn/node-tag base))))
+                   (pos? (maps/size author)))
             ; Reader metadata values are reader forms, just like collection
             ; elements. Normalize them at the same data boundary: retaining a
             ; raw {:keyword name} here leaks syntax into otherwise plain data.
@@ -2479,12 +2501,12 @@
                                (list (erlang/element 1 pair)
                                      (datum (erlang/element 2 pair))))))))
             base))
-      (= tag :symbol) form
-      (= tag :keyword) (erlang/binary_to_atom (rn/node-name form))
-      (= tag :list) (Enum/map (rn/node-items form) (fn [value] (datum value)))
-      (= tag :vector) (BeamLisp.Vector/new (Enum/map (rn/node-items form) (fn [value] (datum value))))
-      (= tag :set) (BeamLisp.Set/new (Enum/map (rn/node-items form) (fn [value] (datum value))))
-      (= tag :map)
+      :symbol form
+      :keyword (erlang/binary_to_atom (rn/node-name form))
+      :list (Enum/map (rn/node-items form) (fn [value] (datum value)))
+      :vector (BeamLisp.Vector/new (Enum/map (rn/node-items form) (fn [value] (datum value))))
+      :set (BeamLisp.Set/new (Enum/map (rn/node-items form) (fn [value] (datum value))))
+      :map
         ; build a plain map value from the key/value data; :maps.from_list
         ; takes a list of {k, v} tuples, which is what each pair becomes. Each
         ; key is its canonical key (Q3), as an evaluated literal's is:
@@ -2495,7 +2517,7 @@
               (let [kv (erlang/tuple_to_list pair)]
                 (erlang/list_to_tuple
                   (list (BeamLisp.Ns.Rt/hash_key (datum (first kv))) (datum (second kv))))))))
-      :else form)))
+      form))
 
 (defn- compile-quote
   "Turn (quote form) into the data the form denotes, as a literal value.
@@ -4835,8 +4857,8 @@
     (erlang/is_tuple d)
       (let [h (erlang/element 1 d)]
         (cond
-          (= h :symbol) d
-          (= h :meta)
+          (erlang/=:= h :symbol) d
+          (erlang/=:= h :meta)
             (let [f (erlang/element 2 d)
                   m (erlang/element 3 d)]
               (if (nil? m)
@@ -4910,13 +4932,21 @@
    beam-lisp locals are compiler variables, not inspectable values, so the
    useful surface is their NAMES. This builds a map from each local's symbol
    node to its name string, which is what a macro inspects with, e.g.,
-   `(contains? &env 'x)`."
+   `(contains? &env 'x)`.
+
+   Expansions in one scope see the same locals, so the last locals map and
+   its `&env` are kept in this process and reused while the locals are equal."
   [env]
-  (maps/from_list
-    (apply list
-      (map (fn [name]
-             (erlang/list_to_tuple (list (rn/sym-node name) name)))
-           (maps/keys (:locals env))))))
+  (let [locals (:locals env) last (erlang/get :bl_compiler_macro_env)]
+    (if (and (erlang/is_tuple last) (erlang/=:= locals (erlang/element 1 last)))
+      (erlang/element 2 last)
+      (let [data (maps/from_list
+                   (apply list
+                     (map (fn [name]
+                            (erlang/list_to_tuple (list (rn/sym-node name) name)))
+                          (maps/keys locals))))]
+        (erlang/put :bl_compiler_macro_env (erlang/list_to_tuple (list locals data)))
+        data))))
 
 ; ── gensym canonicalisation ──────────────────────────────────────────────────
 ;
@@ -4999,7 +5029,7 @@
    expands a macro, everything `expand-macro` reaches must already be a real
    definition — a `declare`d placeholder would be called for real."
   [node m]
-  (if (and (erlang/is_tuple node) (= :meta (erlang/element 1 node)))
+  (if (and (erlang/is_tuple node) (erlang/=:= :meta (erlang/element 1 node)))
     ; a positioned node: renumber what is inside, keep the position
     (let [inner (renumber (erlang/element 2 node) m)
           ren (erlang/element 1 inner)]
@@ -5013,14 +5043,14 @@
       ;; "unchanged" is claimed only where rebuilding would give back an equal
       ;; node: a 3-element wrapper around an unchanged node.
       (cond
-        (and (not (erlang/element 3 inner)) (erlang/is_tuple ren) (= 3 (erlang/tuple_size node)))
+        (and (not (erlang/element 3 inner)) (erlang/is_tuple ren) (erlang/=:= 3 (erlang/tuple_size node)))
           (tuple node (erlang/element 2 inner) false)
         (erlang/is_tuple ren)
           (tuple (rn/meta-node ren (erlang/element 3 node)) (erlang/element 2 inner) true)
         :else (tuple ren (erlang/element 2 inner) true)))
     (let [tag (rn/node-tag node)]
       (cond
-        (= tag :symbol)
+        (erlang/=:= tag :symbol)
           (let [name (rn/node-name node)
                 base (gensym-base name)]
             (if (nil? base)
@@ -5031,25 +5061,25 @@
                   (tuple (erlang/list_to_tuple (list :symbol new)) (assoc m name new) true)))))
         ; a (quote …) form is DATA: renaming symbols inside it changes the
         ; value the quote yields, not just hygiene. Leave it untouched.
-        (and (= tag :list)
+        (and (erlang/=:= tag :list)
              (let [items (rn/node-items node)]
                (and (not (empty? items))
-                    (= :symbol (rn/node-tag (rn/node-form (first items))))
-                    (= "quote" (rn/node-name (rn/node-form (first items)))))))
+                    (erlang/=:= :symbol (rn/node-tag (rn/node-form (first items))))
+                    (erlang/=:= "quote" (rn/node-name (rn/node-form (first items)))))))
           (tuple node m false)
-        (or (= tag :list) (= tag :vector) (= tag :set))
+        (or (erlang/=:= tag :list) (erlang/=:= tag :vector) (erlang/=:= tag :set))
           (loop [items (rn/node-items node) result (list) names m changed false]
             (if (erlang/== items (list))
-              (if (or changed (not (= 2 (erlang/tuple_size node))))
+              (if (or changed (not (erlang/=:= 2 (erlang/tuple_size node))))
                 (tuple (erlang/list_to_tuple (list tag (lists/reverse result))) names true)
                 (tuple node names false))
               (let [child (renumber (erlang/hd items) names)]
                 (recur (erlang/tl items) (cons (erlang/element 1 child) result)
                        (erlang/element 2 child) (or changed (erlang/element 3 child))))))
-        (= tag :map)
+        (erlang/=:= tag :map)
           (loop [pairs (rn/node-items node) result (list) names m changed false]
             (if (erlang/== pairs (list))
-              (if (or changed (not (= 2 (erlang/tuple_size node))))
+              (if (or changed (not (erlang/=:= 2 (erlang/tuple_size node))))
                 (tuple (erlang/list_to_tuple (list :map (lists/reverse result))) names true)
                 (tuple node names false))
               (let [pair (erlang/hd pairs)
@@ -5058,7 +5088,7 @@
                     entry (erlang/list_to_tuple (list (erlang/element 1 k) (erlang/element 1 v)))]
                 (recur (erlang/tl pairs) (cons entry result) (erlang/element 2 v)
                        (or changed (erlang/element 3 k) (erlang/element 3 v)
-                           (not (= 2 (erlang/tuple_size pair))))))))
+                           (not (erlang/=:= 2 (erlang/tuple_size pair))))))))
         :else (tuple node m false)))))
 
 (defn- canonical-gensyms
@@ -5243,11 +5273,15 @@
                 (compile-special name (rest items) env)
               ; a macro call: expand it once, then compile what it produced.
               ; The arguments are NOT pre-compiled — a macro receives them as
-              ; data. `local?` names shadow macros, so a bound local wins.
-              (and (some? name) (not (local? env name)) (macro? env name))
-                (compile-node (macroexpand-1-env form env) env)
-              ; an ordinary call
-              :else (compile-call items env)))))
+              ; data. `local?` names shadow macros, so a bound local wins. The
+              ; head is resolved once and expanded with the function found.
+              :else
+              (let [macro-fn (when (and (some? name) (not (local? env name))) (call-macro-fn env name))]
+                (cond
+                  (nil? macro-fn) (compile-call items env)
+                  (erlang/=:= :symbol (rn/node-tag (first items)))
+                    (compile-node (expand-macro macro-fn form (rest items) env) env)
+                  :else (compile-node (macroexpand-1-env form env) env)))))))
 
     ; a plain number, string, boolean, or nil is a literal
     (a/lit form)))
