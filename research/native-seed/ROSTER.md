@@ -425,6 +425,8 @@ Cards in one lane conflict; lanes run at the same time.
 | | Prototype | Finding | Where |
 |---|---|---|---|
 | 🧪 | Macro answer per call head per form | 57% hits, no gain; superseded by one lookup per call | dropped |
+| 🧪 | C1 `ident` memoized in the process dictionary (on top of one `iolist_to_binary`) | qualified 13/13; same bytes; pair median 119.5 -> 119.7 ms, emit 26.3 -> 25.0 ms: no better than the plain `iolist_to_binary` (emit 26.7 -> 25.7 ms); not kept | dropped |
+| 🧪 | C2 identity-keyed first level in `native-fetch-value` (profile: hashing is `table-ref` on the equal-keyed global cache, 604 of 7130 samples inclusive, `string-hash` 190 self, callers `expand-macro`, `macro-lookup`, `compat-reduced?`; the reader's own symbols/keywords are not hashed) | derive qualified 12/12 (`qualify`), same bytes; pair median 111.24 -> 110.84 ms (0.4%), emit 24.59 -> 24.57 ms: within noise; not kept | dropped |
 
 ## Scratch
 
