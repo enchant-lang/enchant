@@ -62,6 +62,35 @@ echo "ok $(grep -c '^UNIT ok' $Q/native.txt) fail $(grep -c '^UNIT fail' $Q/nati
 grep "^UNIT fail" $Q/native.txt | sed -E 's/^UNIT fail [^ ]+ //' | cut -c1-240 | sort | uniq -c | sort -rn | head -30
 grep "^UNIT-STACK" $Q/native.txt | sort -u -k3 | cut -c1-1500 | head -12
 grep -v "^UNIT" $Q/native.txt | tail -c ${NF_TAIL:-3000}
+if [ "${NF_ROUNDTRIP:-1}" = 1 ]; then
+  # Generated modules: the BEAM compiles their native Core and answers each
+  # MD5; the units that generate modules are staged again with those answers.
+  echo "== generated-module round trip"
+  T B $FE/generated-md5.bl -- $Q/out 2>&1 | tail -2
+  if [ -s $Q/out/generated-units.txt ]; then
+    cp $Q/native.txt $Q/native-pass1.txt
+    JOB2="${JOB%)} [$(while read n; do printf '"%s" ' $n; done < $Q/out/generated-units.txt)])"
+    [ -n "${NF_ONLY:-}" ] && JOB2="$JOB"
+    { echo '(println "NF-STAGE-LOADED")'
+      echo "(try $JOB2 (catch e (println (str \"NF-TOP \" (pr-str e)))))"; } > $Q/jobs2.bl
+    cat $PRIV/boot/lower-core.bl $PRIV/boot/lower.bl $FE/hook.bl $PRIV/host/record.bl $Q/record-self.bl $Q/aot-hooked.bl $Q/loader-decls.bl $FE/stage.bl $Q/jobs2.bl > $Q/native2.bl
+    T B research/native-seed/chez/qualify.bl -- eval --image $IMG --file $Q/native2.bl > $Q/native2.txt 2>&1
+    echo "pass 2: ok $(grep -c '^UNIT ok' $Q/native2.txt) fail $(grep -c '^UNIT fail' $Q/native2.txt)"
+    # native.txt keeps every unit's latest line
+    python3 -I - $Q/native-pass1.txt $Q/native2.txt $Q/native.txt <<'PY'
+import re, sys
+def units(p):
+    out = {}
+    for l in open(p):
+        m = re.match(r"UNIT (ok|fail) (\S+)", l)
+        if m: out[m.group(2)] = l
+    return out
+a, b = units(sys.argv[1]), units(sys.argv[2])
+a.update(b)
+open(sys.argv[3], "w").write("".join(a[k] for k in sorted(a)))
+PY
+  fi
+fi
 [ "${NF_COMPARE:-1}" = 0 ] && exit 0
 echo "== compare"
 T B $FE/compare.bl -- $Q/out > $Q/compare.txt 2>&1
