@@ -121,6 +121,88 @@ The Rust client now keeps a content digest per physical path, together with the 
 
 The SDK build for these checks failed at first because the build station's disk was full: 1.8 GB free of 476 GB. =nix-store --gc --max-freed 60G= removed 2,766 dead store paths. No GC roots or project files were touched.
 
+* The warm request floor, measured end to end
+A warm =./bin/bl run= of =(println 1)= in a checkout measured 47-68 ms, median
+50.7 ms, over 20 runs at load average 14.5 on 16 cores. Through an installed
+drop it measured 108.9 ms median at the same load (a release launcher, no
+engine capture; its VM predates batch 15, so it is a comparability note, not the
+same measurement). Every number below comes from the checkout path.
+
+The split needed three instruments: timing marks in a scratch copy of the
+client; =strace= on =connect=/=sendto=/=recvfrom= for the client-visible round
+trip; and probes compiled into the warm VM (=u9_wall.erl= call/return
+timestamps, =u9_procs.erl= spawn/exit tracing, and a 1 ms =u9_sampler.erl=
+runner, adapted from =ab_sampler.erl=). The checkout client and realm are
+reproduced without building an SDK by a scratch root whose =current-sdk= points
+at an existing SDK and whose preparation lock is held, so the client reuses it
+(=BL_SDK_REUSE_CURRENT=1=). Evidence: =research/checked-tiles/evidence/warm-floor-u9.json=
+and =.../evidence/u9-warm-floor/=; probes in =research/substrate-ab/floor/u9/=.
+
+| Part | Median | Recomputed each request? |
+|---|---|---|
+| client shell → launcher exec | 3.0 ms (4.96 measured, less three =date= forks) | fixed |
+| launcher start + digest cache read | ~3 ms | fixed |
+| engine capture: 976 files verified by stat stamp | 22.8 ms | yes, content fixed |
+| project generation: =env.bl=, realm manifest, recorded sources | ~11.1 ms | yes, content fixed |
+| connect + hello/ready handshake | 1.2 ms (0.11 + 1.07) | yes |
+| request → first stdout (the VM handler) | 11.4 ms | yes |
+| result and cleanup: first → second stdout | 3.1 ms | yes |
+| exit frame + client exit | 0.8 ms | yes |
+| =/bin/true= for comparison | 0.98 ms | — |
+
+The engine capture is the single largest client cost: 22.8 ms with the digest
+cache and 243 ms without it. Project generation is the remainder of the 34 ms
+the client spends before it connects. The request frame is 10,711 bytes,
+because it carries the client's whole environment (91 variables).
+
+Inside the VM the handler is 13.6 ms inclusive (=request-handler/2=, 20
+requests, load 6.9-11.6 with call tracing on). Overlapping inclusive rows show
+where it goes:
+
+| VM part | Per request |
+|---|---|
+| =run-command/5=, spawn child + wait | 12.1 ms |
+| =handle-in-vm/3= | 11.1 ms |
+| =Bl.Cli/cmd-run= → =BeamLisp/run_file= → =Compiler/eval_string= | 5.1 → 4.3 → 4.2 ms |
+| =Vm.Realm/open/2= (idempotent, but reads =env.bl= and takes the lifecycle lock) | 2.4 ms |
+| 5 =Refs/spawn_owned= starts (10 traced rows; /3 delegates to /4), ~0.65 ms each | 3.4 ms |
+| =Vm.Io/start-with-send= + heartbeat spawn | 1.3 ms |
+| =Execution/register!= ×5.25, =release_eval_module!=, lock waits | ~3 ms |
+| =Vm.Wire/decode= | 0.12 ms |
+| =client-environment= (91 tombstones) + 58 =SeqCursor.new/1= | 0.5 + 0.8 ms |
+
+The request path spawns about ten processes per request: five owned starts (each wrapping an inner worker) plus compile workers. The 1 ms sampler found
+a running process in 94 of 364 ticks over 20 requests (26%); its top self frame
+is =SeqCursor:new/1= (20 samples), from lazy =concat=/=map= in the request path.
+A changed user file costs about 1.5-2 ms more in the VM (handler 15.8 vs 13.6
+ms); in the client total it is inside the noise.
+
+Three removals, largest first:
+
+1. *Cache the tree's generation outside the request process.* The engine and
+   project generations are content-fixed and recomputed on every command: 34
+   ms, two thirds of the floor. A per-tree resident (inotify, or the realm's own
+   directory records plus the digest cache) answers them from one token:
+   50.7 → about 17 ms.
+2. *One request, one process.* Run the command in the connection process with a
+   realm handle opened once per generation, write to the socket directly, start
+   the heartbeat only past a threshold, return on the same connection, and skip
+   custody registration for an unchanged module set (U4's target): the 9 spawns,
+   =realm/open=, the proxy and heartbeat, and the registration cost are 11 ms of
+   the 13.6. VM handler ≈ 2-3 ms.
+3. *Compact, keep-alive request.* A persistent connection removes connect+hello
+   (1.2 ms). Sending argv, cwd and an environment generation instead of 91
+   variables removes a 10 KB frame, its validation and the 58 lazy cursors. A
+   user file cached by source hash turns =run_file= + =eval_string= (4.3 ms)
+   into a call; changed files still pay their 2 ms compile.
+
+With all three, 1.5-2 ms is reachable: ~1 ms of process exec for a small
+launcher, 0.1-0.3 ms for one AF_UNIX round trip, and ~0.5-1 ms of BEAM work with
+no spawn and no realm lookup. Going below 1 ms needs the client not to be a new
+process per command (a resident client) and a smaller launcher than the shell
+script plus =dirname=/=readlink=; the irreducible part is one scheduling hop,
+one socket round trip and the print.
+
 * Text and tuple leaves on Chez
 The profiler now also charges anonymous frames to the nearest named frame and records leaf ← caller pairs. 56% of leaf samples had been anonymous closures. With that attribution, the hot leaves are host primitives:
 | Leaf ← caller | Samples (of ~8,100) |
