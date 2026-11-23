@@ -103,6 +103,18 @@ new boot compiler function is invisible to `BeamLisp.Compiler/...` callers and t
 was always false, so every run compiled; only an SDK-built check showed it).
 Add the forward in the same change.
 
+**`$MAIN/bin/bl` roots its realm at the current directory's tree.**
+- Started from a worktree whose engine inputs differ from main's, it prepares
+  that tree's own SDK. Even with `BL_SDK_REUSE_CURRENT=1`, the warm VM did not
+  become ready.
+- `nix/*.bl` counts as such an input.
+- The preparation is a detached `bl-checkout-*.scope` plus a
+  `foundry-artifact-job_*.service`, and both outlive the `work run` unit that
+  started them. Stop them with `systemctl --user stop`.
+- To test a changed `nix/` or `scripts/` BL file against main's SDK, run from
+  `$MAIN` and point the test at your tree with `BL_TEST_SOURCE_ROOT=$WT`, or
+  hand it to the integrator.
+
 **A failed SDK preparation's message shows the error chain, not its leaf.** U3
 reports the first three `error:` lines, which for a Nix dependency failure are
 all `Cannot build '<drv>'.` The cause is higher in the same events file, e.g.
