@@ -55,59 +55,7 @@ fn checkout_prerequisites(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The three tokens one checkout request carries. `engine` is the fingerprint
-/// the SDK selection is keyed by (`BL_CHECKOUT_SDK_INPUTS`); `runtime` pins the
-/// running image (`BL_CHECKOUT_GENERATION`); `project` pins a realm to the
-/// sources it resolved (`BL_CHECKOUT_SOURCE_GENERATION`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Generations {
-    pub engine: String,
-    pub runtime: String,
-    pub project: String,
-}
-
-/// Compute the three tokens EXACTLY as the checkout client always has: one
-/// engine inventory, the runtime inventory over `priv`/`native`, and the
-/// project inventory folded with the realm's manifest. `generation.rs`'s
-/// service calls this same function, so a cached answer and a locally computed
-/// one are byte-identical.
-fn checkout_generations(
-    root: &Path,
-    project: &Path,
-    extra_sources: &[PathBuf],
-) -> std::io::Result<Generations> {
-    let evidence = engine_inputs::Snapshot::capture(root)?;
-    let runtime = checkout_runtime_generation(root, Some(&evidence))?;
-    let project_token = checkout_project_generation(root, project, extra_sources, Some(&evidence))?;
-    evidence.verify()?;
-    engine_inputs::save_digest_cache();
-    Ok(Generations { engine: evidence.fingerprint.clone(), runtime, project: project_token })
-}
-
-/// `BL_CHECKOUT_PHASE_TIMES=1` prints one `U10-PHASE name microseconds` line per
-/// phase to stderr. Off by default: a command's stderr is the command's.
-struct PhaseTimer { start: std::time::Instant, last: std::time::Instant, on: bool }
-impl PhaseTimer {
-    fn new() -> Self {
-        let now = std::time::Instant::now();
-        Self { start: now, last: now, on: std::env::var_os("BL_CHECKOUT_PHASE_TIMES").is_some_and(|v| v == "1") }
-    }
-    fn mark(&mut self, name: &str) {
-        let now = std::time::Instant::now();
-        if self.on {
-            eprintln!("U10-PHASE {} {}", name, now.duration_since(self.last).as_micros());
-        }
-        self.last = now;
-    }
-    fn total(&self) {
-        if self.on {
-            eprintln!("U10-PHASE total {}", self.start.elapsed().as_micros());
-        }
-    }
-}
-
 fn checkout_main(args: &[String]) -> ! {
-    let mut timer = PhaseTimer::new();
     let root = args
         .first()
         .and_then(|s| std::fs::canonicalize(s).ok())
@@ -116,36 +64,25 @@ fn checkout_main(args: &[String]) -> ! {
     if args.get(1).map(String::as_str) != Some("--") {
         fail("usage: drop-launcher --checkout ROOT -- ARGV...");
     }
-    timer.mark("root");
     let argv = &args[2..];
+    let evidence = engine_inputs::Snapshot::capture(&root)
+        .unwrap_or_else(|e| fail(&format!("checkout engine inventory: {e}")));
+    std::env::set_var("BL_CHECKOUT_SDK_INPUTS", &evidence.fingerprint);
     let cwd = std::env::current_dir().unwrap_or_else(|e| fail(&e.to_string()));
     let project = root_override(argv)
         .or_else(|| project_dir(&cwd))
         .unwrap_or_else(|| cwd.clone());
     let project = std::fs::canonicalize(project).unwrap_or_else(|e| fail(&e.to_string()));
     let extra_sources = checkout_extra_sources(&project, &request_cwd(&cwd, argv), argv);
-    timer.mark("project+extra");
-    // The per-tree generation service answers engine/runtime/project from a
-    // kernel-observed tree (see `generation.rs`). It is an optimization with a
-    // safe failure mode: when it is absent, still warming, or unsure it says
-    // nothing, and this process computes the same three tokens itself.
-    let generations = generation_cached(&root, &project, &extra_sources);
-    timer.mark("service");
-    let generations = match generations {
-        Some(g) => g,
-        None => {
-            generation_ensure(&root);
-            let g = checkout_generations(&root, &project, &extra_sources)
-                .unwrap_or_else(|e| fail(&format!("checkout inventory: {e}")));
-            timer.mark("local");
-            g
-        }
-    };
-    std::env::set_var("BL_CHECKOUT_SDK_INPUTS", &generations.engine);
+    let runtime = checkout_runtime_generation(&root, Some(&evidence))
+        .unwrap_or_else(|e| fail(&format!("checkout runtime inventory: {e}")));
+    let sources = checkout_project_generation(&root, &project, &extra_sources, Some(&evidence))
+        .unwrap_or_else(|e| fail(&format!("checkout project inventory: {e}")));
+    evidence.verify().unwrap_or_else(|e| fail(&format!("checkout engine inventory: {e}")));
+    engine_inputs::save_digest_cache();
     std::env::set_var("BL_CHECKOUT_ROOT", &root);
-    std::env::set_var("BL_CHECKOUT_GENERATION", generations.runtime);
-    std::env::set_var("BL_CHECKOUT_SOURCE_GENERATION", generations.project);
-    timer.total();
+    std::env::set_var("BL_CHECKOUT_GENERATION", runtime);
+    std::env::set_var("BL_CHECKOUT_SOURCE_GENERATION", sources);
     exec_payload(&root, "src", argv)
 }
 
