@@ -13,7 +13,10 @@ NAMES = ["read_forms", "form-unmeta", "form-head-args", "form-name", "private-na
          "source_decls_from",
          # read_source: literate .bl.md / .bl.org documents load their code cells
          "read_source", "doc_content", "strip_shebang", "doc_source", "collect_doc_cells",
-         "take_until", "plain-ext-list", "list-member?"]
+         "take_until", "plain-ext-list", "list-member?",
+         # declared_ns: the byte-level ns-head scanner
+         "declared_ns", "skip_leading", "drop-to-newline", "ws?", "token-end?", "take_token",
+         "split_token", "skip_metadata", "skip_one_form", "skip_nested", "drop_char"]
 
 def forms(text):
     """Top-level (defn ...) forms with their names, by paren depth."""
