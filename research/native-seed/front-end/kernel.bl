@@ -1,6 +1,7 @@
 ; Card N2b: the constructor kernel's custody, as data, for the native front end.
 ;
 ;   bl --cold run research/native-seed/front-end/kernel.bl -- OUT/kernel.etf [NAMESPACE ...]
+;   bl run research/native-seed/front-end/kernel.bl -- OUT/kernel.etf --augment EARLIER.etf
 ;
 ; On the BEAM, AOT/prepare_unit installs a private constructor kernel from
 ; seed beams (manifest, core seed rows, phase libraries for core and sugar)
@@ -40,7 +41,20 @@
   (try (BeamLisp.AOT/prepare_unit workspace (symbol namespace))
    (finally (BeamLisp.AOT/close_workspace! workspace)))))
 
+(defn- with-cpp-rows [kernel]
+ ;; Core's seed C++ alias rows, read from the seed exactly as the constructor
+ ;; does when no context is open (host.aot's privates are exported).
+ (if (:cpp-rows kernel) kernel (assoc kernel :cpp-rows (BeamLisp.AOT/constructor_kernel_alias_rows!))))
+
 (defn run [[out & namespaces]]
+ (if (= "--augment" (first namespaces))
+  ;; Add what a newer stage.bl reads to an earlier capture, without tracing.
+  (let [kernel (with-cpp-rows (erlang/binary_to_term (File/read! (second namespaces))))]
+   (File/write! out (erlang/term_to_binary kernel))
+   (println (str "KERNEL augmented -> " out " keys " (pr-str (sort (keys kernel))))))
+  (run-traced out namespaces)))
+
+(defn- run-traced [out namespaces]
  (let [tracer (erlang/spawn (fn [] (collect {})))
        mfa (tuple :Elixir.BeamLisp.AOT :"constructor_context_put!" 2)]
   (erlang/trace_pattern mfa true (list :local))
@@ -54,7 +68,7 @@
   (erlang/send tracer (tuple :nf-done (erlang/self)))
   (let [kernel (receive [:nf-kernel k] k)
         values (Map/get kernel :kernel-values {})
-        kernel (assoc kernel :kernel-values (sort (Map/keys values)))]
+        kernel (with-cpp-rows (assoc kernel :kernel-values (sort (Map/keys values))))]
    (doseq [p (sort-by #(elem % 0) (Map/to_list kernel))]
     (let [k (elem p 0) v (elem p 1)]
     (println (str "KERNEL " k " bytes " (erlang/byte_size (erlang/term_to_binary v))
