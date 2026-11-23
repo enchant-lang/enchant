@@ -8,7 +8,48 @@ from pathlib import Path
 import stat
 
 
-def fingerprint(root, policy):
+def reload_policy(path):
+    """`nix/dev-reload.json` (U15): which library sources a checkout VM compiles
+    over its SDK. None when absent, malformed or BL_CHECKOUT_DEV_OVERLAY=0."""
+    if os.environ.get("BL_CHECKOUT_DEV_OVERLAY") == "0" or not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text())
+    except ValueError:
+        return None
+    lists = [value.get(key) for key in ("roots", "extensions", "compiler", "restart")]
+    if value.get("version") != 1 or not all(isinstance(item, list) and all(isinstance(x, str) for x in item) for item in lists):
+        return None
+    roots, extensions, compiler, restart = lists
+    relative = lambda name: name and not name.startswith("/") and all(part not in ("", ".", "..") for part in name.split("/"))
+    if not roots or not extensions or not all(map(relative, roots + compiler + restart)):
+        return None
+    return dict(roots=roots, extensions=extensions, held=compiler + restart)
+
+
+def _beneath(parent, child):
+    return parent == child or child.startswith(parent + "/")
+
+
+def reloadable(reload, path):
+    """The same rule as tooling/drop/src/dev_reload.rs `Policy::reloadable`."""
+    return (any(_beneath(root, path) and root != path for root in reload["roots"])
+            and any(path.endswith(ext) for ext in reload["extensions"])
+            and not any(_beneath(held, path) for held in reload["held"]))
+
+
+def held_back(reload, record):
+    """A record the BASE fingerprint leaves out: a reloadable file, or a
+    directory inside a reload root (its other files keep their own rows)."""
+    path = record[0]
+    if record[1] == "directory":
+        return any(_beneath(root, path) and root != path for root in reload["roots"])
+    return reloadable(reload, path)
+
+
+def fingerprint(root, policy, reload=None, collect=None):
+    """The engine fingerprint; with `reload`, the BASE fingerprint that leaves
+    reloadable library sources out (as `Snapshot::base_fingerprint`)."""
     expected = {"version", "roots", "excluded", "reserved", "targetRoots", "limits"}
     if set(policy) != expected or policy["version"] != 1:
         raise ValueError("unsupported engine-input policy")
@@ -97,14 +138,37 @@ def fingerprint(root, policy):
     walk(root)
     if any(path not in seen for path in policy["roots"]):
         raise ValueError("required engine-input root is missing")
+    if collect is not None:
+        collect.extend(records)
+    if reload is not None and any(held_back(reload, record) for record in records):
+        kept = [record for record in records if not held_back(reload, record)]
+        encoded = json.dumps(sorted(kept), ensure_ascii=True, separators=(",", ":")).encode()
+        return hashlib.sha256(b"beam-lisp-engine-inputs-base-v1\0" + encoded).hexdigest()
     encoded = json.dumps(sorted(records), ensure_ascii=True, separators=(",", ":")).encode()
     return hashlib.sha256(b"beam-lisp-engine-inputs-v1\0" + encoded).hexdigest()
+
+
+def changed_records(root, other, policy):
+    """Engine paths whose record (kind, mode, digest) differs between two trees."""
+    mine, theirs = [], []
+    fingerprint(root, policy, collect=mine)
+    fingerprint(other, policy, collect=theirs)
+    left = {record[0]: record for record in mine}
+    right = {record[0]: record for record in theirs}
+    return sorted(path for path in left.keys() | right.keys()
+                  if left.get(path) != right.get(path) and (left.get(path) or right.get(path))[1] != "directory")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--policy", type=Path)
+    parser.add_argument("--base", action="store_true",
+                        help="leave out the library sources a checkout VM reloads (U15)")
+    parser.add_argument("--reload-policy", type=Path,
+                        help="dev-reload.json for --base (default: ROOT/nix/dev-reload.json)")
+    parser.add_argument("--changed", type=Path, metavar="OTHER",
+                        help="print the engine paths whose records differ between ROOT and OTHER")
     args = parser.parse_args()
     root = args.root.resolve(strict=True)
     if root == Path("/") or not root.is_dir():
@@ -112,7 +176,14 @@ def main():
     policy_path = args.policy or root / "nix/engine-inputs.json"
     if policy_path.stat().st_size > 65536:
         raise ValueError("engine-input policy exceeds capacity")
-    print(fingerprint(root, json.loads(policy_path.read_text())))
+    policy = json.loads(policy_path.read_text())
+    if args.changed:
+        print("\n".join(changed_records(root, args.changed.resolve(strict=True), policy)))
+        return
+    reload = None
+    if args.base:
+        reload = reload_policy(args.reload_policy or root / "nix/dev-reload.json")
+    print(fingerprint(root, policy, reload))
 
 
 if __name__ == "__main__":

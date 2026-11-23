@@ -100,6 +100,56 @@ reuse_current_sdk() {
   emit_selection "$output"
 }
 
+# U15: a checkout whose engine differs from the current SDK only in reloadable
+# library sources (nix/dev-reload.json) runs on that SDK; the VM compiles those
+# sources over it (priv/std/bl/dev-overlay.bl). Only command selection does
+# this; a plain `prepare-checkout-sdk` still builds the exact tree. Without a
+# retained exact SDK, a mismatch outside the reloadable set is reported and the
+# normal preparation follows.
+overlay_selection() {
+  local full output coordinator link sdk_fp='' source base_tree base_sdk path held
+  [ "${BL_CHECKOUT_DEV_OVERLAY:-1}" != 0 ] && [ -f "$root/nix/dev-reload.json" ] || return 1
+  full=$(fingerprint_of_tree 2>/dev/null) || return 1
+  [ -f "$root/.bl/sdks/$full/result-sdk/artifact.json" ] && return 1
+  output=$(readlink -f "$root/.bl/sdks/current-sdk" 2>/dev/null) || return 1
+  [ -f "$output/artifact.json" ] || return 1
+  for link in "$root"/.bl/sdks/*/result-sdk; do
+    if [ -L "$link" ] && [ "$(readlink -f "$link")" = "$output" ]; then
+      sdk_fp=${link%/result-sdk}; sdk_fp=${sdk_fp##*/}; break
+    fi
+  done
+  [[ "$sdk_fp" =~ ^[0-9a-f]{64}$ ]] || return 1
+  source=$(readlink -f "$root/.bl/sdks/$sdk_fp/source-engine" 2>/dev/null) || return 1
+  [[ "$source" =~ ^/nix/store/[0-9a-z]{32}-[^/]+$ ]] || return 1
+  base_tree=$(python3 "$root/scripts/sdk-inputs" --root "$root" --base) || return 1
+  base_sdk=$(python3 "$root/scripts/sdk-inputs" --root "$source" --policy "$root/nix/engine-inputs.json" \
+    --base --reload-policy "$root/nix/dev-reload.json") || return 1
+  if [ "$base_tree" != "$base_sdk" ]; then
+    # Say which edits under the reload roots are held back from reloading.
+    while IFS= read -r path; do
+      case "$path" in priv/lib/*|priv/std/*) ;; *) continue ;; esac
+      held=$(python3 - "$root/nix/dev-reload.json" "$path" <<'PYHELD'
+import json, sys
+policy, path = json.load(open(sys.argv[1])), sys.argv[2]
+under = lambda parent: path == parent or path.startswith(parent + "/")
+if any(under(name) for name in policy["compiler"]):
+    print("feeds the compiler key (nix/producer-sources.nix)")
+elif any(under(name) for name in policy["restart"]):
+    print("serves the request itself")
+PYHELD
+)
+      [ -n "$held" ] && echo "bl: $path $held, so it is not reloaded in the warm VM; this tree needs its own SDK" >&2
+    done < <(python3 "$root/scripts/sdk-inputs" --root "$root" --changed "$source" 2>/dev/null | head -50)
+    return 1
+  fi
+  coordinator=$(readlink -f "$output/preparation-coordinator" 2>/dev/null) || return 1
+  verify_selection "$output" "$coordinator" 2>/dev/null || return 1
+  echo "bl: library sources differ from SDK ${sdk_fp:0:12}; the warm VM compiles them over it (scripts/prepare-checkout-sdk builds them in)" >&2
+  fingerprint=$sdk_fp
+  emit_selection "$output"
+}
+if "$selection" && overlay_selection; then exit 0; fi
+
 # Fingerprint and capture occur after the preparation lock. In particular a
 # waiting caller never adopts a fingerprint computed before its predecessor.
 # The wait is visible and bounded: BL_SDK_LOCK_WAIT seconds (default 3900,

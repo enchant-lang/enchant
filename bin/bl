@@ -2,20 +2,40 @@
 # Checkout commands select immutable Nix prerequisites and SDK before BEAM.
 # The native transport reaches a warm realm before doing cold preparation.
 set -e
-unset BL_INTERNAL_PRODUCER
+unset BL_INTERNAL_PRODUCER BL_CHECKOUT_PLATFORM_SELECTED
 
 # Every fork here is paid by every command: resolve directories with the
 # shell's own cd -P, and fall back to readlink only for what is not one.
 case "$0" in */*) HERE=${0%/*} ;; *) HERE=. ;; esac
+# Program argv after -- is opaque to the launcher.
+COLD=
+for arg in "$@"; do
+  [ "$arg" = "--" ] && break
+  if [ "$arg" = "--cold" ]; then COLD=1; break; fi
+done
+
+# The warm path is one exec, with no fork. The client selects the checkout
+# platform itself (tooling/drop/src/checkout_platform.rs): it re-stats the
+# listing the platform script recorded, runs the script only when that listing
+# moved, and execs the selected platform's client when that is another binary.
+# It starts as the client of the platform it last selected, which only such a
+# client records, and canonicalizes the root it is given.
+CLIENT="$HERE/../.bl/checkout-platform/bin/drop-launcher"
+if [ -z "$COLD" ] && [ -z "${BL_CHECKOUT_COLD:-}" ] && [ -z "${BL_CHECKOUT_PLATFORM:-}" ] && [ -x "$CLIENT" ]; then
+  exec "$CLIENT" --checkout "$HERE/.." -- "$@"
+fi
+
 ROOT=$(CDPATH='' cd "$HERE/.." && pwd -P)
 resolve_dir() { (CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P) || readlink -f "$1"; }
 export BL_CHECKOUT_ROOT="$ROOT"
+[ -n "$COLD" ] && BL_CHECKOUT_COLD=$ROOT
 
 # The managed platform supplies the stock client, runtime and mandatory NIF
 # before any BEAM starts. Build sandboxes pass their already prepared platform.
 PLATFORM=${BL_CHECKOUT_PLATFORM:-}
 if [ -z "$PLATFORM" ]; then
   PLATFORM=$("$ROOT/scripts/prepare-checkout-platform")
+  SELECTED=1
 fi
 PLATFORM=$(resolve_dir "$PLATFORM")
 case "$PLATFORM" in
@@ -32,18 +52,16 @@ NATIVES=$(resolve_dir "$PLATFORM/native-products")
 export BL_PREPARED_NATIVES="$NATIVES"
 export BL_BIN="$PLATFORM/bin/drop-launcher"
 export PATH="$PLATFORM/bin:$PATH"
-# Program argv after -- is opaque to the launcher.
-for arg in "$@"; do
-  [ "$arg" = "--" ] && break
-  if [ "$arg" = "--cold" ]; then BL_CHECKOUT_COLD=$ROOT; break; fi
-done
 
 # The native client reaches a running VM before any Elixir probe or staging.
-# Its cold child comes back through this script exactly once.
+# Its cold child comes back through this script exactly once. A preset
+# platform (build sandboxes) is used as given.
 if [ "${BL_CHECKOUT_COLD:-}" != "$ROOT" ]; then
   # The client captures checked engine bytes once and reuses their digests
   # for its overlapping runtime/project pins. Cold selection remains locked.
   CLIENT="$PLATFORM/bin/drop-launcher"
+  # A client that selection named may record itself for the one-exec path.
+  [ -n "${SELECTED:-}" ] && export BL_CHECKOUT_PLATFORM_SELECTED="$PLATFORM"
   exec "$CLIENT" --checkout "$ROOT" -- "$@"
 fi
 unset BL_CHECKOUT_COLD

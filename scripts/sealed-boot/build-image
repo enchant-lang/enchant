@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Build an immutable scratch SDK image in /nix/store for a cold-start A/B,
+# without an SDK build:
+#   scripts/sealed-boot/build-image SDK_SELECTION OVERLAY_DIR NAME MODE
+# SDK_SELECTION  a store SDK selection (its image/ and lib/ are copied/linked)
+# OVERLAY_DIR    edited host beams (scripts/check-runtime-hosts --work-dir DIR
+#                leaves them in DIR/host-overlay); empty dir = unchanged hosts
+# MODE           image-metadata (seal image units too) | none
+# Prints the new store path. The copy lives in $WORK/NAME until it is added.
+# Remove it afterwards with `nix-store --delete PATH`.
+set -euo pipefail
+sdk=$(readlink -f "$1"); overlay=$(readlink -f "$2"); name=$3; mode=$4
+here=$(cd "$(dirname "$0")" && pwd)
+work=${WORK:-/tmp/k1-$USER/images}
+image=$(readlink -f "$sdk/image")
+platform=$(sed -n 's|^export PATH=\(/nix/store/[^:]*\)/bin:.*|\1|p' "$sdk/bin/bl-cold" | head -1)
+dest=$work/$name
+mkdir -p "$dest"
+[ -e "$dest/lib" ] && { echo "exists: $dest/lib" >&2; exit 2; }
+# The store SDK's layout: lib/<app>/ per dependency and image -> lib/beam_lisp-*,
+# so code:priv_dir(:beam_lisp) resolves into THIS copy. Dependencies are links.
+mkdir "$dest/lib"
+app=$(basename "$image")
+for entry in "$(readlink -f "$sdk/lib")"/*; do
+  [ "$(basename "$entry")" = "$app" ] || ln -s "$entry" "$dest/lib/$(basename "$entry")"
+done
+mkdir "$dest/lib/$app"
+cp -a --reflink=auto "$image/ebin" "$image/priv" "$dest/lib/$app/"
+chmod -R u+w "$dest/lib/$app"
+ln -s "lib/$app" "$dest/image"
+for phase in overlay "$mode"; do
+  K1_LIB=$dest/lib K1_IMAGE=$dest/image BL_ROOT=$dest/image BL_EBIN=$dest/image/ebin BEAM_LISP_DEV=0 \
+    "$platform/bin/elixir" "$here/boot-at.exs" --script "$here/seal.exs" "$dest/image" "$overlay" "$phase" >&2
+done
+chmod -R a-w "$dest/lib/$app"
+nix store add-path "$dest" --name "$name"

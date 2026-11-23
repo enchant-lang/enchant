@@ -3166,20 +3166,29 @@
    an older entry. Public so the test can point it at a table it wrote; the
    reader passes the immutable-root answer and never a caller's."
   [path immutable?]
+  ;; K1: a path under /nix/store/ names immutable bytes, so its first complete
+  ;; read stands for the VM (as Env/sdk_file_digest! already does for image
+  ;; files). The digest was recomputed over the ~0.9 MB table on every seed
+  ;; miss, ~100 times per cold start (7% of its samples). Any other path keeps
+  ;; the digest check, so a replaced table there is still re-read.
   (if-not (and immutable? (File/regular? path))
     nil
-    (let [digest (crypto/hash :sha256 (File/read! path))
-          memo-key (tuple :Elixir.BeamLisp.AOT :sealed_seed_table path)
-          hit (persistent_term/get memo-key nil)]
-      (if (and hit (erlang/== digest (elem hit 0)))
+    (let [memo-key (tuple :Elixir.BeamLisp.AOT :sealed_seed_table path)
+          hit (persistent_term/get memo-key nil)
+          store? (immutable_root? path)]
+      (if (and hit store? (erlang/== :immutable (elem hit 0)))
         (elem hit 1)
-        (let [table
-              (try
-                (let [decoded (erlang/binary_to_term (File/read! path) (list :safe))]
-                  (when (valid_seed_table? decoded) decoded))
-                (catch _ nil))]
-          (persistent_term/put memo-key (tuple digest table))
-          table)))))
+        (let [bytes (File/read! path)
+              digest (if store? :immutable (crypto/hash :sha256 bytes))]
+          (if (and hit (erlang/== digest (elem hit 0)))
+            (elem hit 1)
+            (let [table
+                  (try
+                    (let [decoded (erlang/binary_to_term bytes (list :safe))]
+                      (when (valid_seed_table? decoded) decoded))
+                    (catch _ nil))]
+              (persistent_term/put memo-key (tuple digest table))
+              table)))))))
 
 (defn- sealed_seed_table
   "The sealed table for THIS image, or nil. Read and validated once per VM. Nil
@@ -3207,6 +3216,123 @@
           digest (when (erlang/is_binary sha) (String/downcase (Base/encode16 sha)))]
       (when (and (erlang/is_map proof) (erlang/== expected digest))
         proof))))
+
+;; ---------------------------------------------------------------------------
+;; K1: the image's unit metadata, sealed by the producer (U8 generalized).
+;;
+;; `decode_sdk_image_metadata!` is pure over an artifact's bytes and its
+;; `sdk-code.term` row: imports, forwarder routes (a disassembly), callable and
+;; declaration attributes, lambda tables, binding routes. A cold start decoded
+;; every image unit its SDK closure touched, after reading and hashing the file.
+;; The producer now runs the same decoder once per row in `do-prime` and writes
+;; `priv/image-metadata.term`; an immutable image reads that table once.
+;;
+;; The reader takes a row only when:
+;;   1. the table lies under /nix/store/ (with the artifacts and the inventory
+;;      it was derived from: one immutable, content-addressed image root);
+;;   2. the table names this compiler key and this module's MD5, the decoder;
+;;   3. the entry's `:sha256` equals the caller's row `:sha256` and its `:row`
+;;      equals the sha256 of the caller's whole row, so the sealed decode is
+;;      the decode of exactly this row and these bytes.
+;; Executable checks do not move: `image_sdk_entry!` still loads the module
+;; and every retention compares its live MD5 with the row; forwarders still
+;; pass `Env/sdk_forwarder_current?`. A writable image never reads the table.
+
+(defn image_metadata_table_path
+  "Where the producer seals the image unit metadata: beside `sdk-code.term`."
+  [priv-root]
+  (Path/join priv-root "image-metadata.term"))
+
+(defn- image_row_digest [row]
+  (crypto/hash :sha256 (erlang/term_to_binary row (list :deterministic))))
+
+(defn image_metadata_table
+  "The sealed table's content for the image at `priv-root`: one entry per
+   `sdk-code.term` row whose artifact exists and whose bytes match the row,
+   holding the term `decode_sdk_image_metadata!` returns. Pure producer data;
+   the test compares it with an in-VM decode."
+  [priv-root]
+  (let [root (physical_sdk_path priv-root)
+        inventory (decode_sdk_inventory! (File/read! (Path/join root "sdk-code.term")))
+        rows (Enum/reduce inventory {}
+               (fn [entry acc]
+                 (let [identity (elem entry 0) row (elem entry 1)
+                       path (sdk_image_artifact_path root identity)]
+                   (if-not (File/regular? path) acc
+                     (let [bytes (File/read! path)]
+                       (if-not (erlang/== (crypto/hash :sha256 bytes) (Map/get row :sha256)) acc
+                         (let [decoded (try (decode_sdk_image_metadata! identity row bytes)
+                                            (catch _ nil))]
+                           (if (erlang/== nil decoded) acc
+                             (Map/put acc identity
+                               {:sha256 (Map/get row :sha256) :row (image_row_digest row)
+                                :decoded (erlang/term_to_binary decoded (list :deterministic))})))))))))]
+    {:version 1 :compiler-key (BeamLisp.AOTCache/compiler_key)
+     :decoder (erlang/apply :Elixir.BeamLisp.AOT :module_info (list :md5))
+     :rows rows}))
+
+(defn prime_image_metadata!
+  "Producer: seal every image unit's decoded metadata in
+   `priv/image-metadata.term`. Uncompressed, so a reader's one decode of the
+   outer map leaves each entry a sub-binary until that unit is used.
+   Deterministic bytes. Returns the row count."
+  [priv-root]
+  (let [table (image_metadata_table priv-root)]
+    (File/write! (image_metadata_table_path priv-root)
+                 (erlang/term_to_binary table (list :deterministic)))
+    (erlang/map_size (Map/get table :rows))))
+
+(defn valid_image_table?
+  "Whether a decoded image table may be used: version, compiler key, this
+   decoder's MD5, a bounded row map. Pure."
+  [decoded]
+  (and (erlang/is_map decoded)
+       (erlang/== 1 (Map/get decoded :version))
+       (erlang/== (BeamLisp.AOTCache/compiler_key) (Map/get decoded :compiler-key))
+       (erlang/== (erlang/apply :Elixir.BeamLisp.AOT :module_info (list :md5))
+                  (Map/get decoded :decoder))
+       (erlang/is_map (Map/get decoded :rows))
+       (erlang/=< (erlang/map_size (Map/get decoded :rows)) 32768)))
+
+(defn sealed_image_table_at
+  "Read and validate the image table at `path`, once per VM, when the path is
+   under /nix/store/; nil otherwise. Public for the test."
+  [path]
+  (if-not (and (immutable_root? path) (File/regular? path))
+    nil
+    (let [memo-key (tuple :Elixir.BeamLisp.AOT :sealed_image_table path)
+          hit (persistent_term/get memo-key nil)]
+      (if hit
+        (elem hit 0)
+        (let [table (try
+                      ;; Not :safe: the table is producer output inside the
+                      ;; same immutable root as the artifacts, and its decoded
+                      ;; rows name functions of modules not loaded yet.
+                      (let [decoded (erlang/binary_to_term (File/read! path))]
+                        (when (valid_image_table? decoded) decoded))
+                      (catch _ nil))]
+          (persistent_term/put memo-key (tuple table))
+          table)))))
+
+(defn sealed_image_metadata
+  "The sealed `{module, metadata}` decode of `identity` for exactly `row`, or
+   nil (no immutable table, another row, other bytes). A nil only costs the
+   caller its decode."
+  [identity row]
+  (when (and (erlang/is_binary identity) (erlang/is_map row))
+    (let [table (sealed_image_table_at
+                  (image_metadata_table_path (physical_sdk_path (BeamLisp.Tiers/priv_root))))
+          entry (when table (Map/get (Map/get table :rows) identity))]
+      (when (and (erlang/is_map entry)
+                 (erlang/is_binary (Map/get row :sha256))
+                 (erlang/== (Map/get row :sha256) (Map/get entry :sha256))
+                 (erlang/== (image_row_digest row) (Map/get entry :row)))
+        (let [decoded (try (erlang/binary_to_term (Map/get entry :decoded)) (catch _ nil))]
+          (when (and (erlang/is_tuple decoded) (erlang/== 2 (erlang/tuple_size decoded))
+                     (erlang/is_atom (elem decoded 0))
+                     (erlang/== identity (Atom/to_string (elem decoded 0)))
+                     (erlang/is_map (elem decoded 1)))
+            decoded))))))
 
 (defn- seed_artifact_metadata! [mod name expected]
   ;; Cache byte-derived data, never a blanket authorization. Every caller must
@@ -3356,10 +3482,17 @@
        key (tuple :Elixir.BeamLisp.AOT :native-declaration source ns)
        hit (persistent_term/get key nil)]
   (if (and hit (= digest (elem hit 0))) (elem hit 1)
-   (let [declaration (or (disk_native_declaration digest ns)
-                         (let [d (sdk_native_source_declaration_content ns source content)]
-                           (store_native_declaration! digest ns d)
-                           d))]
+   ;; `:none` is the stored answer for a source that mentions `defnative`
+   ;; without declaring exactly one (the compiler, the loader, this file):
+   ;; those were re-parsed by the reader on every VM start because a stored nil
+   ;; read back as a miss.
+   (let [stored (disk_native_declaration digest ns)
+         declaration (cond
+                       (erlang/== :none stored) nil
+                       stored stored
+                       :else (let [d (sdk_native_source_declaration_content ns source content)]
+                               (store_native_declaration! digest ns (if (nil? d) :none d))
+                               d))]
     (persistent_term/put key (tuple digest declaration))
     declaration)))))
 
@@ -3387,34 +3520,63 @@
             (elem t 2)))
         (catch _ nil)))))
 
+(defn- native_declaration_file [digest ns none?]
+  ;; A negative answer (`:none`) lives under its own `.none` name, so a reader
+  ;; that predates negatives (same compiler key, e.g. a cache shared with an
+  ;; older VM) never reads one as a declaration.
+  (if none?
+    (erlang/iolist_to_binary (list (native_declaration_name digest ns) ".none"))
+    (native_declaration_name digest ns)))
+
 (defn- disk_native_declaration [digest ns]
-  (or (read_native_declaration
-        (Path/join (Path/join (Path/join (BeamLisp.Tiers/priv_root) "native-declarations")
-                              (BeamLisp.AOTCache/compiler_key)) (native_declaration_name digest ns)) digest ns)
-      (read_native_declaration (native_declaration_path digest ns) digest ns)))
+  ;; The declaration, `:none` for a stored negative answer, or nil (unknown).
+  (let [shipped (Path/join (Path/join (BeamLisp.Tiers/priv_root) "native-declarations")
+                           (BeamLisp.AOTCache/compiler_key))
+        cache (Path/dirname (native_declaration_path digest ns))
+        found (or (read_native_declaration (Path/join shipped (native_declaration_name digest ns)) digest ns)
+                  (read_native_declaration (Path/join cache (native_declaration_name digest ns)) digest ns))]
+    (cond
+      (and found (erlang/not (erlang/== :none found))) found
+      (or (erlang/== :none (read_native_declaration
+                             (Path/join shipped (native_declaration_file digest ns true)) digest ns))
+          (erlang/== :none (read_native_declaration
+                             (Path/join cache (native_declaration_file digest ns true)) digest ns))) :none
+      :else nil)))
 
 (defn prime_native_declarations!
   "Ship content-keyed native syntax with the SDK, as with its source parts.
    Fresh machines need no reader pass to rediscover already-built declarations.
    Every use still verifies source bytes and physical native code identity."
   [root]
-  (let [output (Path/join (Path/join root "native-declarations") (BeamLisp.AOTCache/compiler_key))]
+  (let [output (Path/join (Path/join root "native-declarations") (BeamLisp.AOTCache/compiler_key))
+        physical (physical_sdk_path root)]
     (File/mkdir_p! output)
+    ;; K1: the bootstrap scan's answer, relative to the image root.
+    (File/write! (Path/join output "declaring.term")
+      (erlang/term_to_binary
+        (tuple 1 (Enum/map
+                   (Enum/filter (sdk_native_tier_files physical)
+                     (fn [file] (String/contains? (BeamLisp.Loader/read_source file) "defnative")))
+                   (fn [file] (Path/relative_to file physical))))
+        (list :deterministic)))
     (Enum/reduce (BeamLisp.Tiers/sources root) 0
       (fn [path count]
         (let [content (BeamLisp.Loader/read_source path)]
           (if (String/contains? content "defnative")
             (let [ns (BeamLisp.Loader/declared_ns content)
                   declaration (when ns (sdk_native_source_declaration_content ns path content))]
-              (if declaration
+              (if ns
                 (let [digest (crypto/hash :sha256 content)]
-                  (File/write! (Path/join output (native_declaration_name digest ns))
-                    (erlang/term_to_binary (tuple digest ns declaration) (list :deterministic)))
-                  (erlang/+ count 1)) count)) count))))))
+                  (File/write! (Path/join output (native_declaration_file digest ns (nil? declaration)))
+                    (erlang/term_to_binary (tuple digest ns (if declaration declaration :none))
+                                           (list :deterministic)))
+                  (if declaration (erlang/+ count 1) count)) count)) count))))))
 
 (defn- store_native_declaration! [digest ns declaration]
   (try
-    (let [path (native_declaration_path digest ns)
+    (let [path (if (erlang/== :none declaration)
+                 (erlang/iolist_to_binary (list (native_declaration_path digest ns) ".none"))
+                 (native_declaration_path digest ns))
           tmp (erlang/iolist_to_binary (list path ".tmp-" (os/getpid)))]
       (File/mkdir_p! (Path/dirname path))
       (File/write! tmp (erlang/term_to_binary (tuple digest ns declaration) (list :deterministic)))
@@ -3540,6 +3702,35 @@
       (BeamLisp.Env/bump_sdk_receipt_revision!)))
   :ok)
 
+(defn- sdk_native_tier_files [root]
+  ;; Every current tier source under `root`, the bootstrap's discovery input.
+  (Enum/sort (Enum/uniq (Enum/flat_map (BeamLisp.Tiers/dirs root)
+    (fn [dir] (Enum/flat_map (BeamLisp.Tiers/source_extensions)
+      (fn [ext] (Path/wildcard (erlang/iolist_to_binary (list dir "/**/*" ext))))))))))
+
+(defn- native_declaring_seal_path [root]
+  (Path/join (Path/join (Path/join root "native-declarations") (BeamLisp.AOTCache/compiler_key))
+             "declaring.term"))
+
+(defn- sealed_native_declaring [root]
+  ;; The producer's list of tier sources mentioning `defnative`, for an image
+  ;; under /nix/store/ only (the sources cannot change there). Pure discovery
+  ;; data like the scan cache: every listed file is still read, hashed, parsed
+  ;; and identity-checked by sdk_native_input / native_host_emission_row!.
+  (let [path (native_declaring_seal_path root)]
+    (when (and (immutable_root? path) (File/regular? path))
+      (try
+        (let [t (erlang/binary_to_term (File/read! path) (list :safe))]
+          (when (and (erlang/is_tuple t) (erlang/== 2 (erlang/tuple_size t))
+                     (erlang/== 1 (elem t 0)) (erlang/is_list (elem t 1))
+                     (erlang/=< (erlang/length (elem t 1)) 512)
+                     (Enum/all? (elem t 1) (fn [rel] (and (erlang/is_binary rel)
+                                                         (erlang/== :relative (Path/type rel))
+                                                         (erlang/not (String/contains? rel ".."))))))
+            (Enum/filter (Enum/map (elem t 1) (fn [rel] (Path/join root rel)))
+                          (fn [file] (File/regular? file)))))
+        (catch _ nil)))))
+
 (defn- sdk_native_scan_stamp [root files]
   ;; Identity of the DISCOVERY INPUT, never of a declaration: (path, size,
   ;; mtime, inode) for every current tier source. Contents are not read here;
@@ -3628,11 +3819,12 @@
           (erlang/error :sdk_native_bootstrap_after_runtime_publication))
         (let [started (erlang/monotonic_time :microsecond)
               root (physical_sdk_path (BeamLisp.Tiers/priv_root))
-              files (Enum/sort (Enum/uniq (Enum/flat_map (BeamLisp.Tiers/dirs root)
-                      (fn [dir] (Enum/flat_map (BeamLisp.Tiers/source_extensions)
-                        (fn [ext] (Path/wildcard (erlang/iolist_to_binary (list dir "/**/*" ext)))))))))
-              declaring (sdk_native_declaring_files root files)]
-          (when (erlang/> (erlang/length files) 8192) (erlang/error :sdk_native_source_inventory_bound))
+              ;; K1: an immutable image ships the answer of this scan
+              ;; (`prime_native_declarations!`); anything else walks and stats.
+              sealed (sealed_native_declaring root)
+              files (when-not sealed (sdk_native_tier_files root))
+              declaring (or sealed (sdk_native_declaring_files root files))]
+          (when (and files (erlang/> (erlang/length files) 8192)) (erlang/error :sdk_native_source_inventory_bound))
           ;; The policy unit is ordinary SDK bootstrap support. No native
           ;; provider unit __bl_init__, def value or business callback runs.
           (BeamLisp.Loader/ensure_loaded "vm.native")
@@ -3795,6 +3987,10 @@
   this exact member of the actual sealed image, whose bytes are verified here.
   A missing file alone and a caller's row never create image ownership."
  [root module row]
+ (if (Map/get row :dev-overlay)
+  ;; A checkout overlay row is current while the overlay still holds those
+  ;; exact bytes; the SDK's own file is not its source (U15).
+  (erlang/== (Map/get row :source-digest) (BeamLisp.Env/dev_sdk_source_digest (Map/get row :source)))
  (let [name (Map/get row :source)
        source (sdk_unit_source_path root name)
        relative (when source (Path/relative_to source root))]
@@ -3806,7 +4002,17 @@
          (and raw
               (erlang/== (Map/take raw (list :source :source-digest :sha256 :compiler-key))
                  (Map/take row (list :source :source-digest :sha256 :compiler-key)))
-              (erlang/not (erlang/== nil (image_sdk_entry! root (Atom/to_string module) raw)))))))))
+              (erlang/not (erlang/== nil (image_sdk_entry! root (Atom/to_string module) raw))))))))))
+
+(defn sdk_dev_emission_rows!
+  "U15: inventory rows for a unit compiled from a checkout copy at `source`
+   under the private tree `root`, bound to the exact emitted bytes. Rows carry
+   the same root-relative :source as the SDK's own. Returns module => row."
+  [root source beams]
+  (Map/new (Enum/map
+    (sdk_emission_entries! root source
+      (Enum/map beams (fn [beam] (tuple (elem beam 0) (File/read! (elem beam 1))))))
+    (fn [entry] (tuple (elem (elem entry 0) 1) (elem entry 1))))))
 
 (defn decode_sdk_image_metadata!
   "Pure decoding for the native metadata cache. No loading, evaluation, caller
@@ -3886,8 +4092,10 @@
                   (let [mod (elem loaded 0)]
                     (if (Map/has_key? inventory (Atom/to_string mod)) (cons mod out) out))))
         result
-    (loop [pending (erlang/++ (Map/keys (sdk_native_receipts)) roots)
-           seen (MapSet/new) out (Map/merge seed (sdk_native_receipts))]
+    ;; A checkout overlay's rows answer for the modules it compiled (U15).
+    (let [overlay (if (erlang/function_exported :Elixir.BeamLisp.Env :dev_sdk_rows 0) (BeamLisp.Env/dev_sdk_rows) {})]
+    (loop [pending (erlang/++ (Map/keys overlay) (erlang/++ (Map/keys (sdk_native_receipts)) roots))
+           seen (MapSet/new) out (Map/merge (Map/merge seed (sdk_native_receipts)) overlay)]
       (when (erlang/> (erlang/map_size out) 8192) (erlang/error :sdk_dependency_closure_too_large))
       (if (erlang/== pending (list)) out
         (let [mod (erlang/hd pending) rest (erlang/tl pending)]
@@ -3902,7 +4110,7 @@
                 (let [dependencies (Enum/uniq (erlang/++ (Map/get row :imports (list))
                                       (Map/values (or (Map/get row :forwarder-routes) {}))))]
                   (recur (erlang/++ dependencies rest) (MapSet/put seen mod)
-                         (Map/put out mod row)))))))))]
+                         (Map/put out mod row))))))))))]
     (assert_sdk_seed_snapshot! manifest)
     result))
 
@@ -5515,7 +5723,12 @@
     (if (and hit (erlang/== inputs hit))
       true
       (let [ready (sdk_preinit_floor_ready_uncached?)]
-        (when (erlang/== true ready) (persistent_term/put :bl_sdk_preinit_ready inputs))
+        ;; K1: the proof loads the modules it checks, so the inputs it started
+        ;; from (nil md5 for an unloaded module) never match again and the next
+        ;; library load ran the whole proof a second time (~50 ms of a cold
+        ;; start). Remember the TRUE answer under the inputs as they stand after
+        ;; the proof: exactly the loaded code it compared with the seeds.
+        (when (erlang/== true ready) (persistent_term/put :bl_sdk_preinit_ready (sdk_preinit_inputs)))
         ready))))
 
 (defn- sdk_preinit_inputs []

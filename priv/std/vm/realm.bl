@@ -37,21 +37,68 @@
   [vm]
   (index/start-for (:root vm) (:id vm) {:build false}))
 
+(def ^:private OPENED
+  "persistent_term key: {[root generation scope] → realm id} for realms opened
+   with a source generation. Written once per new generation, read per request."
+  (tuple :vm_realm :opened))
+
+(def ^:private OPENED-LIMIT 64)
+
+(defn- opened-key [root generation]
+  [(Path/expand root) generation (mgr/caller-scope-id)])
+
+(defn- reopen
+  "The fast path of `open` (F2): the realm this (root, generation, scope) last
+   opened, when the manager still holds it serving that generation. Equal
+   generation means the client saw the same project bytes, env.bl and
+   .env.local.bl included, so the spec, `observe-sources` (:current) and
+   `mgr/open` (the existing realm) would answer what they answered then. A
+   realm drained, closed, retired or moved to another generation since misses
+   and takes the locked path. The index owner is still ensured, as there.
+
+   Not covered by the generation: a git branch switch with identical bytes,
+   which `spec/read` folds into a realm's id (`instance-of`). The realm keeps
+   the id it was opened under until the bytes change or it is reopened."
+  [root generation]
+  (let [id (get (erlang/apply :persistent_term :get (list OPENED {})) (opened-key root generation))]
+    (when (some? id)
+      (let [vm (mgr/get-vm id)]
+        (when (and (some? vm)
+                   (not= :draining (:status vm))
+                   (= generation (:source-generation vm))
+                   (= (Path/expand root) (:root vm)))
+          (start-services! vm)
+          vm)))))
+
+(defn- remember-opened! [root generation vm]
+  (let [table (erlang/apply :persistent_term :get (list OPENED {}))
+        k (opened-key root generation)]
+    (when (not= (:id vm) (get table k))
+      (erlang/apply :persistent_term :put
+        (list OPENED (assoc (if (>= (count table) OPENED-LIMIT) {} table) k (:id vm)))))))
+
 (defn open
   "Open a project under its physical identity's lifecycle lock. A changed
    project retires its executed definitions while the compiler VM stays warm.
-   Pure document edits preserve an analyzer realm and its content cache."
+   Pure document edits preserve an analyzer realm and its content cache.
+
+   A request that carries the generation a realm was last opened under takes
+   `reopen` instead: no env.bl read, no lock, no manager turns but one."
   ([root] (open root nil))
   ([root generation]
-   (let [sp (cond-> (spec/read root) generation (assoc :source-generation generation))]
-    (global/trans (tuple (tuple :vm-realm-lifecycle (paths/fingerprint root)) (erlang/self))
-      (fn []
-        (when generation
-          (let [decision (mgr/observe-sources sp generation)]
-            (when (map? decision) (mgr/drain (:retire decision)))))
-        (let [r (mgr/open sp)]
-          (start-services! (:vm r))
-          (:vm r)))))))
+   (or (when generation (reopen root generation))
+    (let [sp (cond-> (spec/read root) generation (assoc :source-generation generation))
+          vm (global/trans (tuple (tuple :vm-realm-lifecycle (paths/fingerprint root)) (erlang/self))
+               (fn []
+                 (when generation
+                   (let [decision (mgr/observe-sources sp generation)]
+                     (when (map? decision) (mgr/drain (:retire decision)))))
+                 (let [r (mgr/open sp)]
+                   (start-services! (:vm r))
+                   (:vm r))))]
+      (when (and generation (map? vm) (= generation (:source-generation vm)))
+        (remember-opened! root generation vm))
+      vm))))
 
 (defn close
   "Drain this realm under the same lifecycle fence as open. Other realms keep

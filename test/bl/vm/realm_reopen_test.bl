@@ -1,0 +1,85 @@
+; realm_reopen_test.bl — `realm/open` with a generation it already opened under.
+;
+; A warm checkout request carries the client's project generation. `realm/open`
+; remembers which realm a (root, generation, scope) opened and, while the manager
+; still holds that realm serving that generation, answers it without reading
+; env.bl, taking the lifecycle lock or the manager's open/observe turns (F2).
+; Anything else takes the locked path, exactly as before.
+; Run: bin/bl test test/bl/vm/realm_reopen_test.bl
+
+(ns vm.realm-reopen-test
+ (:require [vm.realm :as realm] [vm.manager :as mgr] [vm.index :as index]))
+
+(defn- fixture [label]
+  (let [root (str (System/tmp_dir!) "/realm-reopen-" label "-" (erlang/unique_integer (list :positive)))]
+    (File/mkdir_p! root)
+    (File/write! (str root "/env.bl") (str "{:name \"reopen-" label "\" :paths []}"))
+    (mgr/start)
+    root))
+
+(deftest the-same-generation-reopens-the-same-realm
+  (let [root (fixture "same")]
+    (try
+      (let [opened (realm/open root "g1")
+            again (realm/open root "g1")]
+        (is (= (:id opened) (:id again)))
+        (is (= (:env opened) (:env again)))
+        (is (= "g1" (:source-generation again))))
+      ;; Within one generation env.bl is the bytes the client saw. A changed
+      ;; file under the same token is not something a client sends; the reopen
+      ;; answers what that generation opened, without reading the file.
+      (File/write! (str root "/env.bl") "{:name \"reopen-renamed\" :paths []}")
+      (is (= (:id (realm/open root "g1")) (:id (realm/open root "g1"))))
+      (is (not= "reopen-renamed" (first (String/split (:id (realm/open root "g1")) "@"))))
+      ;; A new generation reads the spec again.
+      (let [next (realm/open root "g2")]
+        (is (= "g2" (:source-generation next)))
+        (is (= "reopen-renamed" (first (String/split (:id next) "@")))
+            "a new generation opens under the spec it reads"))
+      (finally (realm/close root) (File/rm_rf! root)))))
+
+(deftest a-closed-realm-is-opened-again
+  (let [root (fixture "closed")]
+    (try
+      (let [opened (realm/open root "g1")]
+        (realm/close root)
+        (is (nil? (mgr/get-vm (:id opened))))
+        (let [again (realm/open root "g1")]
+          (is (some? (mgr/get-vm (:id again))) "the remembered id was closed; the locked path opens a live realm")
+          (is (not= (:env opened) (:env again)))))
+      (finally (realm/close root) (File/rm_rf! root)))))
+
+(deftest a-retired-generation-is-not-reopened
+  (let [root (fixture "retired")]
+    (try
+      (let [opened (realm/open root "g1")]
+        (mgr/run (:id opened) (fn [] (BeamLisp.Env/put_key (tuple "realm.reopen-executed" "value") 1)))
+        (let [second (realm/open root "g2")]
+          (is (not= (:env opened) (:env second)) "executed code under g1 retires on g2")
+          (let [back (realm/open root "g1")]
+            (is (not= (:env opened) (:env back)) "g1's remembered realm is gone; it is not answered")
+            (is (= "g1" (:source-generation back))))))
+      (finally (realm/close root) (File/rm_rf! root)))))
+
+(deftest a-reopen-still-ensures-the-index-owner
+  (let [root (fixture "index")]
+    (try
+      (realm/open root "g1")
+      (let [owner (index/owner-pid root)]
+        (is (erlang/is_pid owner))
+        (index/stop-for root)
+        (is (nil? (index/owner-pid root)))
+        (realm/open root "g1")
+        (is (erlang/is_pid (index/owner-pid root)) "the fast path starts a missing owner, as the locked path does"))
+      (finally (realm/close root) (File/rm_rf! root)))))
+
+(deftest no-generation-always-takes-the-locked-path
+  (let [root (fixture "nogen")]
+    (try
+      (let [with-gen (realm/open root "g1")
+            plain (realm/open root)]
+        (is (= (:id with-gen) (:id plain)))
+        (is (= (:env with-gen) (:env plain)) "the locked path finds the realm the generation opened"))
+      (finally (realm/close root) (File/rm_rf! root)))))
+
+(run-tests)
