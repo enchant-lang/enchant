@@ -3217,6 +3217,123 @@
       (when (and (erlang/is_map proof) (erlang/== expected digest))
         proof))))
 
+;; ---------------------------------------------------------------------------
+;; K1: the image's unit metadata, sealed by the producer (U8 generalized).
+;;
+;; `decode_sdk_image_metadata!` is pure over an artifact's bytes and its
+;; `sdk-code.term` row: imports, forwarder routes (a disassembly), callable and
+;; declaration attributes, lambda tables, binding routes. A cold start decoded
+;; every image unit its SDK closure touched, after reading and hashing the file.
+;; The producer now runs the same decoder once per row in `do-prime` and writes
+;; `priv/image-metadata.term`; an immutable image reads that table once.
+;;
+;; The reader takes a row only when:
+;;   1. the table lies under /nix/store/ (with the artifacts and the inventory
+;;      it was derived from: one immutable, content-addressed image root);
+;;   2. the table names this compiler key and this module's MD5, the decoder;
+;;   3. the entry's `:sha256` equals the caller's row `:sha256` and its `:row`
+;;      equals the sha256 of the caller's whole row, so the sealed decode is
+;;      the decode of exactly this row and these bytes.
+;; Executable checks do not move: `image_sdk_entry!` still loads the module
+;; and every retention compares its live MD5 with the row; forwarders still
+;; pass `Env/sdk_forwarder_current?`. A writable image never reads the table.
+
+(defn image_metadata_table_path
+  "Where the producer seals the image unit metadata: beside `sdk-code.term`."
+  [priv-root]
+  (Path/join priv-root "image-metadata.term"))
+
+(defn- image_row_digest [row]
+  (crypto/hash :sha256 (erlang/term_to_binary row (list :deterministic))))
+
+(defn image_metadata_table
+  "The sealed table's content for the image at `priv-root`: one entry per
+   `sdk-code.term` row whose artifact exists and whose bytes match the row,
+   holding the term `decode_sdk_image_metadata!` returns. Pure producer data;
+   the test compares it with an in-VM decode."
+  [priv-root]
+  (let [root (physical_sdk_path priv-root)
+        inventory (decode_sdk_inventory! (File/read! (Path/join root "sdk-code.term")))
+        rows (Enum/reduce inventory {}
+               (fn [entry acc]
+                 (let [identity (elem entry 0) row (elem entry 1)
+                       path (sdk_image_artifact_path root identity)]
+                   (if-not (File/regular? path) acc
+                     (let [bytes (File/read! path)]
+                       (if-not (erlang/== (crypto/hash :sha256 bytes) (Map/get row :sha256)) acc
+                         (let [decoded (try (decode_sdk_image_metadata! identity row bytes)
+                                            (catch _ nil))]
+                           (if (erlang/== nil decoded) acc
+                             (Map/put acc identity
+                               {:sha256 (Map/get row :sha256) :row (image_row_digest row)
+                                :decoded (erlang/term_to_binary decoded (list :deterministic))})))))))))]
+    {:version 1 :compiler-key (BeamLisp.AOTCache/compiler_key)
+     :decoder (erlang/apply :Elixir.BeamLisp.AOT :module_info (list :md5))
+     :rows rows}))
+
+(defn prime_image_metadata!
+  "Producer: seal every image unit's decoded metadata in
+   `priv/image-metadata.term`. Uncompressed, so a reader's one decode of the
+   outer map leaves each entry a sub-binary until that unit is used.
+   Deterministic bytes. Returns the row count."
+  [priv-root]
+  (let [table (image_metadata_table priv-root)]
+    (File/write! (image_metadata_table_path priv-root)
+                 (erlang/term_to_binary table (list :deterministic)))
+    (erlang/map_size (Map/get table :rows))))
+
+(defn valid_image_table?
+  "Whether a decoded image table may be used: version, compiler key, this
+   decoder's MD5, a bounded row map. Pure."
+  [decoded]
+  (and (erlang/is_map decoded)
+       (erlang/== 1 (Map/get decoded :version))
+       (erlang/== (BeamLisp.AOTCache/compiler_key) (Map/get decoded :compiler-key))
+       (erlang/== (erlang/apply :Elixir.BeamLisp.AOT :module_info (list :md5))
+                  (Map/get decoded :decoder))
+       (erlang/is_map (Map/get decoded :rows))
+       (erlang/=< (erlang/map_size (Map/get decoded :rows)) 32768)))
+
+(defn sealed_image_table_at
+  "Read and validate the image table at `path`, once per VM, when the path is
+   under /nix/store/; nil otherwise. Public for the test."
+  [path]
+  (if-not (and (immutable_root? path) (File/regular? path))
+    nil
+    (let [memo-key (tuple :Elixir.BeamLisp.AOT :sealed_image_table path)
+          hit (persistent_term/get memo-key nil)]
+      (if hit
+        (elem hit 0)
+        (let [table (try
+                      ;; Not :safe: the table is producer output inside the
+                      ;; same immutable root as the artifacts, and its decoded
+                      ;; rows name functions of modules not loaded yet.
+                      (let [decoded (erlang/binary_to_term (File/read! path))]
+                        (when (valid_image_table? decoded) decoded))
+                      (catch _ nil))]
+          (persistent_term/put memo-key (tuple table))
+          table)))))
+
+(defn sealed_image_metadata
+  "The sealed `{module, metadata}` decode of `identity` for exactly `row`, or
+   nil (no immutable table, another row, other bytes). A nil only costs the
+   caller its decode."
+  [identity row]
+  (when (and (erlang/is_binary identity) (erlang/is_map row))
+    (let [table (sealed_image_table_at
+                  (image_metadata_table_path (physical_sdk_path (BeamLisp.Tiers/priv_root))))
+          entry (when table (Map/get (Map/get table :rows) identity))]
+      (when (and (erlang/is_map entry)
+                 (erlang/is_binary (Map/get row :sha256))
+                 (erlang/== (Map/get row :sha256) (Map/get entry :sha256))
+                 (erlang/== (image_row_digest row) (Map/get entry :row)))
+        (let [decoded (try (erlang/binary_to_term (Map/get entry :decoded)) (catch _ nil))]
+          (when (and (erlang/is_tuple decoded) (erlang/== 2 (erlang/tuple_size decoded))
+                     (erlang/is_atom (elem decoded 0))
+                     (erlang/== identity (Atom/to_string (elem decoded 0)))
+                     (erlang/is_map (elem decoded 1)))
+            decoded))))))
+
 (defn- seed_artifact_metadata! [mod name expected]
   ;; Cache byte-derived data, never a blanket authorization. Every caller must
   ;; separately compare live code or validate protected forwarder routes.
