@@ -57,6 +57,10 @@ per batch, and runs the gate tests.** A card is ✅ only after that gate.
 - **Stop VMs you start.** Use `$MAIN/bin/bl realm stop` from the directory
   that started one.
 
+- **Retained worktrees (2026-11-23).** Both are owned by the integrator.
+  - `.claude/worktrees/integration`: the gate tree for each batch.
+  - `.claude/worktrees/lane-cerl`: branch `lane/native-front`, merged. Its untracked `.qualify-out/` (4.4 GB) holds N2b's runs and `kernel-2.etf`, which N3 reuses. Retire it when N3 has its own kernel capture on the current SDK.
+
 ### The inner loop, per tree (measured 2026-11-22)
 
 | You changed | Check it inside, like this | Cost |
