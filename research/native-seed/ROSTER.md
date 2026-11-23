@@ -375,19 +375,27 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   `stage.bl`'s `nf-unit` was missing a `)`; the native reader reads the whole
   file before evaluating, so the `:unterminated-collection` diagnostic (the
   12-key raised map) came before any output.
-- **Measured (2026-11-23, SDK `ll0kiray…`, 667 units, run `nf-e`).** 516
-  identical (1883 modules + 18 generated), 79 descriptor-differs, 72 staging
-  refusals. The differs: 69 × `[:clauses 0 :ann :line]`, every one a unit with
-  more than 32 definitions: body-module clause order follows map iteration, and
-  the BEAM's large maps iterate in HAMT hash order while the native map is
-  sorted (a native HAMT order is the fix); 3 × a `:private false` meta key
-  from the native image's own Core metadata (`clojure.core-ext`, `clojure.re`
-  install into Core); 7 others. The refusals: 52 × generated-module MD5
-  (fixed after `nf-e` by the custody MD5 stand-in; see run `nf-f`), 19 ×
-  `value is not callable` (`formal.*`, `reload.*`), 1 × dependency-not-ready.
-- **Next.** Native HAMT iteration order for maps over 32 keys (the biggest
-  lever, 69 units); the 19 `formal.*`/`reload.*` callable failures; then the
-  per-reason list under 5%.
+- **Measured (2026-11-23, SDK `ll0kiray…`, all 667 units, run `nf-h`).**
+  Native staging 647/667 (722 s on Chez); compare (1015 s on the BEAM):
+  **550 identical** (82.5%: descriptors `=:=`, every module's beam from native
+  Core byte-equal). The 117 others, by reason (`front-end/reasons.py`):
+  - 83 clause order: every one a unit with more than 32 definitions. Body
+    clauses follow map iteration; the BEAM's large maps iterate in HAMT hash
+    order, the native map in key order. Fix: native HAMT order (erts internal
+    hash) for maps over 32 keys.
+  - 19 `value is not callable` (`formal.*`, `reload.*`, `veritas.ledger`):
+    a nil callee inside the unit's private view. Likely `constructor_unit!`
+    masking Core rows to nil for names outside the kernel values, which the
+    natively *evaluated* aot.bl then reads through Env (on the BEAM, compiled
+    host code never reads them).
+  - 11 generated-module MD5: custody's MD5 of the unit-store beam differs from
+    the BEAM's fresh `compile_unit`; needs the N2/N3 round trip (the BEAM
+    compiles the native generated Core and answers its MD5).
+  - 3 `:private false` in a meta literal from the native image's own Core
+    metadata (`clojure.core-ext`, `clojure.re`, `clojure.string`).
+  - 1 `:sdk-stage-dependency-not-ready` (`live.edit.standard`).
+- **Next.** Native HAMT order (83 units), the masked-Core callee (19); then
+  11 + 3 + 1 = 15 units (2.2%) remain, each a named reason.
 - **Done when.** Same as N2's front half: per-unit Core `=` the BEAM's, or a
   named reason, for under 5% of SDK units.
 
