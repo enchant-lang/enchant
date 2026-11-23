@@ -3040,6 +3040,174 @@
           (if (erlang/function_exported :Elixir.BeamLisp.Env :cache_source_seed_metadata! 2)
            (BeamLisp.Env/cache_source_seed_metadata! sha metadata) metadata)))))))))
 
+(defn- seed_artifact_derivation!
+  "The one derivation of a seed's byte-derived proof: role, executable surface,
+   imports, MD5/SHA-256 and compiler key, computed from the actual artifact bytes
+   and `expected`, the manifest's digest for that file. Both the in-VM decode
+   (`seed_artifact_metadata!`) and the producer's sealed table
+   (`seed_metadata_table`) call exactly this, which is what makes the sealed
+   rows interchangeable with a decode. It caches byte-derived data, never a
+   blanket authorization; every caller still compares live code or validates
+   protected forwarder routes."
+  [mod name expected bytes compiler-key]
+  (let [sha (crypto/hash :sha256 bytes) hex (String/downcase (Base/encode16 sha))
+        md5 (elem (elem (beam_lib/md5 bytes) 1) 1)]
+    (when-not (= expected hex) (erlang/error :sdk_bootstrap_artifact_changed))
+    (Map/merge {:role :stable-seed :seed? true
+                ;; Canonical compiler data is read from authenticated bytes,
+                ;; never by executing an extensible live Core shim.
+                :phase-library
+                  (normalized_attribute
+                    (Keyword/get (elem (elem (beam_lib/chunks bytes (list :attributes)) 1) 1) :attributes)
+                    :bl_aot_phase_library)
+                :kernel-definitions (when (= mod :Elixir.BeamLisp.Ns.Core)
+                                      (sdk_stage_literal_definitions! mod bytes))
+                :ctor-lambda-origins (sdk_record_ctor_origins! mod bytes) :md5 md5 :sha256 sha
+                :compiler-key compiler-key
+                :imports (Enum/uniq (Enum/map
+                  (Keyword/get (elem (elem (beam_lib/chunks bytes (list :imports)) 1) 1) :imports)
+                  (fn [import] (elem import 0))))}
+      (Map/merge (or (seed_forwarder_metadata mod bytes) {}) (sdk_seed_lambda_origin bytes)))))
+
+;; ── the producer's sealed seed table ───────────────────────────────────────
+;;
+;; Decoding a seed reads and hashes its bytes, then derives imports, MD5, role,
+;; declarations, forwarder routes and lambda origins from them. A cold start does
+;; that for the seeds it loads (95 of them, measured at 5.2% of running samples).
+;; The bytes are sealed: they ship beside the manifest whose `modules` map names
+;; their digests. So the producer derives the same rows once, at build time, and
+;; the runtime reuses them.
+;;
+;; AUTHORITY IS UNCHANGED, and it rests on three checks the reader makes:
+;;   1. The table and the seeds live under one immutable image root (a
+;;      content-addressed read-only /nix/store path). Its bytes are what the
+;;      producer wrote, exactly as the seed bytes and the manifest beside them
+;;      are; a writable checkout or drop never uses the table and decodes.
+;;   2. The table names the compiler key and the MD5 of this module, the code
+;;      that performed the derivation; a table written by other code is ignored.
+;;   3. Each row's `:sha-hex` must equal the manifest's digest for that seed —
+;;      the SAME string `seed_artifact_metadata!` compares with the sha256 of the
+;;      bytes it just read. A row that disagrees is not used; the caller decodes.
+;; The digest of the table file itself is computed once per VM and keys the
+;; memo, so a replaced table can never be read through a stale entry. What the
+;; reader gives up is re-demonstrating that the derivation is a function of the
+;; bytes; in a sealed image that demonstration is the publisher's, and the
+;; executable checks stay where they were: `seed_artifact_proof` still compares
+;; the proof's MD5 with the live module's, and forwarder rows still go through
+;; `Env/sdk_forwarder_current?` against published native routes.
+
+(defn- immutable_root? [path]
+  (String/starts_with? path "/nix/store/"))
+
+(defn seed_metadata_table_path
+  "Where the producer seals the seed rows: `priv/seed-metadata.term`, beside the
+   `bootstrap/seed` directory it describes."
+  [priv-root]
+  (Path/join priv-root "seed-metadata.term"))
+
+(defn seed_metadata_table
+  "The sealed table's content for the seed directory `seed-dir`, as the running
+   image would read it: one row per manifest module whose beam exists, holding
+   the digest the manifest names and the proof `seed_artifact_metadata!` derives.
+   Pure producer data; called by `prime_seed_metadata!` and by the test that
+   compares it with an in-VM decode. Rows are term-for-term identical to a decode
+   because both run `seed_artifact_derivation!` on the same bytes."
+  [seed-dir]
+  (let [key (BeamLisp.AOTCache/compiler_key)
+        manifest (BeamLisp.Bootstrap/read_manifest! (Path/join seed-dir "manifest.term"))
+        _ (when-not (and manifest (erlang/== key (Map/get manifest "compiler_key")))
+            (erlang/error :stale_sdk_bootstrap_inventory))
+        rows (Enum/reduce (Map/fetch! manifest "modules") {} 
+               (fn [entry acc]
+                 (let [name (elem entry 0) expected (elem entry 1)
+                       mod (try (String/to_existing_atom (Path/basename name ".beam")) (catch _ nil))]
+                   (if (or (erlang/== nil mod) (erlang/== nil expected)
+                           (erlang/not (File/regular? (Path/join seed-dir name))))
+                     acc
+                     (let [bytes (File/read! (Path/join seed-dir name))
+                           proof (seed_artifact_derivation! mod name expected bytes key)]
+                       ;; Each proof is its own term, so reading the table does
+                       ;; not decode proofs for seeds this VM never loads.
+                       (Map/put acc name {:sha-hex expected
+                                          :proof (erlang/term_to_binary proof (list :deterministic))}))))))]
+    ;; `:version` is the table format; a reader that does not know it decodes.
+     {:version 1 :compiler-key key
+     :decoder (erlang/apply :Elixir.BeamLisp.AOT :module_info (list :md5))
+     :rows rows}))
+
+(defn prime_seed_metadata!
+  "Producer: derive every seed's proof now and seal it in `priv/seed-metadata.term`
+   so a VM that starts against this immutable image need not decode the seeds it
+   loads. Returns the row count. Deterministic bytes: the same inputs produce the
+   same file, as the image's fixpoint gate requires."
+  [priv-root]
+  (let [seed-dir (Path/join priv-root "bootstrap/seed")
+        table (seed_metadata_table seed-dir)
+        destination (seed_metadata_table_path priv-root)]
+    (File/write! destination (erlang/term_to_binary table (list :deterministic (tuple :compressed 1))))
+    (erlang/map_size (Map/get table :rows))))
+
+(defn valid_seed_table?
+  "Whether a decoded table may be used by this VM: the version, the compiler key
+   and the MD5 of this module (the code that derives rows), a bounded row map.
+   Pure, so the test can exercise it without an immutable image."
+  [decoded]
+  (and (erlang/is_map decoded)
+       (erlang/== 1 (Map/get decoded :version))
+       (erlang/== (BeamLisp.AOTCache/compiler_key) (Map/get decoded :compiler-key))
+       (erlang/== (erlang/apply :Elixir.BeamLisp.AOT :module_info (list :md5))
+                  (Map/get decoded :decoder))
+       (erlang/is_map (Map/get decoded :rows))
+       (erlang/=< (erlang/map_size (Map/get decoded :rows)) 512)))
+
+(defn sealed_seed_table_at
+  "Read and validate the table at `path` when `immutable?`, else nil. The file's
+   digest keys a per-VM memo, so a replaced table is re-read, never served from
+   an older entry. Public so the test can point it at a table it wrote; the
+   reader passes the immutable-root answer and never a caller's."
+  [path immutable?]
+  (if-not (and immutable? (File/regular? path))
+    nil
+    (let [digest (crypto/hash :sha256 (File/read! path))
+          memo-key (tuple :Elixir.BeamLisp.AOT :sealed_seed_table path)
+          hit (persistent_term/get memo-key nil)]
+      (if (and hit (erlang/== digest (elem hit 0)))
+        (elem hit 1)
+        (let [table
+              (try
+                (let [decoded (erlang/binary_to_term (File/read! path) (list :safe))]
+                  (when (valid_seed_table? decoded) decoded))
+                (catch _ nil))]
+          (persistent_term/put memo-key (tuple digest table))
+          table)))))
+
+(defn- sealed_seed_table
+  "The sealed table for THIS image, or nil. Read and validated once per VM. Nil
+   for any root that is not immutable (a checkout, a writable drop), any table
+   that names other code or keys, and any malformed table — the caller then
+   decodes, exactly as it did before tables existed."
+  []
+  (let [priv (BeamLisp.Tiers/priv_root)
+        seed-dir (BeamLisp.Bootstrap/seed_dir)
+        path (seed_metadata_table_path priv)]
+    (sealed_seed_table_at path
+      (and (immutable_root? path) (immutable_root? seed-dir)))))
+
+(defn seed_metadata_sealed
+  "The sealed proof for `name`, or nil when there is no usable table or the row
+   is not the one this seed's manifest digest names. Pure data check: a nil
+   answer can only cost a decode, never grant anything."
+  [table name expected]
+  (when (and (erlang/is_map table) (erlang/is_binary name) (erlang/is_binary expected))
+    (let [row (Map/get (Map/get table :rows {}) name)
+          encoded (when (erlang/is_map row) (Map/get row :proof))
+          proof (when (and (erlang/is_binary encoded) (erlang/== expected (Map/get row :sha-hex)))
+                  (try (erlang/binary_to_term encoded (list :safe)) (catch _ nil)))
+          sha (when (erlang/is_map proof) (Map/get proof :sha256))
+          digest (when (erlang/is_binary sha) (String/downcase (Base/encode16 sha)))]
+      (when (and (erlang/is_map proof) (erlang/== expected digest))
+        proof))))
+
 (defn- seed_artifact_metadata! [mod name expected]
   ;; Cache byte-derived data, never a blanket authorization. Every caller must
   ;; separately compare live code or validate protected forwarder routes.
@@ -3049,27 +3217,13 @@
         hit (persistent_term/get key nil)]
     (if (and hit (= expected (Map/get hit :sha-hex)))
       (Map/get hit :proof)
-      (let [bytes (File/read! (Path/join (BeamLisp.Bootstrap/seed_dir) name))
-            sha (crypto/hash :sha256 bytes) hex (String/downcase (Base/encode16 sha))
-            md5 (elem (elem (beam_lib/md5 bytes) 1) 1)]
-        (when-not (= expected hex) (erlang/error :sdk_bootstrap_artifact_changed))
-        (let [proof (Map/merge {:role :stable-seed :seed? true
-                                ;; Canonical compiler data is read from authenticated bytes,
-                                ;; never by executing an extensible live Core shim.
-                                :phase-library
-                                  (normalized_attribute
-                                    (Keyword/get (elem (elem (beam_lib/chunks bytes (list :attributes)) 1) 1) :attributes)
-                                    :bl_aot_phase_library)
-                                :kernel-definitions (when (= mod :Elixir.BeamLisp.Ns.Core)
-                                                      (sdk_stage_literal_definitions! mod bytes))
-                                :ctor-lambda-origins (sdk_record_ctor_origins! mod bytes) :md5 md5 :sha256 sha
-                                :compiler-key (BeamLisp.AOTCache/compiler_key)
-                                :imports (Enum/uniq (Enum/map
-                                  (Keyword/get (elem (elem (beam_lib/chunks bytes (list :imports)) 1) 1) :imports)
-                                  (fn [import] (elem import 0))))}
-                      (Map/merge (or (seed_forwarder_metadata mod bytes) {}) (sdk_seed_lambda_origin bytes)))]
-          (persistent_term/put key {:sha-hex hex :proof proof})
-          proof)))))
+      (let [sealed (seed_metadata_sealed (sealed_seed_table) name expected)]
+        (if sealed
+          (do (persistent_term/put key {:sha-hex expected :proof sealed}) sealed)
+          (let [bytes (File/read! (Path/join (BeamLisp.Bootstrap/seed_dir) name))
+                proof (seed_artifact_derivation! mod name expected bytes (BeamLisp.AOTCache/compiler_key))]
+            (persistent_term/put key {:sha-hex expected :proof proof})
+            proof))))))
 
 (defn- seed_artifact_proof [mod name expected]
   ;; A source unit may supersede a seed. Its independently authenticated source

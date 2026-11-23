@@ -1,0 +1,121 @@
+(ns seed.metadata-table-test)
+
+;; The producer seals one proof per seed in `priv/seed-metadata.term`, and an
+;; immutable image reuses those rows instead of deriving them again. The rows
+;; are only interchangeable if the sealed derivation and the in-VM decode agree
+;; term for term; these tests pin that, the row check against the manifest
+;; digest, and the refusal of any table this VM's code did not write.
+
+(def ^:private seed-dir (BeamLisp.Bootstrap/seed_dir))
+
+(def ^:private scratch
+  (fn [] (Path/join (System/tmp_dir!) (str "bl-seed-metadata-" (erlang/unique_integer (list :positive))))))
+
+(deftest sealed-rows-equal-an-in-vm-decode
+ (let [table (BeamLisp.AOT/seed_metadata_table seed-dir)
+       rows (:rows table)
+       manifest (BeamLisp.Bootstrap/manifest)]
+  (is (= 1 (:version table)))
+  (is (= (BeamLisp.AOTCache/compiler_key) (:compiler-key table)))
+  (is (= (erlang/apply :Elixir.BeamLisp.AOT :module_info (list :md5)) (:decoder table)))
+  (is (> (erlang/map_size rows) 50))
+  ;; Every row the manifest names with an existing beam is present and equals
+  ;; the decode of those exact bytes; every row's digest is the manifest's.
+  (Enum/each (Map/to_list (Map/fetch! manifest "modules"))
+   (fn [entry]
+    (let [name (elem entry 0) expected (elem entry 1)
+          mod (try (String/to_existing_atom (Path/basename name ".beam")) (catch _ nil))]
+     (when (and mod (File/regular? (Path/join seed-dir name)))
+      (let [row (Map/get rows name)
+            decoded (BeamLisp.AOT/seed_artifact_metadata! mod name expected)]
+       (is (map? row) name)
+       (is (= expected (:sha-hex row)) name)
+       (is (= decoded (erlang/binary_to_term (:proof row) (list :safe))) name)
+       (is (= expected (String/downcase (Base/encode16 (:sha256 decoded)))) name))))))
+  ;; The reader's data path hands back exactly that proof for the manifest row.
+  (let [name "Elixir.BeamLisp.Ns.Core.beam"
+        expected (Map/get (Map/fetch! manifest "modules") name)
+        sealed (BeamLisp.AOT/seed_metadata_sealed table name expected)]
+   (is (= (BeamLisp.AOT/seed_artifact_metadata! :Elixir.BeamLisp.Ns.Core name expected) sealed)))))
+
+(deftest a-row-that-is-not-the-manifest-digest-is-not-used
+ (let [table (BeamLisp.AOT/seed_metadata_table seed-dir)
+       name "Elixir.BeamLisp.Ns.Core.beam"
+       expected (Map/get (Map/fetch! (BeamLisp.Bootstrap/manifest) "modules") name)]
+  (is (map? (BeamLisp.AOT/seed_metadata_sealed table name expected)))
+  (is (nil? (BeamLisp.AOT/seed_metadata_sealed table name (crypto/hash :sha256 "other"))))
+  (is (nil? (BeamLisp.AOT/seed_metadata_sealed table "Elixir.BeamLisp.Absent.beam" expected)))
+  ;; A row whose proof names other bytes is refused even when its sha-hex matches.
+  (let [rows (:rows table)
+        row (Map/get rows name)
+        forged (Map/put table :rows
+                 (Map/put rows name (Map/put row :proof
+                   (erlang/term_to_binary
+                     (Map/put (erlang/binary_to_term (:proof row) (list :safe))
+                              :sha256 (crypto/hash :sha256 "other"))))))]
+   (is (nil? (BeamLisp.AOT/seed_metadata_sealed forged name expected))))))
+
+(deftest a-table-written-by-other-code-is-refused
+ (let [table (BeamLisp.AOT/seed_metadata_table seed-dir)
+       key (BeamLisp.AOTCache/compiler_key)]
+  (is (BeamLisp.AOT/valid_seed_table? table))
+  (is (not (BeamLisp.AOT/valid_seed_table? (Map/put table :version 2))))
+  (is (not (BeamLisp.AOT/valid_seed_table? (Map/put table :compiler-key "stale"))))
+  (is (not (BeamLisp.AOT/valid_seed_table? (Map/put table :decoder (crypto/hash :sha256 "other")))))
+  (is (not (BeamLisp.AOT/valid_seed_table? (Map/put table :rows (list)))))
+  (is (not (BeamLisp.AOT/valid_seed_table? :not-a-table)))
+  (is (= key (:compiler-key table)))))
+
+(deftest the-producer-writes-the-same-bytes-twice
+ (let [root (scratch) priv (Path/join root "priv") seeds (Path/join priv "bootstrap/seed")]
+  (try
+   (File/mkdir_p! seeds)
+   ;; Only the seed files the table describes are needed.
+   (Enum/each (Map/keys (:rows (BeamLisp.AOT/seed_metadata_table seed-dir)))
+    (fn [name] (File/write! (Path/join seeds name) (File/read! (Path/join seed-dir name)))))
+   (File/write! (Path/join seeds "manifest.term") (File/read! (Path/join seed-dir "manifest.term")))
+   (let [count (BeamLisp.AOT/prime_seed_metadata! priv)
+         path (BeamLisp.AOT/seed_metadata_table_path priv)
+         first-bytes (File/read! path)]
+    (is (> count 50))
+    (is (<= (erlang/byte_size first-bytes) (* 8 1024 1024)))
+    (is (= count (BeamLisp.AOT/prime_seed_metadata! priv)))
+    (is (= first-bytes (File/read! path)))
+    (is (= (BeamLisp.AOT/seed_metadata_table seed-dir)
+           (erlang/binary_to_term first-bytes (list :safe)))))
+   (finally (File/rm_rf! root)))))
+
+(deftest a-written-table-is-read-once-and-a-replaced-one-is-seen
+ (let [root (scratch) priv (Path/join root "priv") seeds (Path/join priv "bootstrap/seed")]
+  (try
+   (File/mkdir_p! seeds)
+   (Enum/each (Map/keys (:rows (BeamLisp.AOT/seed_metadata_table seed-dir)))
+    (fn [name] (File/write! (Path/join seeds name) (File/read! (Path/join seed-dir name)))))
+   (File/write! (Path/join seeds "manifest.term") (File/read! (Path/join seed-dir "manifest.term")))
+   (let [path (BeamLisp.AOT/seed_metadata_table_path priv)
+         name "Elixir.BeamLisp.Ns.Core.beam"
+         expected (Map/get (Map/fetch! (BeamLisp.Bootstrap/manifest) "modules") name)]
+    (BeamLisp.AOT/prime_seed_metadata! priv)
+    ;; With the immutable answer the rows are served from the file.
+    (let [table (BeamLisp.AOT/sealed_seed_table_at path true)]
+     (is (map? table))
+     (is (= (BeamLisp.AOT/seed_artifact_metadata! :Elixir.BeamLisp.Ns.Core name expected)
+            (BeamLisp.AOT/seed_metadata_sealed table name expected))))
+    ;; A writing root, or a replaced table, never serves the older entry.
+    (is (nil? (BeamLisp.AOT/sealed_seed_table_at path false)))
+    (File/write! path "not a table")
+    (is (nil? (BeamLisp.AOT/sealed_seed_table_at path true))))
+   (finally (File/rm_rf! root)))))
+
+(deftest a-writable-root-is-never-read-through-the-sealed-table
+ ;; The reader's gate is the path prefix. This checkout (or the checker's
+ ;; scratch image) is not under /nix/store, so a table placed beside its seeds
+ ;; is ignored and the normal decode answers.
+ (let [path (BeamLisp.AOT/seed_metadata_table_path (BeamLisp.Tiers/priv_root))]
+  (is (not (String/starts_with? path "/nix/store/")))
+  (is (= (BeamLisp.AOT/seed_artifact_metadata! :Elixir.BeamLisp.Ns.Core
+            "Elixir.BeamLisp.Ns.Core.beam"
+            (Map/get (Map/fetch! (BeamLisp.Bootstrap/manifest) "modules") "Elixir.BeamLisp.Ns.Core.beam"))
+         (BeamLisp.AOT/seed_artifact_metadata! :Elixir.BeamLisp.Ns.Core
+            "Elixir.BeamLisp.Ns.Core.beam"
+            (Map/get (Map/fetch! (BeamLisp.Bootstrap/manifest) "modules") "Elixir.BeamLisp.Ns.Core.beam"))))))
