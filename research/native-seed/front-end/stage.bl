@@ -32,11 +32,15 @@
   (constructor_context_put! :core-rows (:core-rows kernel))
   (constructor_context_put! :kernel-core-forwarder true)
   (when (:cpp-rows kernel) (constructor_context_put! :cpp-rows (:cpp-rows kernel)))
+  ;; :kernel-values only masks Core rows when constructor_unit! stages Core's
+  ;; own source: names outside it become nil in the view. BEAM host code calls
+  ;; Core directly and never reads those rows; the evaluated aot.bl here reads
+  ;; them through the Env, so every Core declaration keeps its native value.
   (constructor_context_put! :kernel-values
    (reduce (fn [m name]
             (let [found (BeamLisp.Env/lookup (tuple "core" name))]
              (if (and (erlang/is_tuple found) (= :ok (elem found 0))) (assoc m name (elem found 1)) m)))
-           {} (:kernel-values kernel)))))
+           {} (distinct (concat (:kernel-values kernel) (keys (or (nf-source-decls "core") {}))))))))
 
 (defn- constructor_kernel_phase_state! []
  (let [context (constructor_context!)]
@@ -156,7 +160,11 @@
 (defn- nf-route-aot! []
  (doseq [[name arity f] [["sdk_constructor_binding_reference" 2 sdk_constructor_binding_reference]
                          ["staged_macro_kind" 2 staged_macro_kind]
-                         ["staged_macro_lookup" 2 staged_macro_lookup]
+                         ["staged_macro_lookup" 2 (if (= true (erlang/get :nf_trace))
+                                                   (fn [ns name] (let [r (staged_macro_lookup ns name)]
+                                                                  (when (= true (erlang/get :nf_trace_macros)) (println (str "NF-MACRO " ns " " name " " (pr-str (if (erlang/is_tuple r) [(elem r 0) (some? (elem r 1))] r)))))
+                                                                  r))
+                                                   staged_macro_lookup)]
                          ["sdk_constructor_declaration_kind" 2 sdk_constructor_declaration_kind]
                          ["sdk_declaration_kind" 2 sdk_declaration_kind]
                          ["constructor_call!" 5 constructor_call!]
@@ -262,7 +270,12 @@
  (let [doc (erlang/binary_to_term (host/read-bytes custody))
        rows (if only (filter #(contains? (set only) (:namespace %)) (:units doc)) (:units doc))]
   (when only (erlang/put :nf_trace true) (host/nf-trace! 12))
-  (nf-install-world! doc)
+  (nf-install-world!
+   (let [gen (str out "/generated-md5.etf")]
+    ;; Second pass of the generated-module round trip (front-end/generated-md5.bl).
+    (if (File/exists? gen)
+     (assoc doc :beam-md5s (merge (or (:beam-md5s doc) {}) (erlang/binary_to_term (host/read-bytes gen))))
+     doc)))
   (erlang/put :nf_doc doc)
   ;; The BEAM stages inside the SDK's own VM, where every SDK namespace exists:
   ;; `alias/name` then reads as a namespace var, never a Module/fun remote.

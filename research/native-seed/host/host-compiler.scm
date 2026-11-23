@@ -52,8 +52,10 @@
 (define native-macro-trace-start
  (if native-macro-trace-enabled? (time->seconds (current-time)) #f))
 ;; Inside a private Env view (Env/with_env on a forked env, the front end's
-;; constructor world) a sealed row may be shadowed: the row map holds the
-;; view's value until the view is destroyed, and the linked slot is untouched.
+;; constructor world) a row write stays in the view: the row map holds it
+;; until the view is destroyed, and no linked slot is republished, so linked
+;; code keeps calling what it called before (as BEAM code keeps calling its
+;; modules), and a sealed row may be shadowed.
 (define native-env-view-active? #f)
 (define (native-env-put! key value)
  (if (and native-image-sealed? (native-sealed-row? key) (not native-env-view-active?))
@@ -62,7 +64,7 @@
  (if (native-env-index-key? key) (table-set! native-env-index key value)
   ;; a row the index cannot hold might equal an indexed key: stop using it
   (set! native-env-index-exact? #f))
- (if (not (and native-env-view-active? (native-sealed-row? key))) (native-env-row-changed! key))
+ (if (not native-env-view-active?) (native-env-row-changed! key))
  (if (and native-macro-trace-enabled?
           (bl-tag? value 'tuple) (= (bl-count value) 2)
           (eq? (bl-nth value 0) (bl-key "$macro"))
@@ -142,12 +144,25 @@
  (let ((value (native-fetch-value ns name (if (and (pair? exact) (car exact)) #t #f))))
   (if (eq? value native-missing) (error "undefined native var" ns name) value)))
 
+;; Host code calls into BL through these two. Inside a private Env view they
+;; read the rows as they were when the view was forked: BEAM host code calls
+;; modules, so a view's masks (a staged namespace's names set to nil) never
+;; reach it.
+(define native-view-base-rows #f)
+(define (native-base-fetch! ns name exact)
+ (if (and native-env-view-active? native-view-base-rows)
+  (let ((rows native-env-rows) (indexed native-env-index-exact?))
+   (dynamic-wind
+    (lambda () (set! native-env-rows native-view-base-rows) (set! native-env-index-exact? #f))
+    (lambda () (native-fetch! ns name exact))
+    (lambda () (set! native-env-rows rows) (set! native-env-index-exact? indexed))))
+  (native-fetch! ns name exact)))
 (define (native-global ns name)
- (let ((value (native-fetch! ns name)))
+ (let ((value (if native-env-view-active? (native-base-fetch! ns name #f) (native-fetch! ns name))))
   (if (and (bl-tag? value 'tuple) (= (bl-count value) 2) (eq? (bl-nth value 0) (bl-key "$macro")))
    (bl-nth value 1) value)))
 (define (native-global-exact ns name)
- (let ((value (native-fetch! ns name #t)))
+ (let ((value (if native-env-view-active? (native-base-fetch! ns name #t) (native-fetch! ns name #t))))
   (if (and (bl-tag? value 'tuple) (= (bl-count value) 2) (eq? (bl-nth value 0) (bl-key "$macro")))
    (bl-nth value 1) value)))
 ;; Resolve the live EXACT canonical runtime when Enum consumes a deferred
@@ -492,7 +507,7 @@
   (native-sealed-refuse! (string-append (bl-nth key 0) "/" (bl-nth key 1))))
  (set! native-env-rows (native-map-remove native-env-rows key))
  (if (native-env-index-key? key) (table-set! native-env-index key))
- (native-env-row-changed! key) (bl-key "ok")))
+ (if (not native-env-view-active?) (native-env-row-changed! key)) (bl-key "ok")))
 (native-env-leaf! "intern" 3 native-intern)
 (native-env-leaf! "fetch" 2 native-fetch)
 (native-env-leaf! "fetch!" 2 native-fetch!)

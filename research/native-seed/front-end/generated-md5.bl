@@ -1,0 +1,29 @@
+; Card N2b: the BEAM's half of the generated-module round trip.
+;
+;   bl run research/native-seed/front-end/generated-md5.bl -- OUT
+;
+; A unit's initializer descriptor embeds the MD5 of each class/actor module
+; its plan generates, which only a BEAM compile of that module can answer. For
+; every native OUT/u/NS/G-I.core.etf this compiles the native Core exactly as
+; compare.bl does (lower/module->beam) and records {module md5} in
+; OUT/generated-md5.etf; the native front end's second pass reads it (the
+; round trip the native compile service will make per request).
+(ns native-front.generated-md5)
+
+(defn run [[out]]
+ (let [root (Path/join out "u")
+       rows (for [ns (File/ls! root)
+                  :let [dir (Path/join root ns)]
+                  f (File/ls! dir)
+                  :when (and (String/starts_with? f "G-") (String/ends_with? f ".desc.etf"))]
+              (let [desc (erlang/binary_to_term (File/read! (Path/join dir f)))
+                    core (erlang/binary_to_term (File/read! (Path/join dir (String/replace f ".desc.etf" ".core.etf"))))
+                    beam (elem (lower/module->beam core (get-in desc [:ann :file])) 1)
+                    md5 (elem (elem (beam_lib/md5 beam) 1) 1)]
+               [(:name desc) md5 ns]))
+       table (into {} (map (fn [[m d _]] [m d]) rows))]
+  (File/write! (Path/join out "generated-md5.etf") (erlang/term_to_binary table))
+  (File/write! (Path/join out "generated-units.txt") (apply str (map #(str % "\n") (distinct (map #(nth % 2) rows)))))
+  (println (str "GENERATED modules " (count table) " units " (count (distinct (map #(nth % 2) rows)))))))
+
+(run (vec (BeamLisp/argv)))

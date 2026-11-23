@@ -428,27 +428,41 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   `stage.bl`'s `nf-unit` was missing a `)`; the native reader reads the whole
   file before evaluating, so the `:unterminated-collection` diagnostic (the
   12-key raised map) came before any output.
-- **Measured (2026-11-23, SDK `ll0kiray…`, all 667 units, run `nf-h`).**
-  Native staging 647/667 (722 s on Chez); compare (1015 s on the BEAM):
-  **550 identical** (82.5%: descriptors `=:=`, every module's beam from native
-  Core byte-equal). The 117 others, by reason (`front-end/reasons.py`):
-  - 83 clause order: every one a unit with more than 32 definitions. Body
-    clauses follow map iteration; the BEAM's large maps iterate in HAMT hash
-    order, the native map in key order. Fix: native HAMT order (erts internal
-    hash) for maps over 32 keys.
-  - 19 `value is not callable` (`formal.*`, `reload.*`, `veritas.ledger`):
-    a nil callee inside the unit's private view. Likely `constructor_unit!`
-    masking Core rows to nil for names outside the kernel values, which the
-    natively *evaluated* aot.bl then reads through Env (on the BEAM, compiled
-    host code never reads them).
-  - 11 generated-module MD5: custody's MD5 of the unit-store beam differs from
-    the BEAM's fresh `compile_unit`; needs the N2/N3 round trip (the BEAM
-    compiles the native generated Core and answers its MD5).
+- **Measured (2026-11-23, SDK `nhrajw…`, all 667 units, run `nf-n`).**
+  Native staging 666/667 (745 s on Chez), generated-module round trip (47 s,
+  75 units restaged), compare 806 s: **663 identical (99.4%)**; 4 named
+  reasons (0.6%):
   - 3 `:private false` in a meta literal from the native image's own Core
-    metadata (`clojure.core-ext`, `clojure.re`, `clojure.string`).
+    metadata (`clojure.core-ext`, `clojure.re`, `clojure.string` install into
+    Core);
   - 1 `:sdk-stage-dependency-not-ready` (`live.edit.standard`).
-- **Next.** Native HAMT order (83 units), the masked-Core callee (19); then
-  11 + 3 + 1 = 15 units (2.2%) remain, each a named reason.
+  Previous run `nf-h`: 550. What closed the gap:
+  - *Map order (83 units).* Native maps iterate in the BEAM's order
+    (`host/host-values.scm`): over 32 keys, OTP 29's `erts_internal_hash`
+    (`erl_term_hashing.c`) and HAMT child order (4-bit hash digits, lowest
+    first); at most 32 keys, exact term order (tuples size first) when a key
+    is a tuple or list. Keys holding atoms, pids, ports or refs keep the native
+    order: the BEAM hashes their VM-local index. Checked directly:
+    `front-end/hamt-check.sh` over 405 maps (`hamt-keys.py`, seeds 7/11/13:
+    strings, small and big integers, floats, tuples, lists, byte lists,
+    mixtures; sizes 5–1000): **405/405 equal on Chez and the BEAM**.
+  - *`value is not callable` (19 units).* A staged namespace's names are
+    masked to nil inside the private view; native host code (the reader leaf)
+    read them through the Env. Host code now reads the rows the view was
+    forked from, and view writes republish no linked slot.
+  - *Generated-module MD5 (17 units).* `generated-md5.bl`: the BEAM compiles
+    the native generated Core and answers each MD5; a second native pass
+    restages those units with them (the round trip N3 will make per request).
+- **Speed.** `pair` reader job (8×8, 128 samples, byte-identical output), N2b
+  image `nf-f` vs this branch, load average 6–9: medians +0.9% to +4.3% over
+  seven rounds (`nf-n` 112.2→115.0, 111.4→114.6, 111.4→116.2, 112.3→113.3 ms;
+  `nf-o` 112.0→113.7, 113.3→115.1 ms), minima +0% to +3%. A first cut that
+  scanned every small map's keys measured +2.8%; the flatmap check now reads
+  the last key's rank first. The noise floor is about the same size: the
+  `nf-k` image (map order only) measured +0.7%, +1.3% and +2.6%.
+- **Derived image qualifies** 12/12 gates.
+- **Next.** The 3 Core-metadata units (the native image's own Core carries
+  `:private false` where the SDK's does not); `live.edit.standard`.
 - **Done when.** Same as N2's front half: per-unit Core `=` the BEAM's, or a
   named reason, for under 5% of SDK units.
 
