@@ -46,21 +46,131 @@
 (def PT-STARTED (tuple :vm_session :started-at))
 (def PT-RECORD (tuple :vm_session :record))
 (def PT-IDLE (tuple :vm_session :idle))
-(def PT-DRAINING (tuple :vm_session :draining))
 
-(defn- draining? [] (erlang/apply :persistent_term :get (list PT-DRAINING false)))
+;; ══ ONE VM, POSSIBLY MORE THAN ONE SESSION ═══════════════════════════════════
+;;
+;; A session's admission state belongs to the SESSION, not to the VM. The warm
+;; checkout VM is itself a session, and a test it runs may start another (the
+;; shared-VM and daemon tests do). A VM-global draining flag and a VM-global drain
+;; let that inner session's stop refuse every later request of the outer one, count
+;; the outer request that runs the test as its own pending work (so it never
+;; stopped), and close the outer session's realms under it.
+;;
+;; So each session has a key, bound in its connection processes (`PD-SESSION`), and
+;; a live entry (`PT-LIVE`): its counter cell (slot 1 the requests it accepted, slot
+;; 2 its draining flag), the realms its requests opened, and what it published. A
+;; bare `request-handler` call (no key bound) speaks for the session started last
+;; (`PT-CURRENT`). A session alone in its VM behaves exactly as before: it drains on
+;; the VM's in-flight count and closes every realm.
+(def PT-LIVE (tuple :vm_session :live))
+(def PT-CURRENT (tuple :vm_session :current))
+(def PD-SESSION :vm_session_key)
+(def LIVE-LOCK :vm_session_live)
+;; set by `bl.daemon/handle-in-vm` in the command's process: the realm it ran in
+(def REQUEST-REALM :vm_request_realm)
+
+(defn- live [] (erlang/apply :persistent_term :get (list PT-LIVE {})))
+
+(defn- update-live!
+  "Replace the live table with `(f table)` under one lock. Rare: a start, a stop,
+   or a session's first request in a realm it had not used."
+  [f]
+  (let [lock (tuple LIVE-LOCK (erlang/self)) nodes (to-list [(erlang/node)])]
+    (erlang/apply :global :set_lock (list lock nodes))
+    (try (erlang/apply :persistent_term :put (list PT-LIVE (f (live))))
+      (finally (erlang/apply :global :del_lock (list lock nodes))))))
+
+(defn- session-key
+  "The session this process serves: the one its connection bound, else the one
+   started last."
+  []
+  (let [k (erlang/get PD-SESSION)]
+    (if (= k :undefined) (erlang/apply :persistent_term :get (list PT-CURRENT nil)) k)))
+
+(defn- cell [k] (:cell (get (live) k)))
+
+(defn- draining?
+  "Whether session `k` refuses new requests. A key whose session is gone refuses
+   (its listener closed under a request that had not been read yet); no session at
+   all does not."
+  [k]
+  (let [c (cell k)]
+    (if (some? c) (= 1 (erlang/apply :atomics :get (list c 2))) (some? k))))
+
+(defn- set-draining! [k on]
+  (when-let [c (cell k)] (erlang/apply :atomics :put (list c 2 (if on 1 0)))))
+
+(defn- pending-requests
+  "Requests in flight that session `k` must wait for: every request the VM counts
+   (`idle/running`) except those another live session accepted."
+  [k]
+  (let [others (reduce + 0 (map (fn [e] (erlang/apply :atomics :get (list (:cell e) 1)))
+                                (vals (dissoc (live) k))))]
+    (max 0 (- (idle/running) others))))
+
+(defn- note-realm!
+  "Remember that a request of session `k` ran in the realm at `root`."
+  [k root]
+  (when (and (some? k) (erlang/is_binary root))
+    (let [e (get (live) k)]
+      (when (and (some? e) (not (contains? (:realms e) root)))
+        (update-live! (fn [m] (if (contains? m k) (update-in m [k :realms] conj root) m)))))))
+
+(defn- session-realms
+  "The realms session `k` answers for: every open realm when it is the VM's only
+   session, else the open realms its own requests (or its boot) opened."
+  [k]
+  (let [m (live)]
+    (if (empty? (dissoc m k))
+      (realm/roots)
+      (let [mine (or (:realms (get m k)) #{})]
+        (to-list (filter (fn [r] (contains? mine r)) (realm/roots)))))))
+
+(defn- register-session! [k root]
+  (update-live! (fn [m] (assoc m k {:cell (erlang/apply :atomics :new (list 2 (to-list [(tuple :signed false)])))
+                                    :root root :started-at (erlang/system_time :second)
+                                    :realms #{} :primary (empty? m)}))))
+
+(defn- unregister-session! [k] (update-live! (fn [m] (dissoc m k))))
+
+(defn- primary?
+  "Whether `k` was the only session when it started: the one the VM's foreground
+   loop runs and its process-wide facts (`PT-ROOT`, the stop flag) describe."
+  [k]
+  (let [e (get (live) k)] (or (nil? e) (= true (:primary e)))))
+
+(defn- put-if-absent!
+  "Put `v` at `key` unless another session already holds it. Returns whether it did."
+  [key v]
+  (if (some? (erlang/apply :persistent_term :get (list key nil)))
+    false
+    (do (erlang/apply :persistent_term :put (list key v)) true)))
+
+(defn- stop-flag
+  "The flag a stop of session `k` raises. The foreground loop (`vm.client`) waits on
+   the VM's flag, which belongs to the session the VM started with; an inner session
+   raising it would stop the outer one's VM, so an inner session raises its own."
+  [k]
+  (if (primary? k) (tuple :vm_session :stop) (tuple :vm_session :stop k)))
+
+(defn- request-stop! [k] (erlang/apply :persistent_term :put (list (stop-flag k) true)))
+
+(defn- erase-if-mine! [key v]
+  (when (and (some? v) (= v (erlang/apply :persistent_term :get (list key nil))))
+    (erlang/apply :persistent_term :erase (list key))))
 (defn- pending! [conn-send id]
  (conn-send (wire/stderr id 0 "bl realm: retirement pending; release consumers and retry\n"))
  (conn-send (wire/exit id 1)))
 (defn- drain-session!
- "Close request admission before checking the existing in-flight counter.
-  Accepted work drains before realms; pending consumers keep the listener live."
- []
+ "Close session `k`'s request admission before checking the existing in-flight
+  counter. Accepted work drains before realms; pending consumers keep the listener
+  live. Only `k`'s own work and realms count (see `pending-requests`)."
+ [k]
  (BeamLisp.Env/assert_native_framework_execution!)
- (erlang/apply :persistent_term :put (list PT-DRAINING true))
- (let [running (idle/running)]
+ (set-draining! k true)
+ (let [running (pending-requests k)]
   (if (> running 0) {:status :waiting :pending running}
-   (let [results (mapv realm/close (realm/roots))
+   (let [results (mapv realm/close (session-realms k))
          pending (count (filter #(= :waiting (:status %)) results))]
     {:status (if (= 0 pending) :retired :waiting) :pending pending}))))
 
@@ -98,8 +208,8 @@
 (defn- shared-status-text
   "What a shared VM answers to `realm show`: it serves no single project, so it
    names the realms it has open."
-  []
-  (let [roots (realm/roots)]
+  [k]
+  (let [roots (session-realms k)]
     (str "shared VM  " (count roots) " realm(s)"
          (apply str (map (fn [r] (str "\n  " r)) roots)))))
 
@@ -107,27 +217,30 @@
   (BeamLisp.Loader/ensure_loaded namespace)
   (BeamLisp.Ns.Rt/invoke (BeamLisp.Env/fetch! namespace binding) args))
 
-(defn- status-text []
-  (let [root (erlang/apply :persistent_term :get (list PT-ROOT nil))]
+(defn- status-text [k]
+  (let [e (get (live) k)
+        root (if e (:root e) (erlang/apply :persistent_term :get (list PT-ROOT nil)))]
     (if (nil? root)
-      (shared-status-text)
+      (shared-status-text k)
       (sdk-call "vm.inspect" "render-text"
         (list (sdk-call "vm.inspect" "model"
                 (list {:root root
-                       :started-at (erlang/apply :persistent_term :get (list PT-STARTED nil))})))))))
+                       :started-at (if e (:started-at e)
+                                       (erlang/apply :persistent_term :get (list PT-STARTED nil)))})))))))
 
 (defn- control-handler [frame conn-send]
   ;; frame = {:control id op} where op ∈ #{:status :stop} or {:close root}
   (let [id (elem frame 1)
-        op (elem frame 2)]
+        op (elem frame 2)
+        k (session-key)]
     (cond
       (= op :status)
       ;; the SESSION'S READ-MODEL, rendered — the same value the browser page
       ;; renders (vm.inspect), so the two faces cannot disagree.
-      (do (conn-send (wire/stdout id 0 (str (status-text) "\n")))
+      (do (conn-send (wire/stdout id 0 (str (status-text k) "\n")))
           (conn-send (wire/exit id 0)))
       (= op :realms)
-      (do (conn-send (wire/stdout id 0 (str (join "\n" (realm/roots)) "\n")))
+      (do (conn-send (wire/stdout id 0 (str (join "\n" (session-realms k)) "\n")))
           (conn-send (wire/exit id 0)))
       (and (erlang/is_tuple op) (= :close (elem op 0)))
       (let [root (elem op 1) result (realm/close root)]
@@ -141,15 +254,15 @@
       (do (conn-send (wire/stdout id 0 (show-text (elem op 1))))
           (conn-send (wire/exit id 0)))
       (and (erlang/is_tuple op) (= :restart (elem op 0)))
-      (if (draining?) (pending! conn-send id)
+      (if (draining? k) (pending! conn-send id)
        (let [root (elem op 1) result (realm/close root)]
         (if (= :waiting (:status result)) (pending! conn-send id)
          (do (realm/open root)
              (conn-send (wire/stdout id 0 (str "bl realm: restarted " root "\n")))
              (conn-send (wire/exit id 0))))))
       (= op :stop)
-      (if (= :waiting (:status (drain-session!))) (pending! conn-send id)
-       (do (erlang/apply :persistent_term :put (list (tuple :vm_session :stop) true))
+      (if (= :waiting (:status (drain-session! k))) (pending! conn-send id)
+       (do (request-stop! k)
            (conn-send (wire/stdout id 0 "bl realm: stopping\n"))
            (conn-send (wire/exit id 0))))
       :else (conn-send (wire/exit id 0)))))
@@ -158,19 +271,24 @@
   ;; :control (status/stop) vs :request (a command)
   (if (= :control (elem frame 0))
     (control-handler frame conn-send)
-    (if (draining?) (pending! conn-send (elem frame 1))
+    (let [k (session-key)]
+    (if (draining? k) (pending! conn-send (elem frame 1))
      (do
       ;; Double-check after entering the existing counter: a stop either sees
       ;; this accepted request or it observes draining before any command effect.
       (idle/begin!)
-      (let [result (try
-                    (if (draining?) :retirement-pending (dispatch-command frame conn-send))
-                    (finally (idle/end!)))]
+      (let [c (cell k)
+            _ (when c (erlang/apply :atomics :add (list c 1 1)))
+            result (try
+                    (if (draining? k) :retirement-pending (dispatch-command frame conn-send))
+                    (finally
+                      (when c (erlang/apply :atomics :sub (list c 1 1)))
+                      (idle/end!)))]
        ;; The terminal frame commits after releasing request custody. A client
        ;; that immediately stops after receiving it must not see stale in-flight
        ;; work from this already-completed request.
        (if (= :retirement-pending result) (pending! conn-send (elem frame 1))
-        (when (not= :cancelled result) (conn-send (wire/exit (elem frame 1) result)))))))))
+        (when (not= :cancelled result) (conn-send (wire/exit (elem frame 1) result))))))))))
 
 (defn start-heartbeat
   "Send `id`'s client a heartbeat every `interval-ms` from a process of its own,
@@ -224,6 +342,7 @@
    shared VM."
   [argv cwd env conn-send id]
   (let [parent (erlang/self)
+        k (session-key)
         child (spawn
                 (fn []
                   (let [r (try
@@ -233,6 +352,9 @@
                               (if (erlang/is_integer r) r 0))
                             (catch e
                               (do (conn-send (wire/stderr id 999999 (str "bl: " (ex-message e) "\n"))) 1)))]
+                    ;; before the answer, so a client that has it can ask which realms
+                    ;; this session has open
+                    (try (note-realm! k (erlang/get REQUEST-REALM)) (catch e nil))
                     (erlang/send parent [:command-done r]))))]
     (await-command child conn-send id wire/HEARTBEAT-MS)))
 
@@ -265,15 +387,16 @@
    that sits warm overnight is exactly when a nightly prune should happen. A shared
    VM (`root` nil) has no project yet; each realm opens on its first request, which
    is the same `realm/open` call."
-  [root]
+  [root k]
   (mgr/start)
   ;; the reload/intent sequencer (vm.exec): a watch commit and a dashboard intent
   ;; take turns here, never racing a program the daemon is running.
   (exec/start)
-  (when (some? root)
-    (realm/open root)
-    (erlang/apply :persistent_term :put (list PT-ROOT root)))
-  (erlang/apply :persistent_term :put (list PT-STARTED (erlang/system_time :second))))
+  (let [primary (primary? k)]
+    (when (some? root)
+      (note-realm! k (:root (realm/open root)))
+      (when primary (erlang/apply :persistent_term :put (list PT-ROOT root))))
+    (when primary (erlang/apply :persistent_term :put (list PT-STARTED (erlang/system_time :second))))))
 
 (defn- busy?
   "Whether anything besides a running request is using this VM: a route a project
@@ -281,11 +404,11 @@
    or work a realm owns (a schedule, a `serve`, a `watch`; not its furniture — see
    `idle/FURNITURE-ROLES`). Either keeps it alive: a VM that serves a name or runs
    a job is not idle however quiet your terminal is."
-  []
+  [k]
   (let [pid (erlang/list_to_integer (erlang/apply :os :getpid (list)))
         mine (idle/serving-claims (ports/list-claims) pid)
         vms (mgr/list-vms)]
-    (or (draining?) (> (count mine) 0)
+    (or (draining? k) (> (count mine) 0)
         ;; work, not furniture: see `idle/active-members`
         (some (fn [vm] (> (count (idle/active-members (:id vm))) 0)) (to-list vms)))))
 
@@ -293,11 +416,13 @@
   "Start the idle clock for `limit` seconds and remember its watcher. When it
    expires the VM stops itself the way `bl realm stop` does: it flips the stop flag
    the foreground loop is waiting on, so the same drain path runs."
-  [limit]
-  (let [w (idle/start-watcher limit busy?
+  [limit k]
+  (let [w (idle/start-watcher limit (fn [] (busy? k))
             (fn [] (println "bl realm: idle, stopping")
-                   (erlang/apply :persistent_term :put (list (tuple :vm_session :stop) true))))]
-    (when w (erlang/apply :persistent_term :put (list PT-IDLE w)))
+                   (request-stop! k)))]
+    (when w
+      (put-if-absent! PT-IDLE w)
+      (update-live! (fn [m] (if (contains? m k) (assoc-in m [k :idle] w) m))))
     w))
 
 (defn- release-start-marker!
@@ -326,19 +451,28 @@
    ;; scheduler it will never serve. The listener accepts at once, but a request
    ;; that arrives before the services are up waits on the manager like any other.
    (let [shared (= true (get opts :shared))
+         k (erlang/make_ref)
+         handler (fn [frame conn-send] (erlang/put PD-SESSION k) (request-handler frame conn-send))
          r (cond
              (and shared (= (paths/build-id) paths/SRC-BUILD))
              {:error :shared-needs-a-build}
              (and (not shared) (nil? root))
              {:error :no-root}
-             :else (net/listen root request-handler {:shared shared}))]
+             ;; registered before the socket accepts, so its first request finds it
+             :else (do (register-session! k (if shared nil root))
+                       (let [l (net/listen root handler {:shared shared})]
+                         (when-not (contains? l :ok) (unregister-session! k))
+                         l)))]
      (if (contains? r :ok)
-       (do (erlang/apply :persistent_term :put (list PT-DRAINING false))
+       (do (erlang/apply :persistent_term :put (list PT-CURRENT k))
            ;; a command's stderr is the client's stderr, as it is in a cold run
            (io/install-stderr-router!)
-           (erlang/apply :persistent_term :put
-              (list (tuple :vm_session :commands-only) (= true (get opts :commands-only))))
-           (boot-realm-services! (if shared nil root))
+           ;; the flag is the VM's (the manager reads it); a session that did not set
+           ;; it leaves it as it found it, and one that did clears it when it stops
+           (when (and (= true (get opts :commands-only))
+                      (put-if-absent! (tuple :vm_session :commands-only) true))
+             (update-live! (fn [m] (assoc-in m [k :commands-only] true))))
+           (boot-realm-services! (if shared nil root) k)
            ;; the HTTP face on :ui, a view over the same read-model. A failure
            ;; here does NOT stop the daemon: its job is serving commands, the
            ;; page is a view.
@@ -346,10 +480,10 @@
            ;; become visible to the machine: one record, written once. A failure
            ;; to publish costs `bl vm` a row (the old files still adopt this pid),
            ;; never the daemon its job.
-           (publish-self! (:ok r) (get opts :log))
+           (publish-self! k (if shared nil root) (get opts :log))
            (release-start-marker! root shared)
-           (arm-idle! (get opts :idle 0))
-           r)
+           (arm-idle! (get opts :idle 0) k)
+           {:ok (assoc (:ok r) :session k)})
        r))))
 
 (defn- project-ui-port
@@ -388,12 +522,12 @@
 (defn- publish-self!
   "Publish this VM's record and remember it on the listener so `stop` can retract
    exactly it. A VM is labelled with the project it was started for."
-  [listener log]
+  [k root log]
   (try
-    (let [root (erlang/apply :persistent_term :get (list PT-ROOT nil))
-          r (registry/publish! :warm {:label (vm-label root) :log log})]
+    (let [r (registry/publish! :warm {:label (vm-label root) :log log})]
       (when (contains? r :ok)
-        (erlang/apply :persistent_term :put (list PT-RECORD (:ok r)))))
+        (put-if-absent! PT-RECORD (:ok r))
+        (update-live! (fn [m] (if (contains? m k) (assoc-in m [k :record] (:ok r)) m)))))
     (catch e nil)))
 
 (defn stop
@@ -405,13 +539,15 @@
    Pending work returns {:status :waiting :pending n}, retaining the listener,
    registry and idle watcher. New requests stay refused until stop is retried."
   [listener]
-  (let [result (drain-session!)]
+  (let [k (or (:session listener) (session-key))
+        result (drain-session! k)]
    (if (= :waiting (:status result)) result
-    (do
-     (idle/stop-watcher (erlang/apply :persistent_term :get (list PT-IDLE nil)))
-     (erlang/apply :persistent_term :erase (list PT-IDLE))
-     (let [rec (erlang/apply :persistent_term :get (list PT-RECORD nil))]
-      (when rec (registry/retract! rec))
-      (erlang/apply :persistent_term :erase (list PT-RECORD)))
-     (erlang/apply :persistent_term :erase (list (tuple :vm_session :commands-only)))
+    (let [e (get (live) k)]
+     (idle/stop-watcher (:idle e))
+     (erase-if-mine! PT-IDLE (:idle e))
+     (when (:record e) (registry/retract! (:record e)))
+     (erase-if-mine! PT-RECORD (:record e))
+     (when (:commands-only e) (erlang/apply :persistent_term :erase (list (tuple :vm_session :commands-only))))
+     (erlang/apply :persistent_term :erase (list (tuple :vm_session :stop k)))
+     (when (some? e) (unregister-session! k))
      (net/stop listener)))))

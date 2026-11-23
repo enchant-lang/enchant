@@ -53,12 +53,14 @@ fn debug_log_path() -> PathBuf {
 
 /// The environment `checkout_hash_files` folds into each token. The service
 /// computes with the CLIENT's values: they are part of the token's identity.
-pub const TOKEN_ENV: [&str; 16] = [
+/// `BL_CHECKOUT_SDK_INPUTS` is folded too but is NOT the client's: it is the
+/// engine fingerprint the computation itself captured (`checkout_hash_files`),
+/// so a caller's exported value never reaches a token.
+pub const TOKEN_ENV: [&str; 15] = [
     "HOME", "XDG_DATA_HOME", "ERL_FLAGS", "ERL_AFLAGS", "ELIXIR_ERL_OPTIONS",
     "BEAM_LISP_AOT_BACKEND", "BEAM_LISP_AOT_CACHE_DIR", "BEAM_LISP_AOT_CACHE",
     "BEAM_LISP_AOT_STRICT", "BEAM_LISP_DEV", "XDG_CACHE_HOME", "BEAM_LISP_EBIN",
     "BEAM_LISP_PATH", "BL_BOOTSTRAP_SEED", "BL_CHECKOUT_PLATFORM",
-    "BL_CHECKOUT_SDK_INPUTS",
 ];
 
 const SCOPE_ENGINE: u8 = 1;
@@ -90,8 +92,13 @@ fn token_env() -> Option<Vec<(String, Option<String>)>> {
 fn socket_path(root: &Path) -> Option<PathBuf> {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
-    digest.update(b"bl-generation-service-v1\0");
+    // A resident lives until killed, so it is keyed by the client binary too:
+    // a new client never asks a resident running older token code.
+    let exe = std::env::current_exe().ok()?;
+    digest.update(b"bl-generation-service-v2\0");
     digest.update(root.as_os_str().as_encoded_bytes());
+    digest.update([0]);
+    digest.update(exe.as_os_str().as_encoded_bytes());
     let hex: String = digest.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect();
     Some(runtime_dir()?.join(format!("generation-{hex}-src.sock")))
 }
@@ -680,6 +687,13 @@ impl State {
     fn watch_inputs(&mut self, project: &Path, extra: &[PathBuf]) -> Result<(), String> {
         let key = watch_key(project, extra);
         if self.inputs_key.as_deref() == Some(key.as_str()) { return Ok(()); }
+        // The manifest (or the declared roots) changed without an event
+        // having cleared the project pins: the realm appended inputs it had
+        // just loaded, and the manifest's own directory need not be watched.
+        // Those inputs were unwatched until this walk, so an edit to one since
+        // it was loaded left no event either. A cached pin is stale; drop them
+        // and recompute from the bytes (checkout_transport's provider edit).
+        self.projects.clear();
         for path in std::iter::once(&self.root).chain(std::iter::once(&project.to_path_buf())).chain(extra.iter()) {
             if let Ok(meta) = std::fs::metadata(path) {
                 self.identities.insert(path.clone(), (meta.dev(), meta.ino()));
@@ -949,6 +963,40 @@ mod generation_tests {
         assert_ne!(engine.engine, first.engine, "an engine edit moves the engine token");
     }
 
+    /// U13: a caller's exported engine pin must never select or key the VM.
+    /// The runtime token keys the VM, so it and the project token must be the
+    /// same with or without a caller's `BL_CHECKOUT_SDK_INPUTS`, computed
+    /// locally or answered by the resident (whose request may still carry the
+    /// value, as an older client's did).
+    #[test]
+    fn a_caller_supplied_engine_pin_never_reaches_a_token() {
+        let _serial = serialized();
+        let f = fixture("caller-pin");
+        std::env::remove_var("BL_CHECKOUT_SDK_INPUTS");
+        let honest = tokens(&f);
+        std::env::set_var("BL_CHECKOUT_SDK_INPUTS", "0".repeat(64));
+        let steered = tokens(&f);
+        assert_eq!(steered, honest, "a local computation ignores the caller's engine pin");
+        if let Some(socket) = service(&f) {
+            std::env::set_var("BL_CHECKOUT_SDK_INPUTS", "f".repeat(64));
+            let mut env = token_env().unwrap();
+            env.push(("BL_CHECKOUT_SDK_INPUTS".into(), Some("f".repeat(64))));
+            let token = std::fs::read_to_string(token_path(&socket)).unwrap();
+            let answered = (0..8)
+                .find_map(|_| query_at(&socket, &token, &f.project, &[], &env).ok())
+                .expect("service answers");
+            assert_eq!(answered, honest, "the resident ignores the caller's engine pin");
+        }
+        std::env::remove_var("BL_CHECKOUT_SDK_INPUTS");
+        // The pin the runtime token folds is the captured one: an engine input
+        // outside priv/native moves the VM's key, the project pin stays.
+        std::fs::write(f.root.join("nix/extra.nix"), "{}\n").unwrap();
+        let edited = tokens(&f);
+        assert_ne!(edited.engine, honest.engine);
+        assert_ne!(edited.runtime, honest.runtime, "an engine edit outside priv/native retires the VM");
+        assert_eq!(edited.project, honest.project);
+    }
+
     #[test]
     fn the_service_watches_a_recorded_directory_and_answers_a_missing_input() {
         let f = fixture("watched-dir");
@@ -967,6 +1015,33 @@ mod generation_tests {
         let after = ask_settled(&socket, &f);
         assert_ne!(after.project, first.project,
                    "a candidate appearing in a recorded directory moves the project token");
+    }
+
+    /// The realm records a newly loaded file in its manifest after the
+    /// answer that preceded the load. Neither that append nor a later edit to
+    /// the file (in a directory nobody watched yet) need raise an event the
+    /// service sees; its next answer must still equal a local computation.
+    #[test]
+    fn a_file_the_realm_records_after_an_answer_is_an_input_of_the_next() {
+        let _serial = serialized();
+        let f = fixture("recorded-later");
+        let provider_dir = f.project.join("transport");
+        std::fs::create_dir_all(&provider_dir).unwrap();
+        let provider = provider_dir.join("value.bl");
+        std::fs::write(&provider, "(ns transport.value) (defn value [] 1)\n").unwrap();
+        let Some(socket) = service(&f) else { return; };
+        let before = ask_settled(&socket, &f);
+        assert_eq!(before, tokens(&f));
+        // The realm loads the provider and appends it to its manifest.
+        let manifest = f.project.join(".bl/realm-sources.v1");
+        let mut text = std::fs::read_to_string(&manifest).unwrap();
+        text.push_str(&format!("L\t{}\t{}\n", sha_hex(&std::fs::read(&provider).unwrap()),
+                               std::fs::canonicalize(&provider).unwrap().display()));
+        std::fs::write(&manifest, text).unwrap();
+        std::fs::write(&provider, "(ns transport.value) (defn value [] 2)\n").unwrap();
+        let after = ask_settled(&socket, &f);
+        assert_eq!(after, tokens(&f), "the cached answer equals the local one");
+        assert_ne!(after.project, before.project, "the edited provider moves the project pin");
     }
 
     #[test]

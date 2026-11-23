@@ -381,7 +381,17 @@ fn checkout_runtime_generation(root: &Path, evidence: Option<&engine_inputs::Sna
     if let Some(ebin) = std::env::var_os("BEAM_LISP_EBIN") {
         checkout_sources(&PathBuf::from(ebin), &mut files)?;
     }
-    checkout_hash_files(root, files, evidence)
+    // This token keys the VM. It folds the engine fingerprint THIS checkout
+    // captured, so an edit to any engine input (also outside priv/native, e.g.
+    // nix/ or tooling/drop) retires the VM, and a caller-exported
+    // `BL_CHECKOUT_SDK_INPUTS` can neither select nor key one (U13). Without
+    // evidence (tests only) the pin is captured here, or empty when the root
+    // declares no engine inputs.
+    let engine_pin = match evidence {
+        Some(snapshot) => snapshot.fingerprint.clone(),
+        None => engine_inputs::Snapshot::capture(root).map(|s| s.fingerprint).unwrap_or_default(),
+    };
+    checkout_hash_files(root, files, evidence, &engine_pin)
 }
 
 fn checkout_project_generation(
@@ -418,7 +428,9 @@ fn checkout_project_generation(
     for path in extra_sources {
         checkout_sources(path, &mut files)?;
     }
-    let base = checkout_hash_files(root, files, evidence)?;
+    // The project pin excludes the engine: the runtime pin already moves on
+    // an engine edit, and a caller's engine pin must not reach either token.
+    let base = checkout_hash_files(root, files, evidence, "")?;
     match sources {
         None => Ok(base),
         Some(sources) => Ok(fold_realm_sources(root, &base, &sources)),
@@ -576,7 +588,10 @@ fn fold_realm_sources(root: &Path, base: &str, sources: &RealmSources) -> String
     format!("{:x}", hash.finalize())
 }
 
-fn checkout_hash_files(root: &Path, mut files: Vec<PathBuf>, evidence: Option<&engine_inputs::Snapshot>) -> std::io::Result<String> {
+/// `engine_pin` is folded in the `BL_CHECKOUT_SDK_INPUTS` slot, where the
+/// client's environment value used to be read; the environment is never read
+/// for it.
+fn checkout_hash_files(root: &Path, mut files: Vec<PathBuf>, evidence: Option<&engine_inputs::Snapshot>, engine_pin: &str) -> std::io::Result<String> {
     use sha2::{Digest, Sha256};
     files.sort();
     files.dedup();
@@ -599,13 +614,18 @@ fn checkout_hash_files(root: &Path, mut files: Vec<PathBuf>, evidence: Option<&e
         "BEAM_LISP_PATH",
         "BL_BOOTSTRAP_SEED",
         "BL_CHECKOUT_PLATFORM",
-        "BL_CHECKOUT_SDK_INPUTS",
     ] {
         hash.update(key.as_bytes());
         hash.update([0]);
         hash.update(std::env::var_os(key).unwrap_or_default().as_encoded_bytes());
         hash.update([0]);
     }
+    // Same position and bytes as when the slot was read from the
+    // environment, so a runtime token matches one computed before U10.
+    hash.update(b"BL_CHECKOUT_SDK_INPUTS");
+    hash.update([0]);
+    hash.update(engine_pin.as_bytes());
+    hash.update([0]);
     let mut parents = std::collections::HashMap::<PathBuf, PathBuf>::new();
     for path in files {
         // One stat for the file: the same metadata decides its digest (the
