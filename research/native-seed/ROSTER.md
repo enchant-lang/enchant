@@ -225,6 +225,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - **Done when.** Cold `$SDK/bin/bl --cold run` of `(println 1)` ≤ 1.2 s median, paired with the batch-21 SDK.
 
 #### T3 ⏳ `codegen_provenance_test` writes into the store SDK · H
+- Also: `test/scripts/dev_overlay_scenario.py` leaves its probe VM (`realm start --root /tmp/u15-probe-*`) running after it passes; stop it in its `finally`.
 - Two tests error with `erofs` writing `.../lib/beam_lisp-0.1.0/priv/codegen.sources` on any store SDK (same on main's `2nvkh1n5` and batch 21's `0nzlyz01`). Point them at a scratch copy.
 
 ### K — cold start
