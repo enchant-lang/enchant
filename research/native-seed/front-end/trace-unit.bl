@@ -1,0 +1,49 @@
+; Card N2b, step 1: what preparing one SDK unit actually calls.
+;
+;   bl --cold run research/native-seed/front-end/trace-unit.bl -- NAMESPACE OUT.txt
+;
+; Prepares NAMESPACE exactly as priv/build/unit-store.bl does, with call_count
+; tracing on every loaded BeamLisp module and on the OTP modules that carry
+; custody (ets, code, beam_lib, persistent_term, crypto, file, prim_file,
+; global). Writes "COUNT MODULE:FUNCTION/ARITY" lines, most called first.
+; Use a cold VM: the trace patterns are VM-wide.
+(ns native-front.trace)
+
+(def custody-modules [:ets :code :beam_lib :persistent_term :crypto :file :prim_file :global])
+
+(defn- traced-modules []
+ (concat (filter (fn [m] (String/starts_with? (Atom/to_string m) "Elixir.BeamLisp"))
+                 (map (fn [pair] (elem pair 0)) (code/all_loaded)))
+         custody-modules))
+
+(defn- prepare [namespace]
+ (let [root (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
+       index (Jason/decode! (File/read! (Path/join (System/fetch_env! "BL_UNIT_STORE") "unit-index.json")))
+       file (Path/join root (get-in index ["units" namespace "file"]))
+       workspace (BeamLisp.AOT/open_workspace
+                  {:version 2 :phase-imports (list 'core 'sugar) :roots (list root)
+                   :sources (list {:namespace (symbol namespace) :file file})} {})]
+  (try (BeamLisp.AOT/prepare_unit workspace (symbol namespace))
+   (finally (BeamLisp.AOT/close_workspace! workspace)))))
+
+(defn run [[namespace out]]
+ ;; warm the code path once so loading noise is not counted
+ (prepare namespace)
+ (let [mods (vec (traced-modules))]
+  (doseq [m mods] (erlang/trace_pattern (tuple m :_ :_) true (list :local :call_count)))
+  (let [started (erlang/monotonic_time :microsecond)
+        prepared (prepare namespace)
+        elapsed (- (erlang/monotonic_time :microsecond) started)
+        rows (vec (for [m mods
+                        [f a] (map (fn [p] [(elem p 0) (elem p 1)]) (erlang/apply m :module_info (list :functions)))
+                        :let [info (erlang/trace_info (tuple m f a) :call_count)
+                              n (elem info 1)]
+                        :when (and (erlang/is_integer n) (> n 0))]
+                    [n (str (Atom/to_string m) ":" (Atom/to_string f) "/" a)]))]
+   (doseq [m mods] (erlang/trace_pattern (tuple m :_ :_) false (list :local :call_count)))
+   (File/write! out (apply str (map (fn [[n k]] (str n " " k "\n")) (reverse (sort-by first rows)))))
+   (println (str "TRACE " namespace " us " elapsed " functions " (count rows)
+                 " calls " (reduce + (map first rows)) " descriptors "
+                 (count (mapcat :descriptors (:plans prepared))))))))
+
+(run (vec (BeamLisp/argv)))

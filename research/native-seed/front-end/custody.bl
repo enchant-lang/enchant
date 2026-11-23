@@ -1,0 +1,41 @@
+; Card N2b: the per-SDK custody manifest the native front end needs.
+;
+;   bl run research/native-seed/front-end/custody.bl -- OUT [simple]
+;
+; One pass on the BEAM, once per SDK. For each unit of the unit index (or,
+; with `simple`, only units whose constructor inputs are the unit itself plus
+; core and sugar) it records what the native side does not compute:
+;   :file          the source path under the SDK priv root (the BEAM's path)
+;   :source-hash   AOT/ns_closure_hash over the unit's require closure
+;   :stamp-key     AOTCache/key_for_ns, the compiler-key stamp library beams carry
+;   :input-digest  sha256 of the source
+; It writes OUT/custody.etf (one term_to_binary list), creates OUT/u/NAMESPACE
+; (the native host has no mkdir) and OUT/jobs.bl, the native run's one form.
+(ns native-front.custody)
+
+(defn- simple? [namespace row]
+ (every? #(contains? #{namespace "core" "sugar"} (get % "namespace")) (get row "inputs")))
+
+(defn run [[out mode]]
+ (let [out (Path/expand out)
+       store (System/fetch_env! "BL_UNIT_STORE")
+       root (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
+       units (get (Jason/decode! (File/read! (Path/join store "unit-index.json"))) "units")
+       rows (sort-by first (if (= mode "simple") (filter (fn [[n r]] (simple? n r)) units) units))
+       manifest (BeamLisp.AOT/with_source_snapshot
+                 (fn [] (to-list (map (fn [[namespace row]]
+                   (let [file (Path/join root (get row "file"))]
+                    (File/mkdir_p! (Path/join (Path/join out "u") namespace))
+                    {:namespace namespace :file file
+                     :source-hash (BeamLisp.AOT/ns_closure_hash namespace file)
+                     :stamp-key (BeamLisp.AOTCache/key_for_ns namespace)
+                     :input-digest (crypto/hash :sha256 (BeamLisp.Loader/read_source file))}))
+                  rows))))]
+  (File/write! (Path/join out "custody.etf")
+   (erlang/term_to_binary {:units manifest :priv-root root
+                           :compiler-key (BeamLisp.AOTCache/compiler_key)}))
+  (File/write! (Path/join out "jobs.bl")
+   (str "(nf-run " (pr-str (Path/join out "custody.etf")) " " (pr-str out) ")\n"))
+  (println (str "CUSTODY units " (count manifest) " -> " out))))
+
+(run (vec (BeamLisp/argv)))

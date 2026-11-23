@@ -1,0 +1,79 @@
+; Card N2b: source → Chez → .beam against the BEAM's own unit preparation.
+;
+;   bl run research/native-seed/front-end/compare.bl -- OUT
+;
+; For each unit of OUT/custody.etf, prepare it on the BEAM exactly as
+; priv/build/unit-store.bl does and compile_unit it (the reference bytes for
+; every module of the unit, plan-compiled ones included). Then, for each
+; native descriptor OUT/u/NS/I.desc.etf: =:= the BEAM's descriptor I, and the
+; native Core I.core.etf compiled by lower/module->beam must give the BEAM's
+; bytes for that module. G-I files are the plan-compiled modules.
+; Writes OUT/compare.json and prints counts per reason.
+(ns native-front.compare)
+
+(defn- prepare [namespace file]
+ (let [root (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
+       workspace (BeamLisp.AOT/open_workspace
+                  {:version 2 :phase-imports (list 'core 'sugar) :roots (list root)
+                   :sources (list {:namespace (symbol namespace) :file file})} {})]
+  (try (BeamLisp.AOT/prepare_unit workspace (symbol namespace))
+   (finally (BeamLisp.AOT/close_workspace! workspace)))))
+
+(defn- native-files [dir prefix]
+ (loop [i 0 out []]
+  (let [d (Path/join dir (str prefix i ".desc.etf"))]
+   (if (File/exists? d) (recur (inc i) (conj out [d (Path/join dir (str prefix i ".core.etf"))])) out))))
+
+(defn- beam-of [core file]
+ (elem (lower/module->beam core file) 1))
+
+(defn- check-unit [out row]
+ (let [namespace (:namespace row) dir (Path/join (Path/join out "u") namespace)]
+  (try
+   (let [prepared (prepare namespace (:file row))
+         beams (into {} (map (fn [b] [(elem b 0) (elem b 1)]) (:beams (BeamLisp.AOT/compile_unit prepared))))
+         reference (vec (mapcat :descriptors (:plans prepared)))
+         natives (native-files dir "")
+         generated (native-files dir "G-")
+         expected-generated (count (mapcat :generated-beams (:plans prepared)))]
+    (cond
+     (empty? natives) {:namespace namespace :reason "native-staging-failed"}
+     (not= (count natives) (count reference))
+      {:namespace namespace :reason "descriptor-count-differs" :native (count natives) :beam (count reference)}
+     (not= (count generated) expected-generated)
+      {:namespace namespace :reason "generated-count-differs" :native (count generated) :beam expected-generated}
+     :else
+     (let [rows (concat
+                 (map-indexed (fn [i [d c]]
+                               (let [nd (erlang/binary_to_term (File/read! d))
+                                     file (get-in nd [:ann :file])]
+                                {:module (:name nd) :desc-equal (erlang/=:= nd (nth reference i))
+                                 :beam-equal (= (beam-of (erlang/binary_to_term (File/read! c)) file) (get beams (:name nd)))}))
+                              natives)
+                 (map (fn [[d c]]
+                       (let [nd (erlang/binary_to_term (File/read! d))]
+                        {:module (:name nd) :generated true
+                         :beam-equal (= (beam-of (erlang/binary_to_term (File/read! c)) (get-in nd [:ann :file]))
+                                        (get beams (:name nd)))}))
+                      generated))
+           bad (remove :beam-equal rows)]
+      {:namespace namespace :reason (cond (empty? bad) nil
+                                          (some #(false? (:desc-equal %)) rows) "descriptor-differs"
+                                          :else "beam-differs")
+       :modules (count rows) :generated (count generated)
+       :differs (to-list (map #(Atom/to_string (:module %)) bad))})))
+   (catch e {:namespace namespace :reason "beam-reference-failed" :error (ex-message e)}))))
+
+(defn run [[out]]
+ (let [doc (erlang/binary_to_term (File/read! (Path/join out "custody.etf")))
+       rows (:units doc)
+       results (mapv #(check-unit out %) rows)
+       ok (filter #(nil? (:reason %)) results)]
+  (File/write! (Path/join out "compare.json") (Jason/encode! (to-list (map #(update % :differs (fn [x] (or x (list)))) results))))
+  (println (str "FRONT units " (count results) " identical " (count ok)
+                " modules " (reduce + (map #(or (:modules %) 0) ok))
+                " generated " (reduce + (map #(or (:generated %) 0) ok))))
+  (doseq [[reason rs] (group-by :reason (remove #(nil? (:reason %)) results))]
+   (println (str "FRONT-REASON " reason " " (count rs) " e.g. " (:namespace (first rs)) " " (or (:error (first rs)) (pr-str (:differs (first rs)))))))))
+
+(run (vec (BeamLisp/argv)))

@@ -424,3 +424,358 @@
  (native-replace-leaf! "erlang/is_bitstring/1" (lambda (x) (or (native-bytes? x) (text-binary? x))))
  (native-replace-leaf! "erlang/byte_size/1"
   (lambda (x) (if (native-bytes? x) (bytevector-length (vector-ref x 1)) (text-size x)))))
+
+;; ── Front end: the Elixir stdlib and Env tables priv/host/aot.bl stages with ─
+;; Only keys no earlier host file provides are added here; the service
+;; refusals (native-refusals.scm) load last and skip any key provided here.
+(define (nf-leaf! key proc) (if (not (native-map-has? native-leaf-registry key)) (native-add-leaf! key proc)))
+(define (nf-key-error key m)
+ (native-raise (bl-key "error")
+  (native-exception-struct "Elixir.KeyError" (native-nil-defaults '("key" "term" "message"))
+   (list (bl-make-tuple (bl-key "key") key) (bl-make-tuple (bl-key "term") m)))
+  (native-capture-stack)))
+(define (nf-has? m k) (native-raw-map-has? m k))
+(define (nf-get m k d) (native-raw-map-get m k d))
+(nf-leaf! "Elixir.Map/new/0" (lambda () (bl-empty-map)))
+(nf-leaf! "Elixir.Map/put/3" (lambda (m k v) (native-raw-map-put k v m)))
+(nf-leaf! "Elixir.Map/has_key?/2" nf-has?)
+(nf-leaf! "Elixir.Map/keys/1" (lambda (m) (native-map-keys (native-assert-map m))))
+(nf-leaf! "Elixir.Map/values/1" (lambda (m) (map (lambda (p) (bl-nth p 1)) (native-map-pairs (native-assert-map m)))))
+(nf-leaf! "Elixir.Map/merge/2" native-map-merge)
+(nf-leaf! "Elixir.Map/put_new/3" (lambda (m k v) (if (nf-has? m k) m (native-raw-map-put k v m))))
+(nf-leaf! "Elixir.Map/fetch!/2" (lambda (m k) (let ((v (nf-get m k native-missing))) (if (eq? v native-missing) (nf-key-error k m) v))))
+(nf-leaf! "Elixir.Map/fetch/2"
+ (lambda (m k) (let ((v (nf-get m k native-missing))) (if (eq? v native-missing) (bl-key "error") (bl-make-tuple (bl-key "ok") v)))))
+(nf-leaf! "Elixir.Map/take/2"
+ (lambda (m keys) (let loop ((ks (native-finite-items keys)) (out (bl-empty-map)))
+  (if (null? ks) out (loop (cdr ks) (let ((v (nf-get m (car ks) native-missing))) (if (eq? v native-missing) out (native-raw-assoc out (car ks) v))))))))
+(nf-leaf! "Elixir.Map/update!/3"
+ (lambda (m k f) (let ((v (nf-get m k native-missing))) (if (eq? v native-missing) (nf-key-error k m) (native-raw-map-put k (bl-invoke f (list v)) m)))))
+;; Elixir MapSet: %MapSet{map: %{member => []}}, as on the BEAM. to_list is
+;; the inner map's key order (term order for the small sets staging builds).
+(define nf-mapset-key (bl-key "Elixir.MapSet"))
+(define (nf-mapset inner) (bl-map (bl-key "__struct__") nf-mapset-key (bl-key "map") inner))
+(define (nf-mapset-inner s)
+ (if (and (bl-tag? s 'map) (eq? (nf-get s native-struct-key bl-nil) nf-mapset-key)) (nf-get s (bl-key "map") (bl-empty-map))
+  (native-badarg "MapSet expected")))
+(define (nf-mapset-from xs) (let loop ((xs xs) (m (bl-empty-map))) (if (null? xs) (nf-mapset m) (loop (cdr xs) (native-raw-assoc m (car xs) '())))))
+(define (nf-mapset-keys s) (native-sort native-term-le (native-map-keys (nf-mapset-inner s))))
+(nf-leaf! "Elixir.MapSet/new/0" (lambda () (nf-mapset (bl-empty-map))))
+(nf-leaf! "Elixir.MapSet/new/1" (lambda (xs) (if (and (bl-tag? xs 'map) (eq? (nf-get xs native-struct-key bl-nil) nf-mapset-key)) xs (nf-mapset-from (native-finite-items xs)))))
+(nf-leaf! "Elixir.MapSet/new/2" (lambda (xs f) (nf-mapset-from (map (lambda (x) (bl-invoke f (list x))) (native-finite-items xs)))))
+(nf-leaf! "Elixir.MapSet/put/2" (lambda (s x) (nf-mapset (native-raw-assoc (nf-mapset-inner s) x '()))))
+(nf-leaf! "Elixir.MapSet/member?/2" (lambda (s x) (nf-has? (nf-mapset-inner s) x)))
+(nf-leaf! "Elixir.MapSet/to_list/1" nf-mapset-keys)
+(nf-leaf! "Elixir.MapSet/size/1" (lambda (s) (native-map-count (nf-mapset-inner s))))
+(nf-leaf! "Elixir.MapSet/union/2" (lambda (a b) (nf-mapset (native-map-merge (nf-mapset-inner a) (nf-mapset-inner b)))))
+(nf-leaf! "Elixir.MapSet/difference/2"
+ (lambda (a b) (let ((drop (nf-mapset-inner b)))
+  (nf-mapset (let loop ((ks (native-map-keys (nf-mapset-inner a))) (m (nf-mapset-inner a)))
+   (if (null? ks) m (loop (cdr ks) (if (nf-has? drop (car ks)) (native-raw-remove m (car ks)) m))))))))
+;; Enum over finite collections; callbacks answer BL truthiness.
+(define (nf-true? f x) (bl-truthy (bl-invoke f (list x))))
+(nf-leaf! "Elixir.Enum/member?/2"
+ (lambda (xs x) (if (and (bl-tag? xs 'map) (eq? (nf-get xs native-struct-key bl-nil) nf-mapset-key)) (nf-has? (nf-mapset-inner xs) x)
+  (let loop ((ys (native-finite-items xs))) (cond ((null? ys) #f) ((bl-key-equal? (car ys) x) #t) (else (loop (cdr ys))))))))
+(nf-leaf! "Elixir.Enum/any?/2" (lambda (xs f) (let loop ((ys (native-finite-items xs))) (cond ((null? ys) #f) ((nf-true? f (car ys)) #t) (else (loop (cdr ys)))))))
+(nf-leaf! "Elixir.Enum/find/2" (lambda (xs f) (let loop ((ys (native-finite-items xs))) (cond ((null? ys) bl-nil) ((nf-true? f (car ys)) (car ys)) (else (loop (cdr ys)))))))
+(nf-leaf! "Elixir.Enum/find_value/2"
+ (lambda (xs f) (let loop ((ys (native-finite-items xs))) (if (null? ys) bl-nil (let ((v (bl-invoke f (list (car ys))))) (if (bl-truthy v) v (loop (cdr ys))))))))
+(nf-leaf! "Elixir.Enum/reject/2" (lambda (xs f) (let loop ((ys (native-finite-items xs)) (out '())) (if (null? ys) (reverse out) (loop (cdr ys) (if (nf-true? f (car ys)) out (cons (car ys) out)))))))
+(nf-leaf! "Elixir.Enum/count/1" (lambda (xs) (length (native-finite-items xs))))
+(nf-leaf! "Elixir.Enum/at/2"
+ (lambda (xs i) (let* ((ys (native-finite-items xs)) (n (length ys)) (j (if (< i 0) (+ n i) i)))
+  (if (and (>= j 0) (< j n)) (list-ref ys j) bl-nil))))
+(nf-leaf! "Elixir.Enum/split_with/2"
+ (lambda (xs f) (let loop ((ys (native-finite-items xs)) (a '()) (b '()))
+  (if (null? ys) (bl-make-tuple (reverse a) (reverse b))
+   (if (nf-true? f (car ys)) (loop (cdr ys) (cons (car ys) a) b) (loop (cdr ys) a (cons (car ys) b)))))))
+(nf-leaf! "Elixir.Enum/sort/2"
+ (lambda (xs how)
+  (let ((ys (native-finite-items xs)))
+   (cond ((eq? how (bl-key "asc")) (native-sort native-term-le ys))
+    ((eq? how (bl-key "desc")) (native-sort (lambda (a b) (native-term-le b a)) ys))
+    (else (native-sort (lambda (a b) (bl-truthy (bl-invoke how (list a b)))) ys))))))
+(nf-leaf! "Elixir.Enum/group_by/3"
+ (lambda (xs kf vf)
+  (let loop ((ys (reverse (native-finite-items xs))) (m (bl-empty-map)))
+   (if (null? ys) m
+    (let ((k (bl-invoke kf (list (car ys)))) (v (bl-invoke vf (list (car ys)))))
+     (loop (cdr ys) (native-raw-assoc m k (cons v (nf-get m k '())))))))))
+(nf-leaf! "Elixir.Enum/uniq_by/2"
+ (lambda (xs f) (let loop ((ys (native-finite-items xs)) (seen (bl-empty-map)) (out '()))
+  (if (null? ys) (reverse out)
+   (let ((k (bl-invoke f (list (car ys)))))
+    (if (nf-has? seen k) (loop (cdr ys) seen out) (loop (cdr ys) (native-raw-assoc seen k #t) (cons (car ys) out))))))))
+(nf-leaf! "Elixir.Keyword/put_new/3"
+ (lambda (kw k v) (if (native-keyword-find kw k) kw (cons (bl-make-tuple k v) kw))))
+(nf-leaf! "Elixir.List/wrap/1" (lambda (x) (cond ((bl-is-nil x) '()) ((or (null? x) (pair? x)) x) (else (list x)))))
+(nf-leaf! "Elixir.List/to_tuple/1" (lambda (xs) (bl-tuple (native-assert-list xs))))
+(nf-leaf! "Elixir.List/last/1" (lambda (xs) (if (null? xs) bl-nil (car (last-pair xs)))))
+(nf-leaf! "Elixir.List/keyfind/3"
+ (lambda (xs key pos) (let loop ((ys xs))
+  (cond ((null? ys) bl-nil)
+   ((and (bl-tag? (car ys) 'tuple) (> (bl-count (car ys)) pos) (bl-key-equal? (bl-nth (car ys) pos) key)) (car ys))
+   (else (loop (cdr ys)))))))
+(nf-leaf! "Elixir.Process/delete/1"
+ (lambda (k) (let ((old (native-pdict-erase k))) (if (eq? old (bl-key "undefined")) bl-nil old))))
+(nf-leaf! "Elixir.String/to_existing_atom/1" bl-key)
+;; Env namespace definition tables (Env.put_ns_definition and friends): one
+;; map per namespace in the native Env rows, the shape the BEAM's ETS holds.
+(define (nf-defs-row ns) (native-row (bl-key "ns_defs") ns))
+(define (nf-ns-defs ns) (let ((v (native-env-value (nf-defs-row ns)))) (if (eq? v native-missing) (bl-empty-map) v)))
+(nf-leaf! "Elixir.BeamLisp.Env/ns_defs/1" nf-ns-defs)
+(nf-leaf! "Elixir.BeamLisp.Env/put_ns_defs/2" (lambda (ns defs) (native-env-put! (nf-defs-row ns) defs) (bl-key "ok")))
+(nf-leaf! "Elixir.BeamLisp.Env/put_ns_definition/3"
+ (lambda (ns name entries) (native-env-put! (nf-defs-row ns) (native-raw-assoc (nf-ns-defs ns) name entries)) (bl-key "ok")))
+(nf-leaf! "Elixir.BeamLisp.Env/selected_ns_definitions/2"
+ (lambda (ns names) (let ((defs (nf-ns-defs ns)))
+  (let loop ((ns names) (out (bl-empty-map)))
+   (if (null? ns) out (loop (cdr ns) (let ((v (nf-get defs (car ns) native-missing))) (if (eq? v native-missing) out (native-raw-assoc out (car ns) v)))))))))
+
+;; ── Front end: the custody world and the staging path's leaves ─────────────
+;; The native front end runs priv/host/aot.bl's staging and description code
+;; on one SDK whose custody facts the BEAM computed once (front-end/custody.bl).
+;; host/nf-install-world/1 installs them; the leaves below answer from them.
+;; Env fork/bind/capture are exact snapshots of this image's Env rows: there is
+;; one process, so a fork is a saved row map and a bind restores it.
+(define nf-world (make-parameter #f))
+(define nf-locks (make-parameter '()))
+(define (nf-world-get k . d)
+ (let ((w (nf-world))) (if (and w (native-raw-map-has? w k)) (native-raw-map-get w k (if (null? d) bl-nil (car d)))
+  (if (null? d) bl-nil (car d)))))
+(define (nf-call thunk) (if (procedure? thunk) (bl-invoke thunk '()) thunk))
+(define (native-char-data* x) (if (string? x) x (native-atom-name x)))
+(nf-leaf! "host/nf-world-key/0" (lambda () (nf-world-get (bl-key "compiler-key") "")))
+(nf-leaf! "host/nf-install-world/1"
+ (lambda (w) (nf-world w) (set! native-env-search-paths '()) (bl-key "ok")))
+(nf-leaf! "Elixir.BeamLisp.Tiers/priv_root/0" (lambda () (nf-world-get (bl-key "priv-root"))))
+(nf-leaf! "Elixir.BeamLisp.Tiers/library_names/0" (lambda () (nf-world-get (bl-key "library-names") '())))
+(nf-leaf! "Elixir.BeamLisp.Tiers/build_namespaces/0" (lambda () (nf-world-get (bl-key "build-namespaces") '())))
+(define (nf-string-prefix? p s)
+ (and (>= (string-length s) (string-length p)) (string=? (substring s 0 (string-length p)) p)))
+(nf-leaf! "Elixir.BeamLisp.Tiers/boot_source?/1"
+ (lambda (file) (let ((f (if (string? file) file (native-atom-name file))))
+  (or (nf-string-prefix? (string-append (nf-world-get (bl-key "priv-root") "") "/boot/") f)
+      (nf-string-prefix? (string-append (nf-world-get (bl-key "priv-root") "") "/std/") f)))))
+(nf-leaf! "Elixir.BeamLisp.Tiers/tier_of_ns/1" (lambda (ns) (bl-key "library")))
+(nf-leaf! "Elixir.BeamLisp.Tiers/dirs/0" (lambda () (list (nf-world-get (bl-key "priv-root")))))
+;; Loader: source text and paths come from the world's namespace table.
+(define (nf-ns-entry ns) (native-raw-map-get (nf-world-get (bl-key "namespaces") (bl-empty-map)) ns native-missing))
+(nf-leaf! "Elixir.BeamLisp.Loader/read_source/1" (lambda (path) (native-read-file path)))
+(nf-leaf! "Elixir.BeamLisp.Loader/declared_ns/1"
+ (lambda (text)
+  (let* ((n (string-length text))
+         (stop-at (lambda (c) (or (char=? c #\space) (char=? c #\)) (char=? c #\newline) (char=? c #\tab)))))
+   (let find ((i 0))
+    (cond ((>= i (- n 4)) (native-badarg "no ns form"))
+     ((and (char=? (string-ref text i) #\() (char=? (string-ref text (+ i 1)) #\n)
+           (char=? (string-ref text (+ i 2)) #\s) (char=? (string-ref text (+ i 3)) #\space))
+      (let scan ((k (+ i 4)))
+       (cond ((>= k n) (native-badarg "no ns name"))
+        ((char=? (string-ref text k) #\space) (scan (+ k 1)))
+        ((char=? (string-ref text k) #\() (native-badarg "no ns name"))
+        (else (let end ((m k))
+                (if (or (>= m n) (char=? (string-ref text m) #\space) (char=? (string-ref text m) #\))
+                        (char=? (string-ref text m) #\newline) (char=? (string-ref text m) #\tab))
+                 (substring text k m)
+                 (end (+ m 1))))))))
+     (else (find (+ i 1))))))))
+(nf-leaf! "Elixir.BeamLisp.Loader/source_path/1"
+ (lambda (ns) (let ((e (nf-ns-entry ns))) (if (eq? e native-missing) bl-nil (native-raw-map-get e (bl-key "file") bl-nil)))))
+(nf-leaf! "Elixir.BeamLisp.Loader/with_load_path/2" (lambda (path thunk) (nf-call thunk)))
+(nf-leaf! "Elixir.BeamLisp.Loader/without_initialization/1" (lambda (thunk) (nf-call thunk)))
+(nf-leaf! "Elixir.BeamLisp.Loader/search_dirs/0" (lambda () (list (nf-world-get (bl-key "priv-root")))))
+(nf-leaf! "Elixir.BeamLisp.Loader/find_file/1"
+ (lambda (ns) (let ((e (nf-ns-entry ns))) (if (eq? e native-missing) bl-nil (native-raw-map-get e (bl-key "file") bl-nil)))))
+(nf-leaf! "Elixir.BeamLisp.Loader/source_decls/1" (lambda (ns) (bl-empty-map)))
+(nf-leaf! "Elixir.BeamLisp.Loader/source_decls_from/2" (lambda (ns text) (bl-empty-map)))
+(nf-leaf! "Elixir.BeamLisp.Loader/assert_initializer_execution_allowed!/1" (lambda (ns) (bl-key "ok")))
+(nf-leaf! "Elixir.BeamLisp.Loader/ensure_ready/1" (lambda (ns) (bl-key "ok")))
+;; AOTCache: one SDK, its compiler key fixed at custody time.
+(nf-leaf! "Elixir.BeamLisp.AOTCache/compiler_key/0" (lambda () (nf-world-get (bl-key "compiler-key") "")))
+(nf-leaf! "Elixir.BeamLisp.AOTCache/current_compiler_key/0" (lambda () (nf-world-get (bl-key "compiler-key") "")))
+(nf-leaf! "Elixir.BeamLisp.AOTCache/enabled?/0" (lambda () #f))
+(nf-leaf! "Elixir.BeamLisp.AOTCache/key_for_ns/1"
+ (lambda (ns) (native-raw-map-get (nf-world-get (bl-key "keys") (bl-empty-map)) ns "")))
+(nf-leaf! "Elixir.BeamLisp.AOTCache/key_for_source/1"
+ (lambda (path) (let loop ((rows (nf-world-get (bl-key "namespaces") (bl-empty-map))))
+  (if (not (bl-tag? rows 'map)) "" (let ((e (native-map-pairs rows)))
+   (let scan ((ps e)) (cond ((null? ps) "")
+    ((string=? (native-raw-map-get (bl-nth (car ps) 1) (bl-key "file") "") path)
+     (native-raw-map-get (nf-world-get (bl-key "source-hashes") (bl-empty-map)) (bl-nth (car ps) 0) ""))
+    (else (scan (cdr ps))))))))))
+;; Env custody: exact row snapshots.
+(define nf-env-stack '())
+(nf-leaf! "Elixir.BeamLisp.Env/capture/0"
+ (lambda () (bl-map (bl-key "rows") native-env-rows (bl-key "ns") native-env-current
+                     (bl-key "pdict") (native-pdict))))
+(nf-leaf! "Elixir.BeamLisp.Env/bind/1"
+ (lambda (snapshot)
+  (set! native-env-rows (bl-get snapshot (bl-key "rows") native-env-rows))
+  (set! native-env-current (bl-get snapshot (bl-key "ns") native-env-current))
+  (if (native-map-has? snapshot (bl-key "pdict")) (native-pdict (bl-get snapshot (bl-key "pdict"))))
+  (native-link-changed!) (bl-key "ok")))
+(nf-leaf! "Elixir.BeamLisp.Env/fork/1"
+ (lambda (how)
+  (let ((token (native-unique-integer)))
+   (set! nf-env-stack (cons (list token native-env-rows native-env-current native-pdict nf-world) nf-env-stack))
+   token)))
+(nf-leaf! "Elixir.BeamLisp.Env/destroy/1"
+ (lambda (token)
+  (let scan ((rest nf-env-stack))
+   (cond ((null? rest) bl-nil)
+    ((eqv? (car (car rest)) token)
+     (set! native-env-rows (cadr (car rest))) (set! native-env-current (caddr (car rest)))
+     (native-pdict (cadddr (car rest))) (nf-world (car (cddddr (car rest))))
+     (set! nf-env-stack (cdr rest)) (native-link-changed!) (bl-key "ok"))
+    (else (scan (cdr rest)))))))
+(nf-leaf! "Elixir.BeamLisp.Env/with_env/2" (lambda (token thunk) (nf-call thunk)))
+(nf-leaf! "Elixir.BeamLisp.Env/with_namespace_lock/2" (lambda (ns thunk) (nf-call thunk)))
+(nf-leaf! "Elixir.BeamLisp.Env/with_publication/2" (lambda (ns thunk) (nf-call thunk)))
+(nf-leaf! "Elixir.BeamLisp.Env/with_module_locks/2" (lambda (mods thunk) (nf-call thunk)))
+(nf-leaf! "Elixir.BeamLisp.Env/with_code_evidence_publication/1" (lambda (thunk) (nf-call thunk)))
+(nf-leaf! "Elixir.BeamLisp.Env/code_evidence_generation/0" (lambda () 0))
+(nf-leaf! "Elixir.BeamLisp.Env/live_toolchain_keys/0" (lambda () (list (nf-world-get (bl-key "compiler-key") ""))))
+(nf-leaf! "Elixir.BeamLisp.Env/current_ns/0" (lambda () native-env-current))
+(nf-leaf! "Elixir.BeamLisp.Env/in_ns/1" (lambda (ns) (set! native-env-current ns) (native-declare-ns ns) ns))
+(define native-env-search-paths '())
+(nf-leaf! "Elixir.BeamLisp.Env/add_search_path/1" (lambda (p) (set! native-env-search-paths (cons p native-env-search-paths)) (bl-key "ok")))
+(nf-leaf! "Elixir.BeamLisp.Env/local_var?/2"
+ (lambda (ns name) (not (eq? (native-env-value (native-row (bl-key "ns_defs") ns)) native-missing))))
+(nf-leaf! "Elixir.BeamLisp.Env/ns_definition/2" (lambda (ns name) (native-raw-map-get (nf-ns-defs ns) name nil)))
+(nf-leaf! "Elixir.BeamLisp.Env/candidates/2" (lambda (ns name) (native-candidates ns name)))
+(nf-leaf! "Elixir.BeamLisp.Env/put_link/3" (lambda (ns name link) (native-env-put! (native-row (bl-key "link") ns name) link) (bl-key "ok")))
+(nf-leaf! "Elixir.BeamLisp.Env/match/1" (lambda (pattern) (native-match-rows pattern)))
+(define (native-match-rows pattern)
+ (let ((kind (bl-nth pattern 0)))
+  (let loop ((ps (native-map-pairs native-env-rows)) (out '()))
+   (if (null? ps) (reverse out)
+    (let* ((p (car ps)) (key (bl-nth p 0)))
+     (if (and (bl-tag? key 'tuple) (>= (bl-count key) 2) (eq? (bl-nth key 0) (bl-nth kind 1)))
+      (loop (cdr ps) (cons (bl-tuple (append (bl-items key) (list (bl-nth p 1)))) out))
+      (loop (cdr ps) out)))))))
+;; Bootstrap and package authority: metadata the descriptor asks for; the
+;; native front end computes descriptors only and publishes nothing.
+(nf-leaf! "Elixir.BeamLisp.Bootstrap/manifest/0" (lambda () bl-nil))
+(nf-leaf! "Elixir.BeamLisp.Bootstrap/seed_dir/0" (lambda () bl-nil))
+(nf-leaf! "Elixir.BeamLisp.Bootstrap/loaded_claimed?/0" (lambda () #f))
+(nf-leaf! "Elixir.BeamLisp.Bootstrap/packaged_member?/1" (lambda (f) #f))
+(nf-leaf! "Elixir.BeamLisp.Bootstrap/key_matches?/2" (lambda (a b) #f))
+(nf-leaf! "Elixir.BeamLisp.PackageAuthority/sdk_unit_compiled?/2" (lambda (ns key) #t))
+(nf-leaf! "Elixir.BeamLisp.PackageAuthority/sdk_compiler_row/1" (lambda (ns) bl-nil))
+(nf-leaf! "Elixir.BeamLisp.PackageAuthority/sdk_unit_evidence/2" (lambda (ns key) bl-nil))
+(nf-leaf! "Elixir.BeamLisp.PackageAuthority/factory_lambda_origins!/1" (lambda (x) bl-nil))
+(nf-leaf! "Elixir.BeamLisp.PackageAuthority/kernel_callback_origins!/1" (lambda (x) bl-nil))
+(nf-leaf! "Elixir.BeamLisp.PackageAuthority/local_package_authority/1" (lambda (x) bl-nil))
+(nf-leaf! "Elixir.BeamLisp.PackageAuthority/local_package_authority_report/0" (lambda () bl-nil))
+(nf-leaf! "Elixir.BeamLisp.PackageAuthority/runtime_sdk_entries!/1" (lambda (x) bl-nil))
+(nf-leaf! "Elixir.BeamLisp.PackageAuthority/sdk_checked_declaration_table/1" (lambda (ns) (bl-empty-map)))
+;; Small stdlib leaves the staging path uses.
+(nf-leaf! "Elixir.Kernel/struct/2" (lambda (mod fields) (bl-struct mod fields)))
+(nf-leaf! "Elixir.Map/from_struct/1" (lambda (m) (native-raw-remove m native-struct-key)))
+(nf-leaf! "Elixir.Map/drop/2"
+ (lambda (m keys) (let loop ((ks (native-finite-items keys)) (out m))
+  (if (null? ks) out (loop (cdr ks) (native-raw-remove out (car ks)))))))
+(define (nf-keyword-drop kw key)
+ (let loop ((xs kw)) (cond ((not (pair? xs)) '()) ((bl-key-equal? (bl-nth (car xs) 0) key) (cdr xs)) (else (cons (car xs) (loop (cdr xs)))))))
+(nf-leaf! "Elixir.Keyword/put/3" (lambda (kw k v) (cons (bl-make-tuple k v) (nf-keyword-drop kw k))))
+(nf-leaf! "Elixir.Keyword/take/2"
+ (lambda (kw keys) (let loop ((ks (native-finite-items keys)) (out '()))
+  (if (null? ks) (reverse out) (loop (cdr ks) (let ((p (native-keyword-find kw (car ks)))) (if p (cons p out) out)))))))
+(nf-leaf! "Elixir.Keyword/get/3"
+ (lambda (kw k d) (let ((p (native-keyword-find kw k))) (if p (bl-nth p 1) (bl-invoke d '())))))
+(nf-leaf! "Elixir.Keyword/fetch!/2"
+ (lambda (kw k) (let ((p (native-keyword-find kw k))) (if p (bl-nth p 1) (nf-key-error k kw)))))
+(nf-leaf! "Elixir.List/to_string/1"
+ (lambda (xs) (let loop ((cs (native-finite-items xs)) (out ""))
+  (if (null? cs) out (loop (cdr cs) (string-append out (native-atom-name (car cs))))))))
+(nf-leaf! "Elixir.Range/new/2"
+ (lambda (a b) (bl-struct "Elixir.Range" (bl-map (bl-key "first") a (bl-key "last") b))))
+(nf-leaf! "Elixir.Macro/camelize/1"
+ (lambda (s) (let loop ((cs (string->list (native-char-data s))) (out '()) (up #t))
+  (if (null? cs) (list->string (reverse out))
+   (let ((c (car cs)))
+    (if (char=? c #\_) (loop (cdr cs) out #t)
+     (loop (cdr cs) (cons (if up (char-upcase c) c) out) #f)))))))
+(nf-leaf! "Elixir.Module/concat/1" (lambda (xs) (apply string-append (map native-char-data* (native-finite-items xs)))))
+(nf-leaf! "Elixir.IO/puts/1" (lambda (x) (display (native-char-data* x)) (newline) (bl-key "ok")))
+(nf-leaf! "Elixir.Process/whereis/1" (lambda (name) (bl-key "undefined")))
+(nf-leaf! "Elixir.Code/ensure_loaded?/1" (lambda (mod) (erlang-module-loaded? mod)))
+(define (erlang-module-loaded? mod)
+ (or (not (eq? (bl-get native-module-names (native-module-name mod) native-missing) native-missing))
+     (not (eq? (native-env-value (native-row (bl-key "ns") (native-module-name mod))) native-missing))))
+(nf-leaf! "application/get_application/1" (lambda (app) (bl-key "undefined")))
+(nf-leaf! "Elixir.System/get_env/1" (lambda (k) (let ((v (getenv (native-char-data k)))) (if v v bl-nil))))
+(nf-leaf! "Elixir.System/version/0" (lambda () "28"))
+
+;; The pinned Reader host module (priv/host/reader.bl) is not in this image;
+;; its two services are the compiled `reader` namespace plus a no-op atom
+;; guard (the native reader interns into an already-fixed atom table).
+(define (nf-reader-read-string source path) (bl-invoke (native-global-exact "reader" "read-string") (list source path)))
+(nf-leaf! "Elixir.BeamLisp.Reader/read_string/2" nf-reader-read-string)
+(nf-leaf! "Elixir.BeamLisp.Reader/read_string/1" (lambda (source) (nf-reader-read-string source "native-front")))
+(nf-leaf! "Elixir.BeamLisp.Reader/read_first/1" (lambda (source) (let ((fs (nf-reader-read-string source "native-front"))) (if (null? fs) bl-nil (car fs)))))
+(nf-leaf! "Elixir.BeamLisp.Reader/read_all/1" (lambda (source) (nf-reader-read-string source "native-front")))
+(nf-leaf! "Elixir.BeamLisp.Reader/mapping_atom_limit/1" (lambda (thunk) (nf-call thunk)))
+(nf-leaf! "Elixir.BeamLisp.AtomGuard/reset/0" (lambda () (bl-key "ok")))
+(nf-leaf! "Elixir.BeamLisp.AtomGuard/account!/1" (lambda (n) (bl-key "ok")))
+
+;; ── Front end: files, paths, strings, tuples (staging reads source trees) ──
+(define (native-path-join a b)
+ (cond ((string=? a "") b) ((string=? b "") a)
+  ((char=? (string-ref a (- (string-length a) 1)) #\/) (string-append a b))
+  (else (string-append a "/" b))))
+(define (nf-stat-file path)
+ (if (not (file-exists? path)) (bl-key "error")
+  (bl-map (bl-key "__struct__") (bl-key "Elixir.File.Stat")
+          (bl-key "size") (if (file-directory? path) 4096 (file-size path))
+          (bl-key "type") (if (file-directory? path) (bl-key "directory")
+                           (if (file-regular? path) (bl-key "regular") (bl-key "other")))
+          (bl-key "mode") 0 (bl-key "mtime") bl-nil (bl-key "atime") bl-nil (bl-key "ctime") bl-nil
+          (bl-key "inode") 0 (bl-key "major_device") 0 (bl-key "minor_device") 0
+          (bl-key "links") 1 (bl-key "uid") 0 (bl-key "gid") 0)))
+(nf-leaf! "Elixir.File/stat/1"
+ (lambda (path) (let ((s (nf-stat-file path))) (if (eq? s (bl-key "error")) (bl-make-tuple (bl-key "error") (bl-key "enoent"))
+  (bl-make-tuple (bl-key "ok") s)))))
+(nf-leaf! "Elixir.File/stat!/1"
+ (lambda (path) (let ((s (nf-stat-file path))) (if (eq? s (bl-key "error"))
+  (native-raise (bl-key "error") (native-exception-struct "Elixir.File.Error" (native-nil-defaults '("reason" "path" "action" "message"))
+                  (list (bl-make-tuple (bl-key "reason") (bl-key "enoent")) (bl-make-tuple (bl-key "path") path))) (native-capture-stack))
+  s))))
+(nf-leaf! "Elixir.File/exists?/1" (lambda (p) (file-exists? p)))
+(nf-leaf! "Elixir.File/regular?/1" (lambda (p) (and (file-exists? p) (file-regular? p))))
+(nf-leaf! "Elixir.File/dir?/1" (lambda (p) (and (file-exists? p) (file-directory? p))))
+(nf-leaf! "Elixir.File/read!/1" (lambda (p) (native-read-file p)))
+(nf-leaf! "Elixir.File/read_link/1" (lambda (p) (let ((t (with-exception-catcher (lambda (e) #f) (lambda () (read-link p))))) (if t (bl-make-tuple (bl-key "ok") t) (bl-make-tuple (bl-key "error") (bl-key "enoent"))))))
+(nf-leaf! "Elixir.File/ls!/1" (lambda (p) (map (lambda (n) (if (native-colon-symbol? n) n n)) (directory-list p))))
+(nf-leaf! "Elixir.File/cwd!/0" (lambda () (current-directory)))
+(nf-leaf! "Elixir.File/mkdir_p!/1" (lambda (p) (with-exception-catcher (lambda (e) e) (lambda () (if (not (file-directory? p)) (mkdir p)))) (bl-key "ok")))
+(nf-leaf! "Elixir.Path/join/2" (lambda (a b) (native-path-join a b)))
+(nf-leaf! "Elixir.Path/dirname/1"
+ (lambda (p) (let loop ((i (- (string-length p) 1)))
+  (cond ((< i 0) ".") ((char=? (string-ref p i) #\/) (if (= i 0) "/" (substring p 0 i))) (else (loop (- i 1)))))))
+(nf-leaf! "Elixir.Path/basename/1"
+ (lambda (p) (let loop ((i (- (string-length p) 1)))
+  (cond ((< i 0) p) ((char=? (string-ref p i) #\/) (substring p (+ i 1) (string-length p))) (else (loop (- i 1)))))))
+(nf-leaf! "Elixir.Path/expand/1" (lambda (p) (if (and (> (string-length p) 0) (char=? (string-ref p 0) #\/)) p (native-path-join (current-directory) p))))
+(nf-leaf! "Elixir.Path/split/1"
+ (lambda (p) (let* ((n (string-length p)) (i (let loop ((i (- n 1))) (cond ((< i 0) #f) ((char=? (string-ref p i) #\/) i) (else (loop (- i 1)))))))
+  (bl-make-tuple (if i (if (= i 0) "/" (substring p 0 i)) ".") (if i (substring p (+ i 1) n) p)))))
+(nf-leaf! "Elixir.Path/type/1" (lambda (p) (if (file-directory? p) (bl-key "directory") (if (file-regular? p) (bl-key "regular") (bl-key "other")))))
+(nf-leaf! "Elixir.Path/relative_to/2"
+ (lambda (p base) (let ((b (if (and (> (string-length base) 0) (char=? (string-ref base (- (string-length base) 1)) #\/)) base (string-append base "/"))))
+  (if (nf-string-prefix? b p) (substring p (string-length b) (string-length p)) p))))
+(nf-leaf! "Elixir.Path/wildcard/2" (lambda (pattern opts) (list)))
+(nf-leaf! "Elixir.System/unique_integer/1" (lambda (opts) (native-unique-integer)))
+(nf-leaf! "Elixir.Tuple/insert_at/3"
+ (lambda (t i v) (native-assert-tuple t)
+  (bl-tuple (let loop ((xs (bl-items t)) (k 0) (out '()))
+             (cond ((null? xs) (if (<= i k) (reverse (cons v out)) (reverse out)))
+                   ((= k i) (loop xs (+ k 1) (cons v (cons (car xs) out))))
+                   (else (loop (cdr xs) (+ k 1) (cons (car xs) out))))))))
+(nf-leaf! "Elixir.BeamLisp.PackageAuthority/sdk_unit_compiled?/1"
+ (lambda (ns) (not (eq? (nf-ns-entry ns) native-missing))))
+
+(nf-leaf! "Elixir.BeamLisp.Env/env_id/0" (lambda () "global"))
+(nf-leaf! "Elixir.BeamLisp.Env/current_ns/0" (lambda () native-env-current))
