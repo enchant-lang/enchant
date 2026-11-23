@@ -85,6 +85,16 @@ this costs one SDK build to find (batch 17: generation P failed at
 `host.beam-lisp` after 20 units). Before handing back a `priv/host` edit, run
 `grep -n "^(def \|^(def \^" priv/host/*.bl`; the only hits should be none.
 
+**The producer's own entry point runs on the installed floor.** Generation B
+runs `produce.exs` through `priv/host/beam_lisp.bl`'s `run_file` using the
+compiler of the floor that was already installed. A new boot function called
+from there (batch 17: `BeamLisp.Compiler/eval_string_forms/3`) is undefined on
+that floor and fails the build with `UndefinedFunctionError`. Guard a new call
+whose absence is acceptable with
+`(erlang/function_exported :Elixir.BeamLisp.Compiler :name arity)` and keep the
+old path; the file's first use of `assert_native_framework_execution!` is the
+precedent.
+
 **A failed SDK preparation's message shows the error chain, not its leaf.** U3
 reports the first three `error:` lines, which for a Nix dependency failure are
 all `Cannot build '<drv>'.` The cause is higher in the same events file, e.g.
