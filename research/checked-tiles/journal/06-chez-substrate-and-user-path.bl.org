@@ -203,6 +203,69 @@ process per command (a resident client) and a smaller launcher than the shell
 script plus =dirname=/=readlink=; the irreducible part is one scheduling hop,
 one socket round trip and the print.
 
+* The warm floor, 34 ms removed
+The two content-fixed client costs — the engine inventory (22.8 ms, 976 files
+verified by stat stamp) and the project generation (~11 ms) — were recomputed on
+every command. A per-tree resident now answers them. It is started by the first
+client that misses it (`drop-launcher --generation-service ROOT`, detached) and
+is optional: `BL_CHECKOUT_GENERATION_SERVICE=0` disables it, and every failure is
+a fallback to the same local computation.
+
+The resident is the authority for "did the tree change", backed by the kernel.
+It watches the engine tree, the project tree and the extra roots with inotify;
+an `L` file's parent and every `D` directory the realm's manifest recorded are
+watched too, so a new candidate or an edited loaded file is an event. Every
+answer drains the queue immediately before replying; any event invalidates the
+affected scope, and the scope is recomputed — never guessed. Watches are
+installed before a computation, so an event during it turns the answer into a
+fallback. `IN_Q_OVERFLOW`, a failed watch, a replaced root (dev+ino change) and
+a non-local filesystem (the `statfs` magic is checked) all yield `fallback`.
+The tokens are produced by the same `checkout_generations()` the client uses, so
+a cached and a local answer are byte-identical (unit test). The realm stays the
+authority for retirement: it holds the token it was opened against and retires
+when the client's differs.
+
+Measured with the branch's launcher on the `/tmp/u9root` harness, load average
+6.6 on 16 cores, 20 runs: baseline (service off) median 43.1 ms; warm service
+median 16.9 ms — 26.2 ms removed. The phase marks show the mechanism: a service
+query is 340 µs, the local computation it replaces is 26.2 ms. An edit to a file
+the realm recorded retires it (stored generation and env ref change; the next
+run prints the new value); an edit to an unrelated file keeps every token; a
+new file appearing in a recorded search directory changes the project token.
+`cargo test` passes everything it passes on main (the two `builder_tests`
+native-publication failures need store custody this sandbox lacks). The gate:
+the ten realm/seed/JS files 10/10 forward, reversed and forward again,
+`loader_sources_test` 43 and `loader_sources_realm_test` 4, `seed_runtime_abi`
+11/11 warm twice, `warm_request_env` 3, and the helper-edit scenario.
+Evidence: =research/checked-tiles/evidence/warm-floor-u10.json=.
+
+The first cut of the resident failed in a real checkout, and the reasons are
+worth keeping. It watched the WHOLE checkout root recursively, so a real tree
+(research/, .git, generated trees) put the first answer seconds past every
+client timeout; a manifest `D` line was watched through its PARENT, so a
+recorded search root under /tmp made /tmp watched and unrelated temp traffic —
+including the resident's own debug log, which it had put in /tmp — invalidated
+the project pin on every answer; and there was no single-instance lock, so two
+clients could each start a resident. The fixed plan watches the engine policy's
+roots recursively, the checkout root and project root non-recursively, the
+declared/extra roots and `overrides/` recursively, and manifest entries (a `D`
+directory itself, an `L` file's parent), capped at 20,000 watches. Recorded
+inputs that no longer exist are not watched through a shared ancestor; they are
+stat'd once per answer, so their reappearance invalidates without /tmp noise.
+One resident per root is held by an `flock` on `<socket>.lock`, and the winner
+unlinks a stale socket instead of serving it. On a scratch copy of main
+(engine and project trees only, load 6.9): warm `run` 55.7 ms with the service
+off, 18.7 ms with it on (−37 ms); a warm direct probe to the socket answers in
+0.27 ms; two simultaneous starts leave exactly one resident; the ten files pass
+in three orders on that copy, seed_runtime_abi passes warm twice, and the
+helper-edit scenario is green.
+
+What remains for 1 ms is the VM side: the handler is still 13.6 ms, of which
+about 10 ms is per-request process spawning, the re-opened realm and custody for
+unchanged modules, and the rest is re-evaluating the user file. The next two
+removals are the VM's one-request-one-process path and a compact keep-alive
+request.
+
 * Text and tuple leaves on Chez
 The profiler now also charges anonymous frames to the nearest named frame and records leaf ← caller pairs. 56% of leaf samples had been anonymous closures. With that attribution, the hot leaves are host primitives:
 | Leaf ← caller | Samples (of ~8,100) |

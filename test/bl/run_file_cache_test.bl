@@ -1,0 +1,88 @@
+; run_file_cache_test.bl — `run FILE` replays an unchanged file's compiled forms.
+;
+; The first run reads, compiles and runs every form. The realm then keeps the
+; compiled forms, keyed by the file's source hash, and each later run replays
+; them: no read, no compile, no macro expansion, but every form still executes.
+; An entry is used only while the realm's `definition_context` equals the one
+; recorded after that file's previous run, so any other change to the realm
+; recompiles. These tests drive the difference through a MACRO that writes at
+; expansion time: a compile appends "c", every execution appends "r".
+
+(ns run-file-cache-test)
+
+(defn- scratch [name]
+  (let [dir (str (System/tmp_dir!) "/bl-run-cache-" name "-"
+                 (System/unique_integer (list :positive)))]
+    (File/mkdir_p! dir)
+    dir))
+
+(defn- ticked-script
+  "A file whose COMPILATION writes \"c\" (the macro expands) and whose
+   EXECUTION writes \"r\"."
+  [log noise]
+  (str "(defmacro cache-tick [] (File/write! " (pr-str log) " \"c\" (list :append)) 1)\n"
+       "(cache-tick)\n"
+       "(File/write! " (pr-str log) " \"r\" (list :append))\n"
+       noise "\n"))
+
+(defn- run! [script] (BeamLisp/run_file script))
+
+(deftest an-unchanged-file-replays-without-recompiling
+  (let [dir (scratch "unchanged")
+        log (str dir "/log")
+        script (str dir "/script.bl")]
+    (try
+      (File/write! script (ticked-script log ""))
+      (run! script)
+      (is (= "cr" (File/read! log)) "the first run compiles and executes")
+      (run! script)
+      (is (= "crr" (File/read! log))
+          "the second run executes but does not compile again")
+      (run! script)
+      (is (= "crrr" (File/read! log)))
+      (finally (File/rm_rf! dir)))))
+
+(deftest an-edited-file-compiles-again
+  (let [dir (scratch "edited")
+        log (str dir "/log")
+        script (str dir "/script.bl")]
+    (try
+      (File/write! script (ticked-script log ""))
+      (run! script) (run! script)
+      (is (= "crr" (File/read! log)))
+      (File/write! script (ticked-script log "; an edit changes the source hash"))
+      (run! script)
+      (is (= "crrcr" (File/read! log)) "the edited file compiles again")
+      (run! script)
+      (is (= "crrcrr" (File/read! log)) "and its new compilation is cached")
+      (finally (File/rm_rf! dir)))))
+
+(deftest another-change-in-the-realm-invalidates-the-cache
+  (let [dir (scratch "invalidated")
+        log (str dir "/log")
+        script (str dir "/script.bl")]
+    (try
+      (File/write! script (ticked-script log ""))
+      (run! script) (run! script)
+      (is (= "crr" (File/read! log)))
+      ;; Any namespace definition in the realm changes `definition_context`.
+      (BeamLisp.Compiler/eval_string "(ns cache-invalidated-probe) (defn marker [] 1)"
+        (BeamLisp.Compiler/new_env) "cache_invalidated_probe")
+      (run! script)
+      (is (= "crrcr" (File/read! log))
+          "the next run recompiles rather than replaying code compiled without that definition")
+      (finally (File/rm_rf! dir)))))
+
+(deftest a-file-that-switches-namespaces-replays-its-namespaces
+  (let [dir (scratch "ns-switch")
+        log (str dir "/log")
+        script (str dir "/script.bl")]
+    (try
+      (File/write! script
+        (str "(ns cache-switch-a)\n(defn a [] 1)\n(ns cache-switch-b)\n"
+             "(defn b [] 2)\n(File/write! " (pr-str log) " \"r\" (list :append))\n"))
+      (run! script) (run! script)
+      (is (= "rr" (File/read! log)) "both runs execute after their namespace switch")
+      (is (= 2 ((BeamLisp.Env/fetch! "cache-switch-b" "b")))
+          "the last namespace's definition exists after a replayed run")
+      (finally (File/rm_rf! dir)))))

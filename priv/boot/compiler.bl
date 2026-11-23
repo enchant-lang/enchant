@@ -5679,6 +5679,67 @@
         modname (erlang/binary_to_atom (str "Elixir.BeamLisp.Eval.M" n))]
     (lower/eval-anf modname node)))
 
+(defn eval_form_record
+  "`eval_form`, and also the form's compiled bytes and the namespace it ran
+   between: `{:value v :beam b :module m}`. Used by the source recorder below."
+  [form env]
+  (assert-native-evaluation!)
+  (let [node (compile form env)
+        n (System/unique_integer (list :positive))
+        modname (erlang/binary_to_atom (str "Elixir.BeamLisp.Eval.M" n))
+        r (lower/eval-anf-record modname node)]
+    {:value (:value r) :beam (:beam r) :module modname}))
+
+(defn settle-links!
+  "Export definitions evaluated so far: one shim rebuild per namespace."
+  []
+  ; defs evaluated above may sit behind their shim's forwarding handler
+  ; (Link/defvar skips per-def shim rebuilds, BUG-112): export them now, one
+  ; rebuild per namespace for the whole source
+  (when (erlang/function_exported :Elixir.BeamLisp.Link :settle 0)
+    (BeamLisp.Link/settle)))
+
+(defn eval_string_forms
+  "`eval_string`, and record what a REPLAY needs: for each form, its module,
+   its compiled bytes, and the namespace it ran between. `run_eval_forms`
+   re-runs those modules without reading or compiling again. Returns
+   `{:value last :forms [{:module :beam :ns-before :ns-after} …]}`.
+
+   Running the forms here is what makes compiling each one legal: a later form
+   may use a macro or a link the earlier form established. The recording adds
+   no effect of its own — the first evaluation is exactly `eval_string`'s."
+  [source env file]
+  (assert-native-evaluation!)
+  (checked-context-env env)
+  (BeamLisp.Env/in_ns (:ns env))
+  (let [forms (BeamLisp.Ns.Reader/read_string source file)]
+    (loop [remaining (to-list forms) value nil recorded []]
+      (if (empty? remaining)
+        (do (settle-links!) {:value value :forms recorded})
+        (let [form (first remaining)
+              ns-before (BeamLisp.Env/current_ns)
+              r (eval_form_record form (assoc env :ns (BeamLisp.Env/current_ns)))]
+          (recur (rest remaining) (:value r)
+                 (conj recorded {:module (:module r) :beam (:beam r)
+                                 :ns-before ns-before
+                                 :ns-after (BeamLisp.Env/current_ns)})))))))
+
+(defn run_eval_forms
+  "Replay `eval_string_forms`'s record: bind each form's namespace, run its
+   compiled module, bind the namespace it left behind, and return the last
+   value. No form is read or compiled, and eval-anf's retention rule is
+   unchanged (a closure-producing module stays loaded; the rest are released
+   when run/0 returns)."
+  [recorded]
+  (let [v (reduce (fn [_ f]
+                    (BeamLisp.Env/in_ns (:ns-before f))
+                    (let [x (lower/run-eval-beam (:module f) (:beam f))]
+                      (BeamLisp.Env/in_ns (:ns-after f))
+                      x))
+                  nil recorded)]
+    (settle-links!)
+    v))
+
 (defn eval_string
   "Read, compile and evaluate every form in `source`; return the last value.
 
@@ -5686,20 +5747,7 @@
    modules and compile errors can name it. Enters `env`'s namespace first, and
    re-reads each form's namespace so mid-source `ns` switches take effect."
   [source env file]
-  (assert-native-evaluation!)
-  (checked-context-env env)
-  (BeamLisp.Env/in_ns (:ns env))
-  (let [forms (BeamLisp.Ns.Reader/read_string source file)
-        v (reduce (fn [_ form]
-                    (eval_form form (assoc env :ns (BeamLisp.Env/current_ns))))
-                  nil
-                  (to-list forms))]
-    ; defs evaluated above may sit behind their shim's forwarding handler
-    ; (Link/defvar skips per-def shim rebuilds, BUG-112): export them now, one
-    ; rebuild per namespace for the whole source
-    (when (erlang/function_exported :Elixir.BeamLisp.Link :settle 0)
-      (BeamLisp.Link/settle))
-    v))
+  (:value (eval_string_forms source env file)))
 
 (defn read_data
   "Read ONE top-level form of `source` as runtime DATA (never evaluated),
