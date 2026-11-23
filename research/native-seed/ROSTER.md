@@ -381,6 +381,16 @@ census to start from.
 - `(- 0.0)` prints `0.0` on JS, `-0.0` on the BEAM; `erlang/-/1` has no JS leaf.
 - **Done when.** Both answer as on the BEAM; a js_diff case for each.
 
+#### W2 ⏳ Two files still fail inside a multi-file test run · S · BL
+- On the batch-5 and batch-10 SDKs: in a run of the ten realm/seed/JS files (W1's list),
+  `realm_ownership_test` fails `a-shared-namespace-is-named-from-its-hash` with
+  "Shared namespace admission refused … {:reason :compiler-authority-unavailable}" and
+  `seed_runtime_abi_test` fails 8 assertions ("publishes … public surface" → false). Both pass alone.
+- W1 made the runs coherent; something an earlier file does still breaks the compiler authority and
+  the seed publication. Bisect which earlier file, and fix the isolation.
+- **Done when.** The ten files pass in both orders.
+- Card `0c9a9cf3d` records the first observation.
+
 #### W1 ✅ A multi-file `bl test` breaks after a realm-retirement test · S · BL
 - **Why.** On `main` (checked 2026-11-22 on the batch-2 SDK, without U1), `./bin/bl test` with
   `test/bl/contextual_realm_retirement_test.bl` first and nine realm/seed/JS files after it:
@@ -448,6 +458,7 @@ Cards in one lane conflict; lanes run at the same time.
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | U1c: one manifest line per searched directory | Misses batched per directory with an entry digest; the client lists each once; declared roots only from top-level `:paths`. Manifest after ten files 1,348 → ~21 lines; project statx −73.6%; warm run 87–96 → 77–87 ms, 7,509 statx per request | (batch 10) |
 | ✅ | U1: the client digests what the realm loaded | The loader records each resolved source and absent candidate in `.bl/realm-sources.v1` (epoch token, self-healing); the client digests declared roots plus exactly those. An edited test helper is seen; warm run 152 → 87–96 ms, `--version` 77–80 ms. Next (U1c): 2,506 absent lines and ~35k statx per request | `2d71662e7` |
 | ✅ | `Loader/ns_home` answers in JavaScript | A page has no realms (`:global`); all 23 js_* files pass | `2d71662e7` |
 | ✅ | U7: execution receipts derived on first use | `Env/mark_emitted` stored a computed receipt (an ANF walk) for all 1,438 definitions a cold start publishes; it now stores `{:deferred …}` and the row's decoder derives it. Republication of 158 definitions 70 → 17.7 ms; cold start median 3,375 → 3,247 ms (4 pairs). Batch preload, `find_file` memo and "something compiles" measured and dropped | `0c9a9cf3d` |
