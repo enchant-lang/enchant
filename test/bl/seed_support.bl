@@ -103,12 +103,29 @@
     (BeamLisp.Env/with_ns "core"
       (fn [] (BeamLisp/eval (File/read! (str priv "/std/test.bl")))))))
 
+;; The ebin the RUNNING APPLICATION booted from: its `priv` directory's sibling
+;; `ebin`. On an SDK that is the selected image's floor.
+(defn- runtime-ebin
+  []
+  (let [priv (erlang/apply :code :priv_dir (list :beam_lisp))]
+    (when (erlang/is_list priv)
+      (let [ebin (Path/join (Path/dirname (erlang/list_to_binary priv)) "ebin")]
+        (when (File/dir? ebin) ebin)))))
+
 ;; The floor a seed test reads: an explicit BL_SEED_EBIN, else the selected SDK
-;; image's ebin (BL_EBIN, which bin/bl exports for every checkout VM), else the
-;; tree's own `build` output. A checkout's `build/` is only current right after
-;; a tree build, so preferring it made these tests judge whatever was left there.
+;; image's ebin (BL_EBIN, which bin/bl exports on its COLD path), else the ebin
+;; the running application actually booted from, else the tree's own `build`
+;; output.
+;;
+;; The application-image fallback is REQUIRED on the native checkout transport:
+;; bin/bl execs the client BEFORE it exports BL_EBIN, and a reused realm keeps
+;; the environment it started with, so a test VM can have neither BL_SEED_EBIN
+;; nor BL_EBIN (measured: this helper answered `<checkout>/build`, which does
+;; not exist, and every seed suite refused an "incomplete boot closure").
+;; A checkout's `build/` is only current right after a tree build, so it stays
+;; last: preferring it made these tests judge whatever was left there.
 (defn floor-ebin [root]
-  (or (not-empty (System/get_env "BL_SEED_EBIN")) (not-empty (System/get_env "BL_EBIN")) (Path/join root "build")))
+  (or (not-empty (System/get_env "BL_SEED_EBIN")) (not-empty (System/get_env "BL_EBIN")) (runtime-ebin) (Path/join root "build")))
 
 (defn seed-run! [opts] (let [r (seed/run opts)] (restore-assertions!) r))
 (defn seed-check! [opts] (let [c (seed/check opts)] (restore-assertions!) c))

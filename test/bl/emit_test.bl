@@ -20,8 +20,15 @@
 ;      the module it stands in for would be a silent behaviour change.
 ;
 ; Nothing here replaces the live module. The probe is compiled under its own
-; atom; the deployment claim (the probe IS the committed floor) is the seed's
+; atom; the deployment claim (the probe IS the deployed floor) is the seed's
 ; question, judged on `bl_source_hash` by `bl seed --check`.
+;
+; A FRESH SDK REGENERATES its floor with the compiler it just built, so the
+; live module is the SDK's installed floor, NOT necessarily the checkout's
+; committed `priv/bootstrap/seed` beam: a floor beam's bytes are a function of
+; source AND compiler key. The post-integration guard below therefore judges
+; source digests and the INSTALLED floor, never the committed bytes; currency of
+; the committed floor stays `bl seed --check`'s question.
 ;
 ; Run: bin/bl test test/bl/emit_test.bl
 
@@ -49,6 +56,25 @@
 
 (defn- compile-probe []
   (elem (compile-probe*) 0))
+
+(defn- beam-source-hash
+  "The `bl_source_hash` a beam's attribute chunk carries, read WITHOUT loading
+   it — the same read the seed's host judge does. A beam's attribute value is a
+   one-element list, normalised here to the binary."
+  [path]
+  (let [r (beam_lib/chunks (String/to_charlist path) (list :attributes))]
+    (when (and (tuple? r) (erlang/== :ok (elem r 0)))
+      (let [attrs (elem (erlang/hd (elem (elem r 1) 1)) 1)
+            v (Keyword/get attrs :bl_source_hash)]
+        (if (and (erlang/is_list v) (= 1 (erlang/length v)))
+          (erlang/hd v) v)))))
+
+(defn- sha256-hex
+  "The sha256 of `bytes` as lowercase hex. Compare digests, not the raw 18 KB
+   beams: a mismatch then reports two short strings rather than dumping the
+   whole floor into the failure report."
+  [bytes]
+  (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
 
 (def ^:private live :Elixir.BeamLisp.Emit)
 
@@ -439,18 +465,38 @@
 
 
 (deftest once-seeded-the-live-module-is-the-floor-beam
-  ; Post-integration guard. While `priv/bootstrap/seed/Elixir.BeamLisp.Emit.beam`
-  ; is absent the port is still a candidate and the differential above is the
-  ; gate. Once the floor carries it, the live module MUST be those bytes — not a
-  ; leftover `lib/*.ex` artifact — and the probe compiled from `priv/host/emit.bl`
-  ; is then compared against the committed beam in every test above.
-  (let [seed (Path/join (BeamLisp/cwd) "priv/bootstrap/seed/Elixir.BeamLisp.Emit.beam")]
-    (if (File/exists? seed)
-      (let [installed (unicode/characters_to_binary (code/which live))]
-        (is (some? installed) "the module is loaded from a beam")
-        (is (= (File/read! seed) (File/read! installed))
-            "the live module's bytes ARE the committed seed's bytes"))
-      (is true "the emit floor is not seeded yet"))))
+  ; A FRESH SDK REGENERATES its floor with the compiler it just built, and a
+  ; floor beam is a function of source AND compiler key. So the live module's
+  ; bytes need NOT equal the checkout's COMMITTED `priv/bootstrap/seed` beam:
+  ; that beam was built by an older compiler generation (regenerate-seed's
+  ; `floor-current?` and the manifest's `compiler_key` make the key part of the
+  ; identity). Comparing those two bytes tested the SDK's generator against a
+  ; stale artifact, not the deployment.
+  ;
+  ; The property that must hold on EVERY SDK is the one the header names: a
+  ; deployed Emit is a FLOOR beam built from this pinned source, never a
+  ; leftover `lib/*.ex` artifact. Two checks prove it without assuming a
+  ; compiler generation:
+  ;   * the live beam's `bl_source_hash` is the digest of `priv/host/emit.bl`,
+  ;     the same value the seed's host judge computes from the source bytes;
+  ;   * when the runtime's INSTALLED floor (`Bootstrap/seed_dir`) carries an
+  ;     Emit beam, the live module IS those bytes.
+  ; The committed floor's own currency is `bl seed --check`'s question,
+  ; judged on `bl_source_hash` — exactly what the file header says.
+  (let [which (code/which live)
+        live-path (if (erlang/is_list which) (unicode/characters_to_binary which) which)
+        floor (Path/join (BeamLisp.Bootstrap/seed_dir) "Elixir.BeamLisp.Emit.beam")]
+    (is (string? live-path) "the module is loaded from a beam")
+    (when (string? live-path)
+      ; The seed's host judge hashes the SOURCE bytes, so the live beam's
+      ; `bl_source_hash` must be the digest of `priv/host/emit.bl` here.
+      (let [pinned (sha256-hex (File/read! (probe-source)))]
+        (is (= pinned (beam-source-hash live-path))
+            "the live module was compiled from the pinned host source"))
+      (if (File/exists? floor)
+        (is (= (sha256-hex (File/read! floor)) (sha256-hex (File/read! live-path)))
+            "the live module's bytes ARE the installed floor's bytes")
+        (is true "the runtime has no installed Emit floor beam to compare")))))
 
 (deftest the-pinned-source-compiles-reproducibly
   (let [b1 (File/read! (elem (compile-probe*) 1))
