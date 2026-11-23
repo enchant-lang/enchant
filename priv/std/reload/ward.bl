@@ -283,6 +283,8 @@
    exact PID; fatal exits are reported immediately, rather than waiting for the
    timeout. The caller owns the isolated scope so even an uncatchable worker
    death cannot leak its scope. Timeout kills and awaits that exact worker.
+   A finished file's worker exits `:shutdown` (not normally), so processes the
+   file linked are terminated with it instead of surviving into the next file.
    Native executable ownership and explicit environment conveyance are retained.
    `path`, when given, is the file the source came from; it locates a load
    crash."
@@ -298,7 +300,20 @@
                           (fn []
                             (env/bind env-token)
                             (let [result (evaluate-file scope src ns path)]
-                              (erlang/send me [:ward-result (erlang/self) result])))
+                              (erlang/send me [:ward-result (erlang/self) result])
+                              ;; End the file with a NON-NORMAL exit. Anything the
+                              ;; file `start_link`ed (a defserver, a supervisor) is
+                              ;; linked to THIS worker, and the BEAM ignores a
+                              ;; normal exit signal — so a server the file started
+                              ;; outlived the file and held its realm's class code
+                              ;; forever. The next run recompiles that class and
+                              ;; publication is refused (`:native_start_class_code_held`,
+                              ;; measured in the reversed ten-file gate). `:shutdown`
+                              ;; is the reason supervisors trap and unwind on; the
+                              ;; result is already sent, and signals from this
+                              ;; process arrive in order, so the caller reads it
+                              ;; before the DOWN.
+                              (erlang/exit :shutdown)))
                           :monitor (list))
                 worker (elem started 0) monitor (elem started 1)]
             (receive
@@ -381,7 +396,19 @@
   "Load the test library (`deftest`/`is`/`run-tests`) into core unless the image
    already carries the CURRENT one. `bl test` pre-loads it; `bl run` and
    `beam_lisp.ward` do not, so ward loads it itself and is self-contained in
-   every entry point."
+   every entry point.
+
+   The library is TIER code (it lives at `priv/std/test.bl` and declares no
+   namespace of its own), so it is loaded into the GLOBAL env — never into the
+   env the run was invoked from. That distinction is the isolation: under
+   `bl test` the invoking env is the project's REALM, a definition there is a
+   scoped compiler generation, and `local_package_authority` then declines
+   EVERY certificate in every env that chains through it with
+   `:unsupported scoped compiler context` — measured: 462 `core` definitions
+   left in the realm, `Shared namespace admission refused` in every later file
+   and every later command. A run's own fork is no better: the file's env
+   chains THROUGH it, so the library's definitions would still be a scoped
+   compiler context for the very code being tested."
   []
   (let [src (test-lib-source)]
     (when (or (not (deftest-available?)) (not= src (deref loaded-lib)))
@@ -392,13 +419,19 @@
       (BeamLisp.Env/ensure_sdk_runtime!)
       ;; the test lib declares no (ns …); it loads INTO core, so its macros
       ;; resolve from every namespace via the core fallback (same as cond/when).
-      (BeamLisp.Env/with_ns "core" (fn [] (env/eval src)))
+      ;; GLOBAL rows are what the compiler authority admits (`:global` or a
+      ;; zero scoped generation), so this is also the only home that keeps a
+      ;; test run's own assertions certifiable.
+      (BeamLisp.Env/with_env :global
+        (fn [] (BeamLisp.Env/with_ns "core" (fn [] (env/eval src)))))
       (swap! loaded-lib (fn [_] src)))))
 
 (defn- warm-base
-  "A warm base env: the test library loaded once into a fresh fork of the current
-   env, so every file forks off it without re-loading the prelude/test lib. The
-   base is never mutated by a run — files fork OFF it, isolating their writes."
+  "A warm base env: the test library loaded once (globally, see
+   `ensure-test-lib!`) and a fresh fork of the current env, so every file forks
+   off it without re-loading the prelude/test lib. The base is never mutated by
+   a run — files fork OFF it, isolating their writes; and the env the run was
+   invoked from (the project realm, under `bl test`) is not written to at all."
   []
   (ensure-test-lib!)
   (let [base (env/fork)]

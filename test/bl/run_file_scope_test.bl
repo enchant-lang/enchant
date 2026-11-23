@@ -1,0 +1,44 @@
+; run_file_scope_test.bl — `bl run` leaves the env it ran in as it found it (W2).
+;
+; `*command-line-args*` is a compat var bound per run. Interning it into core in
+; the CALLING env makes that env's `core` a scoped compiler context, and every
+; later `local_package_authority` in a chain through it declines
+; (`:unsupported scoped compiler context`) — measured as the realm-wide
+; `Shared namespace admission refused` after any `bl run` in a project realm.
+; The binding belongs at :global: every chain ends there, and the authority
+; admits global rows.
+
+(ns run-file-scope-test)
+
+(defn- core-rows
+  "Core's generation rows in the envs the CALLER chains through, `:global`
+   excluded: a global definition is the admitted home for library bindings, so
+   only a scoped row is the caller's env being written."
+  []
+  (filter (fn [r] (not= :global (elem r 0)))
+          (BeamLisp.Env/namespace_generations (list "core"))))
+
+(deftest run-file-leaves-the-callers-env-untouched
+  (let [root (str (System/tmp_dir!) "/bl-run-scope-" (System/unique_integer (list :positive)))
+        script (str root "/script.bl")]
+    (File/mkdir_p! root)
+    (File/write! script "(println :run-file-scope)")
+    (try
+      (let [before (core-rows)]
+        (BeamLisp/run_file script)
+        (is (= before (core-rows))
+            "the caller's own core rows did not change"))
+      (finally (File/rm_rf! root)))))
+
+(deftest the-binding-is-visible-at-global-not-in-the-caller
+  (let [root (str (System/tmp_dir!) "/bl-run-args-" (System/unique_integer (list :positive)))
+        script (str root "/args.bl")]
+    (File/mkdir_p! root)
+    (File/write! script "(println *command-line-args*)")
+    (try
+      (BeamLisp/run_file script)
+      ;; the compat var exists for the NEXT reader too, from the global env
+      (is (not= :error (BeamLisp.Env/with_env :global
+                         (fn [] (BeamLisp.Env/fetch "core" "*command-line-args*"))))
+          "bound in core at :global")
+      (finally (File/rm_rf! root)))))
