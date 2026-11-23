@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Card N2b: extract priv/host/loader.bl's source-declaration scan for the
+"""Card N2b: extract priv/host/loader.bl's source-declaration scan and source reader for the
 native front end. The pinned host Loader is not in the native image; these
 functions are pure reader-data walks. Each is renamed nfl-NAME and evaluated
 in host.aot (front-end/stage.bl routes BeamLisp.Loader/source_decls* here).
@@ -10,7 +10,10 @@ import re, sys
 
 NAMES = ["read_forms", "form-unmeta", "form-head-args", "form-name", "private-name?",
          "decl-line", "protocol-decl-lines", "class-decl-lines", "native-decl-lines",
-         "source_decls_from"]
+         "source_decls_from",
+         # read_source: literate .bl.md / .bl.org documents load their code cells
+         "read_source", "doc_content", "strip_shebang", "doc_source", "collect_doc_cells",
+         "take_until", "plain-ext-list", "list-member?"]
 
 def forms(text):
     """Top-level (defn ...) forms with their names, by paren depth."""
