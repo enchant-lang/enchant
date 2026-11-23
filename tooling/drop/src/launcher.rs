@@ -16,6 +16,7 @@ include!("hooks.rs");
 include!("checkout.rs");
 include!("generation.rs");
 mod engine_inputs;
+mod checkout_platform;
 mod dev_reload;
 mod command_domain;
 

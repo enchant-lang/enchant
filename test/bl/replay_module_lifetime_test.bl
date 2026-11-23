@@ -1,0 +1,93 @@
+; replay_module_lifetime_test.bl — a replayed form's module stays loaded, bounded.
+;
+; `run FILE` replays an unchanged file's recorded forms (run_file_cache_test).
+; Loading and retiring each form's module on every replay was the largest part of
+; a warm `bl run` (F2, research/checked-tiles/evidence/warm-floor-f1.json), so
+; `lower/run-eval-beam` now keeps a replayed module loaded in a VM-wide table of
+; `lower/replay-retained-limit` modules. A module that leaves the table goes
+; through eval-anf's own retirement; one that is gone is loaded again.
+; Run: bin/bl test test/bl/replay_module_lifetime_test.bl
+
+(ns replay-module-lifetime.test (:require [compiler :as c] [lower :as sc]))
+
+(def kenv (assoc (c/new-env "user") :ns "user"))
+(def ctr (atom 0))
+(defn- fresh [] (erlang/binary_to_atom (str "bl_rml_" (System/unique_integer (list :positive)) "_" (swap! ctr inc))))
+(defn- compile-anf [src] (c/compile (BeamLisp.Reader/read_one src) kenv))
+(defn- loaded? [m] (erlang/module_loaded m))
+(defn- retained? [m] (maps/is_key m (:beams (sc/replay-retained))))
+
+(defn- recorded
+  "A form compiled and run once the way `eval_string_forms` records it: its
+   module is released (closure-free) and its bytes are kept for replay."
+  [src]
+  (let [m (fresh) r (sc/eval-anf-record m (compile-anf src))]
+    [m (:beam r) (:value r)]))
+
+(deftest a-replayed-module-stays-loaded
+  (let [[m beam v] (recorded "(+ 40 2)")]
+    (is (= 42 v))
+    (is (not (loaded? m)) "the recording run releases it, as before")
+    (is (= 42 (sc/run-eval-beam m beam)))
+    (is (loaded? m) "the first replay loads it and keeps it")
+    (is (retained? m))
+    (let [md5 (erlang/apply m :module_info (list :md5))]
+      (is (= 42 (sc/run-eval-beam m beam)))
+      (is (= md5 (erlang/apply m :module_info (list :md5))) "the second replay runs the same loaded code"))))
+
+(deftest a-module-retired-elsewhere-is-loaded-again
+  (let [[m beam _] (recorded "(* 6 7)")]
+    (is (= 42 (sc/run-eval-beam m beam)))
+    (code/delete m)
+    (code/soft_purge m)
+    (is (not (loaded? m)))
+    (is (= 42 (sc/run-eval-beam m beam)) "a replay of a module that is gone loads it again")
+    (is (loaded? m))))
+
+(deftest the-retained-table-is-bounded
+  (let [limit (sc/replay-retained-limit)
+        [first-m first-beam _] (recorded "(+ 1 1)")]
+    (sc/run-eval-beam first-m first-beam)
+    (is (retained? first-m))
+    (doseq [i (range limit)]
+      (let [[m beam _] (recorded (str "(+ " i " 2)"))]
+        (sc/run-eval-beam m beam)))
+    (let [table (sc/replay-retained)]
+      (is (= limit (count (:order table))))
+      (is (= limit (count (:beams table))))
+      (is (not (retained? first-m)) "the oldest leaves the table")
+      (is (not (loaded? first-m)) "and, closure-free, is retired"))
+    (is (= 2 (sc/run-eval-beam first-m first-beam)) "and replays again by loading")))
+
+(deftest a-closure-bearing-replay-keeps-working-after-it-leaves
+  (let [[m beam f] (recorded "(let [k :kept] (fn [x] [k x]))")]
+    (is (= [:kept 1] (f 1)))
+    (let [g (sc/run-eval-beam m beam)]
+      (doseq [i (range (sc/replay-retained-limit))]
+        (let [[m2 beam2 _] (recorded (str "(+ " i " 3)"))]
+          (sc/run-eval-beam m2 beam2)))
+      (is (not (retained? m)))
+      (is (loaded? m) "a module whose closure may be live is kept by the retirement rule")
+      (is (= [:kept 9] (g 9))))))
+
+(deftest run-file-replays-keep-their-forms-loaded
+  (let [dir (str (System/tmp_dir!) "/bl-rml-" (System/unique_integer (list :positive)))
+        script (str dir "/script.bl")]
+    (File/mkdir_p! dir)
+    (try
+      (File/write! script "(+ 1 2)\n(str \"replayed\")\n")
+      (BeamLisp/run_file script)
+      (BeamLisp/run_file script)
+      (let [r (BeamLisp.Env/lookup (tuple :run_file_cache))
+            table (if (and (erlang/is_tuple r) (= :ok (elem r 0))) (elem r 1) {})
+            ;; the host's key: the source's lower-case sha-256 (beam_lisp.bl `source-hash`)
+            hash (Base/encode16 (crypto/hash :sha256 (File/read! script)) (list (tuple :case :lower)))
+            forms (:forms (get table hash))
+            mine (filter (fn [f] (loaded? (:module f))) forms)]
+        (is (pos? (count forms)) "the file's forms are cached")
+        (is (= (count forms) (count mine)) "after a replay every replayed form's module is loaded")
+        (is (every? (fn [f] (retained? (:module f))) forms)))
+      (is (= "replayed" (BeamLisp/run_file script)))
+      (finally (File/rm_rf! dir)))))
+
+(run-tests)

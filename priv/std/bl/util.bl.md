@@ -353,6 +353,42 @@ is what makes it stick.
   ; `bl test` run in a VM that had such a path died in `list_to_binary`.
   (if (erlang/is_binary p) p (unicode/characters_to_binary p)))
 
+(defn- stamp
+  "`path`'s inode, mtime and ctime in whole seconds, or :absent."
+  [path]
+  (let [r (erlang/apply :file :read_file_info (list path (list (tuple :time :posix))))]
+    (if (= :ok (elem r 0))
+      (let [info (elem r 1)] [(elem info 11) (elem info 5) (elem info 6)])
+      :absent)))
+
+(defn- store-snapshot
+  "What decides `library_search_paths`: the store's `ebin` directory, and each
+   entry in it carrying this runtime's tag, with their stamps. A library that
+   is added, removed or finishes compiling (`.compiled`, `ebin/`) moves the
+   stamp of the directory it lands in, so an equal snapshot is an equal answer.
+   Taken BEFORE the paths are listed: a change after it moves a stamp."
+  []
+  (let [root (BeamLisp.Loader/shared_cache_root "ebin")
+        tag (BeamLisp.Loader/library_runtime_tag)
+        entries (filter (fn [d] (String/ends_with? d tag)) (Path/wildcard (Path/join root "*")))]
+    {:root root :root-stamp (stamp root)
+     :entries (mapv (fn [d] [d (stamp d)]) entries)}))
+
+(defn- snapshot-current? [snapshot]
+  (and (= (:root-stamp snapshot) (stamp (:root snapshot)))
+       (= (:root snapshot) (BeamLisp.Loader/shared_cache_root "ebin"))
+       (every? (fn [[d st]] (= st (stamp d))) (:entries snapshot))))
+
+(defn- snapshot-settled?
+  "Recorded only when nothing in it changed in the last 2 s: a write inside
+   the same second as the snapshot would not move a whole-second stamp."
+  [snapshot]
+  (let [now (erlang/system_time :second)
+        stamps (cons (:root-stamp snapshot) (map second (:entries snapshot)))]
+    (every? (fn [st] (or (= st :absent) (< (max (nth st 1) (nth st 2)) (- now 2)))) stamps)))
+
+(def ^:private STORE-PATHS (tuple :bl_util :store_paths))
+
 (defn register-store-paths!
   "Put the library STORE's compiled ebins on the VM code path. Idempotent: a
    directory already on the path is left alone, so this costs nothing when it
@@ -363,13 +399,34 @@ is what makes it stick.
    the store behind everything else), and the directories that hold them exist
    for the whole VM, not for one invocation. `run-argv` calls this on every
    entry, ahead of dispatch, so no command can reach a library module before
-   the path that carries it is in place."
+   the path that carries it is in place.
+
+   Once per VM, not per request (F2): the registered set is remembered with the
+   store snapshot it was listed under, and a request whose snapshot is
+   unchanged, with those directories still on the code path, does nothing
+   more. Listing the store and building a set of the whole code path cost a
+   warm `bl run` about 0.8 ms."
   []
-  (let [have (set (map path->binary (code/get_path)))]
-    (each (fn [d]
-            (when-not (contains? have (path->binary d))
-              (Code/prepend_path d)))
-          (BeamLisp.Loader/library_search_paths))))
+  (let [memo (erlang/apply :persistent_term :get (list STORE-PATHS nil))
+        path (code/get_path)]
+    (when-not (and (some? memo)
+                   (snapshot-current? (:snapshot memo))
+                   (every? (fn [d] (lists/member d path)) (:charlists memo)))
+      (let [snapshot (store-snapshot)
+            dirs (BeamLisp.Loader/library_search_paths)
+            have (set (map path->binary path))]
+        (each (fn [d]
+                (when-not (contains? have (path->binary d))
+                  (Code/prepend_path d)))
+              dirs)
+        (when (snapshot-settled? snapshot)
+          (let [wanted (set (map path->binary dirs))
+                charlists (distinct (filter (fn [c] (contains? wanted (path->binary c))) (code/get_path)))]
+            ;; remembered only when every directory is found as the code path holds it
+            (when (= (count charlists) (count dirs))
+              (erlang/apply :persistent_term :put
+                (list STORE-PATHS {:snapshot snapshot :charlists (vec charlists)})))))))
+    :ok))
 
 (defn register-paths
   "Apply the parsed command's library roots and code paths. Library roots go to
