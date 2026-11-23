@@ -1,0 +1,167 @@
+; bl/dev-overlay.bl — a checkout VM runs the tree's library sources (U15).
+;
+; In a checkout, an edit to a `priv/lib` or `priv/std` source used to be an
+; engine edit: the next command replaced the VM and prepared a whole SDK
+; (~440 s for one file, under a tenth of it compiling). Here the warm VM
+; compiles the edited unit over the SDK unit of the same name instead, VM-wide,
+; so library code calling it — not only the project — runs the edit
+; (`BeamLisp.Env/install_dev_sdk_unit!`). The client keys the realm, not the
+; VM, on these files (tooling/drop/src/dev_reload.rs), so the realm retires as
+; it does for a project edit and this pass runs before it reopens.
+;
+; Which files: `nix/dev-reload.json`. Its `compiler` sources feed the compiler
+; key and its `restart` sources serve the request itself; an edit to one stays
+; an engine edit (a new VM on the SDK prepared for it). If one differs from the
+; running SDK anyway (a reused SDK), this says so instead of looking fresh.
+;
+; Reverting a file compiles the SDK's own source again: the SDK's code runs,
+; from rows bound to the SDK's source digest (the recompiled BEAMs are not
+; byte-identical to the image's, so the rows stay). `scripts/prepare-checkout-sdk` builds every edit into a real SDK;
+; a released or store SDK has no checkout root and never runs this.
+;
+; Limits: a `def` captured by another namespace keeps its old value until that
+; namespace reloads, and a macro edit reaches only code compiled after it (the
+; project recompiles when its realm retires). A NEW library file is not an SDK
+; unit: it needs an SDK preparation.
+
+(ns bl.dev-overlay)
+
+(def ^:private state-key :bl.dev-overlay/state)
+
+(defn- state [] (persistent_term/get state-key {:applied {} :noted #{}}))
+
+(defn- put-state! [s] (persistent_term/put state-key s) s)
+
+(defn- beneath? [parent child]
+  (or (= parent child) (String/starts_with? child (str parent "/"))))
+
+(defn policy
+  "`nix/dev-reload.json` of the checkout `root`, or nil."
+  [root]
+  (let [path (Path/join root "nix/dev-reload.json")]
+    (when (File/regular? path)
+      (let [p (Jason/decode! (File/read! path))]
+        (when (= 1 (get p "version"))
+          {:roots (get p "roots") :extensions (get p "extensions")
+           :compiler (get p "compiler") :restart (get p "restart")})))))
+
+(defn held
+  "Why `relative` is not reloaded in place, or nil when it is."
+  [policy relative]
+  (cond
+    (some (fn [c] (beneath? c relative)) (:compiler policy)) :compiler
+    (some (fn [c] (beneath? c relative)) (:restart policy)) :restart
+    :else nil))
+
+(defn- sources
+  "Root-relative library sources under the policy's roots."
+  [root policy]
+  (sort (distinct
+    (for [dir (:roots policy) ext (:extensions policy)
+          path (Path/wildcard (Path/join (Path/join root dir) (str "**/*" ext)))
+          :when (File/regular? path)]
+      (Path/relative_to path root)))))
+
+(defn- same-bytes? [a b]
+  (let [sa (File/stat a) sb (File/stat b)]
+    (and (= :ok (erlang/element 1 sa)) (= :ok (erlang/element 1 sb))
+         (= (:size (erlang/element 2 sa)) (:size (erlang/element 2 sb)))
+         (= (File/read! a) (File/read! b)))))
+
+(defn- digest [path] (crypto/hash :sha256 (File/read! path)))
+
+(defn scan
+  "Compare the checkout's library sources with the running SDK's. Returns
+   {:changed [rel] :held {rel reason} :new [rel]}: `changed` differ from an SDK
+   file and reload; `held` differ but are not reloadable; `new` have no SDK file."
+  [root sdk-priv policy]
+  (reduce
+    (fn [out rel]
+      (let [mine (Path/join root rel)
+            theirs (Path/join sdk-priv (subs rel (count "priv/")))]
+        (cond
+          (not (File/regular? theirs)) (if (held policy rel) out (update out :new conj rel))
+          (same-bytes? mine theirs) out
+          (held policy rel) (assoc-in out [:held rel] (held policy rel))
+          :else (update out :changed conj rel))))
+    {:changed [] :held {} :new []}
+    (sources root policy)))
+
+(defn- note-once! [key message]
+  (let [s (state)]
+    (when-not (contains? (:noted s) key)
+      (put-state! (update s :noted conj key))
+      (IO/puts :stderr message))))
+
+(defn- install! [root rel]
+  ;; The compile reads a private copy at the same root-relative place, so a
+  ;; sibling the tree has NOT changed is never picked up from the checkout.
+  (let [dev-priv (Path/join root ".bl/dev-overlay/priv")
+        copy (Path/join dev-priv (subs rel (count "priv/")))
+        source (Path/join root rel)]
+    (File/mkdir_p! (Path/dirname copy))
+    (File/cp! source copy)
+    (BeamLisp.Env/install_dev_sdk_unit!
+      (BeamLisp.Loader/declared_ns (BeamLisp.Loader/read_source copy)) copy dev-priv)))
+
+(defn- apply-all!
+  "Install each file; a unit that needs another unit's new code is retried
+   after the rest. Returns {rel error} for what still failed."
+  [root rels]
+  (loop [pending rels pass 0]
+    (let [results (reduce (fn [errs rel]
+                            (try (install! root rel) errs
+                                 (catch e (assoc errs rel e))))
+                          {} pending)]
+      (if (or (empty? results) (= pass 1) (= (count results) (count pending)))
+        results
+        (recur (vec (keys results)) (inc pass))))))
+
+(defn sync!
+  "Bring the VM's SDK units in line with the checkout's library sources, once
+   per request generation. Returns nil, or throws with every file that failed
+   to compile (the command does not run on a half-applied tree)."
+  [generation]
+  ;; The common case is one persistent_term read: the generation is unchanged.
+  (when-let [root (and generation (not= generation (:generation (state)))
+                       (erlang/function_exported :Elixir.BeamLisp.Env :dev_sdk_overlay_root 0)
+                       (BeamLisp.Env/dev_sdk_overlay_root))]
+      (erlang/apply :global :trans
+        (list (tuple :bl_dev_overlay (erlang/self))
+          (fn []
+            (let [s (state)]
+              (when (not= generation (:generation s))
+                (let [p (policy root)
+                      sdk-priv (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
+                      found (scan root sdk-priv p)
+                      digests (into {} (map (fn [rel] [rel (digest (Path/join root rel))]) (:changed found)))
+                      applied (:applied s)
+                      due (vec (filter (fn [rel] (not= (get digests rel) (get applied rel))) (:changed found)))
+                      reverted (vec (remove (fn [rel] (contains? digests rel)) (keys applied)))]
+                  (doseq [[rel why] (:held found)]
+                    (note-once! [rel (digest (Path/join root rel))]
+                      (str "bl: " rel (if (= why :compiler)
+                                        " feeds the compiler key (nix/producer-sources.nix)"
+                                        " serves the request itself")
+                           " and differs from the running SDK; it is NOT reloaded."
+                           " Run scripts/prepare-checkout-sdk (or stop BL_SDK_REUSE_CURRENT) for it.")))
+                  (doseq [rel (:new found)]
+                    (note-once! [rel :new]
+                      (str "bl: " rel " is not in the running SDK; a new library file needs scripts/prepare-checkout-sdk.")))
+                  (let [failed (apply-all! root (into due reverted))
+                        applied (reduce (fn [m rel] (if (contains? failed rel) m
+                                                      (if (contains? digests rel) (assoc m rel (get digests rel)) (dissoc m rel))))
+                                        applied (into due reverted))]
+                    (put-state! (assoc (state) :applied applied
+                                       :generation (if (empty? failed) generation (:generation s))))
+                    (when (seq failed)
+                      (throw (ex-info (str "library sources did not compile in the warm VM:\n"
+                                           (apply str (map (fn [[rel e]] (str "  " rel ": " (ex-message e) "\n")) failed)))
+                                      {:kind :dev-overlay-failed :files (vec (keys failed))})))
+                    (when (seq (into due reverted))
+                      {:applied (count due) :reverted (count reverted)}))))))))))
+
+(defn status
+  "What this VM runs from the checkout instead of the SDK: rel => digest."
+  []
+  (:applied (state)))

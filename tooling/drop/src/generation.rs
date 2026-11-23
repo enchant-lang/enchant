@@ -56,11 +56,13 @@ fn debug_log_path() -> PathBuf {
 /// `BL_CHECKOUT_SDK_INPUTS` is folded too but is NOT the client's: it is the
 /// engine fingerprint the computation itself captured (`checkout_hash_files`),
 /// so a caller's exported value never reaches a token.
-pub const TOKEN_ENV: [&str; 15] = [
+pub const TOKEN_ENV: [&str; 16] = [
     "HOME", "XDG_DATA_HOME", "ERL_FLAGS", "ERL_AFLAGS", "ELIXIR_ERL_OPTIONS",
     "BEAM_LISP_AOT_BACKEND", "BEAM_LISP_AOT_CACHE_DIR", "BEAM_LISP_AOT_CACHE",
     "BEAM_LISP_AOT_STRICT", "BEAM_LISP_DEV", "XDG_CACHE_HOME", "BEAM_LISP_EBIN",
     "BEAM_LISP_PATH", "BL_BOOTSTRAP_SEED", "BL_CHECKOUT_PLATFORM",
+    // Selects which engine files key the VM (`dev_reload`, U15).
+    "BL_CHECKOUT_DEV_OVERLAY",
 ];
 
 const SCOPE_ENGINE: u8 = 1;

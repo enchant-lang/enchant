@@ -1,0 +1,94 @@
+(ns dev-sdk-overlay-test)
+
+;; U15: in a checkout VM a library unit compiled from the tree replaces the SDK
+;; unit of the same name VM-wide — a library caller (`split.web/decode` calls
+;; `split.wire/wire-text-length`) runs the edit — the runtime lease keeps
+;; working, and compiling the SDK's own bytes again withdraws the overlay.
+;; Outside a checkout (no writable BL_CHECKOUT_ROOT) it refuses.
+;;
+;; Runs on an SDK image (check-runtime-hosts or the integration SDK). It edits
+;; only a private copy; it restores BL_CHECKOUT_ROOT and reverts what it loads.
+
+(defn- native-error [action]
+  (try (action) nil
+    (catch error
+      (if (and (erlang/is_map error) (maps/is_key :original error))
+        (maps/get :original error) error))))
+
+(defn- refused? [text]
+  (try (split.web/decode {} [:text 0 3] text 0) false
+    (catch _ true)))
+
+(defn- scratch-checkout []
+  (let [root (str (System/tmp_dir!) "/bl-dev-overlay-" (System/unique_integer (list :positive)))]
+    (File/mkdir_p! (str root "/priv/bootstrap/seed"))
+    (File/mkdir_p! (str root "/nix"))
+    (File/write! (str root "/priv/bootstrap/seed/manifest.term") "#{}.\n")
+    (File/write! (str root "/nix/dev-reload.json")
+                 "{\"version\":1,\"roots\":[\"priv/lib\",\"priv/std\"],\"extensions\":[\".bl\"],\"compiler\":[],\"restart\":[]}")
+    root))
+
+(defn- with-checkout [root f]
+  (let [prior (System/get_env "BL_CHECKOUT_ROOT")]
+    (System/put_env "BL_CHECKOUT_ROOT" root)
+    (try (f)
+      (finally (if prior (System/put_env "BL_CHECKOUT_ROOT" prior)
+                 (System/delete_env "BL_CHECKOUT_ROOT"))))))
+
+(defn- install! [root text]
+  (let [dev-priv (str root "/.bl/dev-overlay/priv")
+        copy (str dev-priv "/lib/split/wire.bl")]
+    (File/mkdir_p! (Path/dirname copy))
+    (File/write! copy text)
+    (BeamLisp.Env/install_dev_sdk_unit! "split.wire" copy dev-priv)))
+
+(deftest a-library-edit-reaches-a-library-caller-and-a-revert-restores-the-sdk
+  (require 'split.web)
+  (let [sdk (File/read! (Path/join (BeamLisp.Tiers/priv_root) "lib/split/wire.bl"))
+        edited (String/replace sdk "(erlang/length (unicode/characters_to_list s))" "0")
+        root (scratch-checkout)
+        shim :Elixir.BeamLisp.Ns.Split.Wire]
+    (is (not= sdk edited) "the probe edit applies to this SDK's wire.bl")
+    (is (refused? "abcd") "the SDK measures four codepoints")
+    (with-checkout root
+      (fn []
+        (let [started (erlang/monotonic_time :millisecond)
+              result (install! root edited)]
+          (is (= false (:reverted? result)))
+          (is (= "lib/split/wire.bl" (:source result)))
+          (is (< (- (erlang/monotonic_time :millisecond) started) 10000) "one unit compiles in seconds")
+          (is (= 0 (split.wire/wire-text-length "abcd")) "a direct call runs the edit")
+          (is (not (refused? "abcd")) "a library-to-library call runs the edit")
+          (is (some? (BeamLisp.Env/dev_sdk_row shim)))
+          ;; the lease, the discovery cache and another SDK load still work
+          (is (= :sdk-runtime-retained (BeamLisp.Env/ensure_sdk_runtime!)))
+          (is (= :sdk-runtime-retained (BeamLisp.Env/ensure_sdk_runtime!)))
+          (require 'decimal)
+          ;; a second edit of the same unit replaces it again
+          (install! root (String/replace sdk "(erlang/length (unicode/characters_to_list s))" "1"))
+          (is (= 1 (split.wire/wire-text-length "abcd")))
+          (is (= :sdk-runtime-retained (BeamLisp.Env/ensure_sdk_runtime!)))
+          ;; the SDK's own source runs again. Recompiled here its BEAMs need not
+          ;; be byte-identical to the image's (then the rows stay, bound to the
+          ;; SDK's source digest); when they are, the overlay is withdrawn.
+          (let [back (install! root sdk)
+                digest (crypto/hash :sha256 sdk)]
+            (is (if (:reverted? back)
+                  (nil? (BeamLisp.Env/dev_sdk_row shim))
+                  (= digest (:source-digest (BeamLisp.Env/dev_sdk_row shim))))
+                "the overlay is withdrawn or bound to the SDK's own source")
+            (is (= digest (or (BeamLisp.Env/dev_sdk_source_digest "lib/split/wire.bl") digest)))
+            (is (refused? "abcd") "the library caller runs the SDK's code again")
+            (is (= 4 (split.wire/wire-text-length "abcd")))
+            (is (= :sdk-runtime-retained (BeamLisp.Env/ensure_sdk_runtime!)))))))
+    (File/rm_rf! root)))
+
+(deftest outside-a-checkout-the-sdk-is-never-replaced
+  (let [root (scratch-checkout)]
+    (is (= :dev_sdk_overlay_requires_a_checkout_vm
+           (native-error #(with-checkout "/nix/store/not-a-checkout" (fn [] (install! root "(ns split.wire)"))))))
+    (File/chmod! root 320)
+    (is (nil? (with-checkout root (fn [] (BeamLisp.Env/dev_sdk_overlay_root)))) "a read-only root is not a checkout")
+    (File/chmod! root 448)
+    (is (some? (with-checkout root (fn [] (BeamLisp.Env/dev_sdk_overlay_root)))))
+    (File/rm_rf! root)))

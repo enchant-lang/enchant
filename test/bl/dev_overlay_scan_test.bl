@@ -1,0 +1,33 @@
+(ns dev-overlay-scan-test (:require [bl.dev-overlay :as o]))
+
+;; U15: which checkout library sources a warm VM compiles over its SDK
+;; (`bl.dev-overlay/scan`), on scratch trees.
+
+(defn- tree []
+  (let [root (str (System/tmp_dir!) "/u15-scan-" (System/unique_integer (list :positive)))]
+    (doseq [d ["c/nix" "c/priv/lib/split" "c/priv/std/vm" "s/lib/split" "s/std/vm"]] (File/mkdir_p! (str root "/" d)))
+    (File/write! (str root "/c/nix/dev-reload.json")
+      "{\"version\":1,\"roots\":[\"priv/lib\",\"priv/std\"],\"extensions\":[\".bl\",\".bl.md\"],\"compiler\":[\"priv/std/multi.bl\"],\"restart\":[\"priv/std/vm\"]}")
+    (doseq [[rel text] [["lib/split/wire.bl" "w"] ["std/multi.bl" "m"] ["std/vm/session.bl" "s"] ["std/test.bl" "t"] ["lib/split/c.mjs" "c"]]]
+      (File/write! (str root "/c/priv/" rel) text) (File/write! (str root "/s/" rel) text))
+    root))
+
+(deftest unchanged-tree-has-nothing-to-do
+  (let [r (tree) p (o/policy (str r "/c"))]
+    (is (= {:changed [] :held {} :new []} (o/scan (str r "/c") (str r "/s") p)))))
+
+(deftest edits-are-sorted-into-reload-held-and-new
+  (let [r (tree) c (str r "/c") p (o/policy c)]
+    (File/write! (str c "/priv/lib/split/wire.bl") "w2")
+    (File/write! (str c "/priv/std/test.bl") "tt")
+    (File/write! (str c "/priv/std/multi.bl") "m2")
+    (File/write! (str c "/priv/std/vm/session.bl") "s2")
+    (File/write! (str c "/priv/lib/split/c.mjs") "c2")
+    (File/write! (str c "/priv/lib/split/new.bl") "n")
+    (is (= {:changed ["priv/lib/split/wire.bl" "priv/std/test.bl"]
+            :held {"priv/std/multi.bl" :compiler "priv/std/vm/session.bl" :restart}
+            :new ["priv/lib/split/new.bl"]}
+           (o/scan c (str r "/s") p)))))
+
+(deftest an-unchanged-generation-does-nothing
+  (is (nil? (o/sync! nil))))

@@ -359,9 +359,32 @@ fn checkout_extra_sources(project: &Path, cwd: &Path, argv: &[String]) -> Vec<Pa
     roots
 }
 
+/// A file under `root` the VM reloads in place (`dev_reload`, U15).
+fn checkout_reloadable(root: &Path, policy: &dev_reload::Policy, path: &Path) -> bool {
+    path.strip_prefix(root).ok().and_then(Path::to_str).is_some_and(|name| policy.reloadable(name))
+}
+
+/// The reloadable library sources of the engine tree: they key the realm (the
+/// project token), not the VM (U15).
+fn checkout_reloadable_sources(root: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    if let Some(policy) = dev_reload::Policy::read(root) {
+        for name in policy.roots() {
+            let mut found = Vec::new();
+            checkout_sources(&root.join(name), &mut found)?;
+            files.extend(found.into_iter().filter(|path| checkout_reloadable(root, &policy, path)));
+        }
+    }
+    Ok(())
+}
+
 fn checkout_runtime_generation(root: &Path, evidence: Option<&engine_inputs::Snapshot>) -> std::io::Result<String> {
     let mut files = Vec::new();
     checkout_sources(&root.join("priv"), &mut files)?;
+    // A reloadable library source moves the project token instead (U15): the
+    // VM compiles it over its SDK and keeps running.
+    if let Some(policy) = dev_reload::Policy::read(root) {
+        files.retain(|path| !checkout_reloadable(root, &policy, path));
+    }
     checkout_sources(&root.join("native"), &mut files)?;
     for name in [
         "bin/bl",
@@ -387,9 +410,10 @@ fn checkout_runtime_generation(root: &Path, evidence: Option<&engine_inputs::Sna
     // `BL_CHECKOUT_SDK_INPUTS` can neither select nor key one (U13). Without
     // evidence (tests only) the pin is captured here, or empty when the root
     // declares no engine inputs.
+    // The pin leaves the reloadable sources out too (`base_fingerprint`).
     let engine_pin = match evidence {
-        Some(snapshot) => snapshot.fingerprint.clone(),
-        None => engine_inputs::Snapshot::capture(root).map(|s| s.fingerprint).unwrap_or_default(),
+        Some(snapshot) => snapshot.base_fingerprint.clone(),
+        None => engine_inputs::Snapshot::capture(root).map(|s| s.base_fingerprint).unwrap_or_default(),
     };
     checkout_hash_files(root, files, evidence, &engine_pin)
 }
@@ -425,6 +449,9 @@ fn checkout_project_generation(
     let sdk = root.join("priv");
     let native = root.join("native");
     files.retain(|path| !path.starts_with(&sdk) && !path.starts_with(&native));
+    // Except the engine's reloadable library sources: those retire the realm
+    // and are compiled over the SDK by the VM (U15).
+    checkout_reloadable_sources(root, &mut files)?;
     for path in extra_sources {
         checkout_sources(path, &mut files)?;
     }
@@ -910,6 +937,67 @@ mod checkout_tests {
         let configured = checkout_runtime_generation(&root, None).unwrap();
         std::fs::write(root.join("env.bl"), "{:deps []}").unwrap();
         assert_ne!(configured, checkout_runtime_generation(&root, None).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// U15: a reloadable library source keeps the VM (runtime token) and the
+    /// SDK selection's base, retires the realm (project token) and still moves
+    /// the full engine fingerprint, so a real SDK preparation builds it in. A
+    /// compiler input, a request-serving source and a non-source asset under
+    /// the same trees keep replacing the VM.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn library_edits_retire_the_realm_and_keep_the_vm() {
+        let root = engine_fixture("dev-reload");
+        let project = root.join("project");
+        for dir in ["priv/lib/split", "priv/std/vm", "priv/host", "nix"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(root.join("nix/dev-reload.json"), r#"{"version":1,"roots":["priv/lib","priv/std"],
+            "extensions":[".bl",".bl.md"],"compiler":["priv/std/multi.bl"],"restart":["priv/std/vm"]}"#).unwrap();
+        for (name, text) in [("priv/lib/split/wire.bl", "wire 1"), ("priv/std/test.bl", "test 1"),
+                             ("priv/std/multi.bl", "multi 1"), ("priv/std/vm/session.bl", "session 1"),
+                             ("priv/lib/split/codec.mjs", "codec 1"), ("priv/host/env.bl", "env 1")] {
+            std::fs::write(root.join(name), text).unwrap();
+        }
+        let tokens = || {
+            let snapshot = engine_inputs::Snapshot::capture(&root).unwrap();
+            (snapshot.fingerprint.clone(), snapshot.base_fingerprint.clone(),
+             checkout_runtime_generation(&root, Some(&snapshot)).unwrap(),
+             checkout_project_generation(&root, &project, &[], Some(&snapshot)).unwrap())
+        };
+        let first = tokens();
+        assert_ne!(first.0, first.1, "a reloadable source is left out of the base");
+        for (name, edited) in [("priv/lib/split/wire.bl", "wire 2"), ("priv/std/test.bl", "test 2")] {
+            let before = tokens();
+            std::fs::write(root.join(name), edited).unwrap();
+            let after = tokens();
+            assert_ne!(after.0, before.0, "{name}: the SDK fingerprint still covers it");
+            assert_eq!(after.1, before.1, "{name}: the base (VM key) does not");
+            assert_eq!(after.2, before.2, "{name}: the VM keeps running");
+            assert_ne!(after.3, before.3, "{name}: the realm retires");
+        }
+        // A new reloadable file is a realm change too, not a VM change.
+        let before = tokens();
+        std::fs::write(root.join("priv/lib/split/new.bl"), "new").unwrap();
+        let after = tokens();
+        assert_eq!((after.1.clone(), after.2.clone()), (before.1.clone(), before.2.clone()));
+        assert_ne!(after.3, before.3);
+        for (name, edited) in [("priv/std/multi.bl", "multi 2"), ("priv/std/vm/session.bl", "session 2"),
+                               ("priv/lib/split/codec.mjs", "codec 2"), ("priv/host/env.bl", "env 2")] {
+            let before = tokens();
+            std::fs::write(root.join(name), edited).unwrap();
+            let after = tokens();
+            assert_ne!(after.1, before.1, "{name}: moves the base");
+            assert_ne!(after.2, before.2, "{name}: replaces the VM");
+        }
+        // Without a policy every engine edit replaces the VM, as before U15.
+        std::fs::remove_file(root.join("nix/dev-reload.json")).unwrap();
+        let off = tokens();
+        assert_eq!(off.1, off.0, "no base without a policy");
+        std::fs::write(root.join("priv/lib/split/wire.bl"), "wire 3").unwrap();
+        assert_ne!(tokens().2, off.2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
