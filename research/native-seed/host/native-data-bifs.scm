@@ -961,3 +961,13 @@
   (set! native-excluded-host-leaves (let loop ((xs native-excluded-host-leaves)) (cond ((null? xs) '()) ((equal? (car xs) key) (loop (cdr xs))) (else (cons (car xs) (loop (cdr xs)))))))
   (nf-set-leaf! key (lambda arguments (bl-invoke f arguments)))
   (bl-key "ok")))
+;; Regex.match?/2 over the native regex runner; erlang:external_size/1 as
+;; the length of this image's own term_to_binary (the BEAM's equals it for
+;; the uncompressed default encoding).
+(nf-set-leaf! "Elixir.Regex/match?/2" (lambda (regex text) (not (bl-is-nil (native-regex-run regex text)))))
+(nf-set-leaf! "erlang/external_size/1"
+ (lambda (x) (if (or (h-is-float x) (h-is-int x)) (native-external-number-size x)
+              (bytevector-length (vector-ref (native-term-to-binary x) 1)))))
+;; No publication generations exist natively: every query declines its memo
+;; certificate (nil), which costs a re-read and changes no answer.
+(nf-set-leaf! "Elixir.BeamLisp.Env/namespace_generations/1" (lambda (namespaces) bl-nil))

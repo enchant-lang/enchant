@@ -40,7 +40,10 @@ if [ "${NF_QUALIFY:-}" = 1 ]; then
 fi
 echo "== custody"
 T B $FE/custody.bl -- $Q/out $MODE 2>&1 | tail -3
-[ -f $Q/out/kernel.etf ] || T B $FE/kernel.bl -- $Q/out/kernel.etf 2>&1 | grep -v "^KERNEL :" | tail -3
+# kernel.bl traces calls VM-wide, so it runs in a cold VM; NF_KERNEL reuses
+# an earlier capture of the same SDK.
+if [ -n "${NF_KERNEL:-}" ]; then cp $NF_KERNEL $Q/out/kernel.etf
+elif [ ! -f $Q/out/kernel.etf ]; then T timeout 1200 $MAIN/bin/bl --cold run $FE/kernel.bl -- $Q/out/kernel.etf 2>&1 | tail -3; fi
 sed 's#BeamLisp\.Emit/compile_descriptor#native-front.hook/compile-descriptor#g' $PRIV/host/aot.bl > $Q/aot-hooked.bl
 echo "hooked sites $(grep -c 'native-front.hook/compile-descriptor' $Q/aot-hooked.bl)"
 JOB=$(cat $Q/out/jobs.bl)
