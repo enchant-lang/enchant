@@ -108,14 +108,28 @@
    (finally (File/rm_rf! root)))))
 
 (deftest a-writable-root-is-never-read-through-the-sealed-table
- ;; The reader's gate is the path prefix. This checkout (or the checker's
- ;; scratch image) is not under /nix/store, so a table placed beside its seeds
- ;; is ignored and the normal decode answers.
- (let [path (BeamLisp.AOT/seed_metadata_table_path (BeamLisp.Tiers/priv_root))]
-  (is (not (String/starts_with? path "/nix/store/")))
-  (is (= (BeamLisp.AOT/seed_artifact_metadata! :Elixir.BeamLisp.Ns.Core
-            "Elixir.BeamLisp.Ns.Core.beam"
-            (Map/get (Map/fetch! (BeamLisp.Bootstrap/manifest) "modules") "Elixir.BeamLisp.Ns.Core.beam"))
-         (BeamLisp.AOT/seed_artifact_metadata! :Elixir.BeamLisp.Ns.Core
-            "Elixir.BeamLisp.Ns.Core.beam"
-            (Map/get (Map/fetch! (BeamLisp.Bootstrap/manifest) "modules") "Elixir.BeamLisp.Ns.Core.beam"))))))
+ ;; The immutability answer is the caller's, and a false one disables the table
+ ;; whatever its path (this runs on a checkout and on a built SDK alike).
+ (let [path (BeamLisp.AOT/seed_metadata_table_path (BeamLisp.Tiers/priv_root))
+       expected (Map/get (Map/fetch! (BeamLisp.Bootstrap/manifest) "modules") "Elixir.BeamLisp.Ns.Core.beam")]
+  (is (nil? (BeamLisp.AOT/sealed_seed_table_at path false)))
+  ;; Whichever path the reader took, the proof is the decode of the bytes.
+  (let [proof (BeamLisp.AOT/seed_artifact_metadata! :Elixir.BeamLisp.Ns.Core "Elixir.BeamLisp.Ns.Core.beam" expected)]
+   (is (= expected (String/downcase (Base/encode16 (:sha256 proof)))))
+   (is (= proof (BeamLisp.AOT/seed_artifact_metadata! :Elixir.BeamLisp.Ns.Core "Elixir.BeamLisp.Ns.Core.beam" expected))))))
+
+(deftest a-built-image-reads-the-sealed-table
+ ;; The reader only uses the file when the table and seeds are under /nix/store.
+ ;; On a built SDK this pins that the shipped table is the one this code wrote
+ ;; (same decoder) and describes the shipped seeds; a checkout has none, and the
+ ;; assertion below then only says so.
+ (let [path (BeamLisp.AOT/seed_metadata_table_path (BeamLisp.Tiers/priv_root))
+       immutable (and (String/starts_with? path "/nix/store/") (File/regular? path))
+       table (BeamLisp.AOT/sealed_seed_table)]
+  (is (or immutable (nil? table)))
+  (if immutable
+   (do
+    (is (map? table))
+    (is (= (erlang/apply :Elixir.BeamLisp.AOT :module_info (list :md5)) (:decoder table)))
+    (is (contains? (:rows table) "Elixir.BeamLisp.Ns.Core.beam")))
+   (is (nil? table)))))
