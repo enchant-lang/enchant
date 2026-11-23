@@ -518,3 +518,34 @@ Evidence: =research/checked-tiles/evidence/cold-start-u8.json=.
 The first built-SDK gate reported =seed_metadata_table= undefined and a keyword-call error. The undefined half is explained by the floor: a compiler generation's =seed/produce-artifacts= compiles every =priv/host/*.bl= from current source into the produced floor, and =nix/bl-drop= installs that seed, so a new AOT function reaches a built SDK without regenerating the committed =priv/bootstrap/seed= (which still carries the old AOT). The two SDKs built from batch-12 sources, =6vsqnc…= and =wf7s1q…=, have =seed_metadata_table=, =prime_seed_metadata!= and the reader in =image/ebin=, and a 139-row =priv/seed-metadata.term= whose =:decoder= equals the image AOT MD5. On =6vsqnc…= the seed tests pass: =seed_metadata_table_test= 588 (including a new case that asserts a built image reads the sealed table, decoder and Core row), =perf/seed_metadata_cost_test= 2, =seed_publication_test= 227. No manual regeneration is needed; doing it would rotate the compiler key for every cache. The keyword-call error was not reproduced in any configuration tried (new SDK, old SDK with the checker's host overlay, the batch-12 integration tree with the batch-12 SDK, the whole seed suite in one VM); the stack was requested.
 
 Paired cold runs at load 23–27, alternating, four pairs: the previous SDK (zzblkn) 3,902 / 4,242 / 3,280 / 3,203 ms, median 3,541; the U8 SDK (6vsqnc) 2,770 / 2,561 / 2,648 / 2,583 ms, median 2,616, about 26%. That pair spans U6, U7, U8 and batch 11/12, so U8's own share is the seed rows only (about 0.2 s from 2.4 ms to 0.5 ms per seed).
+
+* K1: sealed boot state, and what a seal cannot reach
+
+Card K1 asked for the post-start runtime state as one sealed artifact. Measured first: the current store SDK (=2nvkh1…=) runs a cold =bl run= of =(println 1)= in 2,691–3,079 ms (median 2,777, load 36–43). Cut at =start_app!='s own stage boundaries (=scripts/sealed-boot/phases.exs=): erts and Elixir 260 ms, dependency apps 75, the =:beam_lisp= app start 1,870, =vm.native= =build-all!= 90, loading =bl.cli= 300, the run 55, halt 35. The app start is the target, as U5 said.
+
+A deep-stack sampler (running processes plus those blocked on the file or code server, depth 80) showed what the start re-derives on an immutable image:
+
+- the sealed seed table (U8) was read and sha256-hashed, 0.9 MB, on every seed miss: about 100 times, 7% of samples;
+- =packaged_compiler?= walked all of =priv/**= for each source suffix from five call sites (the live compiler and build keys, =Env/live_toolchain_keys= with its own stat stamp of ~250 files), about 6%;
+- =bootstrap_sdk_native_hosts!= globbed and stat-ed every tier source, and re-parsed with the reader the ten sources that only mention =defnative= (the compiler, the loader, =aot.bl=), because a stored nil answer read back as a miss;
+- the floor proof =sdk_preinit_floor_ready?= ran twice: the proof loads the modules it checks, so the inputs it memoized under (nil md5s) never matched again;
+- every image unit the SDK closure touched was read, hashed and decoded (=beam_lib= chunks, forwarder disassembly).
+
+Each of these is a function of bytes under one content-addressed root. The branch derives them once per VM for a =/nix/store= root, or seals them at SDK build time in =do-prime=: =priv/image-metadata.term= (U8 generalized to the 2,567 =sdk-code.term= rows: 6.5 MB, deterministic, 4.9 s to prime; a row is used only when its =:sha256= and the sha256 of the caller's whole row match, and only from an immutable root), =native-declarations/<key>/declaring.term=, and negative native declarations under a separate =.none= name. A writable checkout or drop keeps today's path; loaded code is still MD5-checked at every use and retention.
+
+The first version stored negatives in the old file name. A scratch-image control running the unchanged SDK code then crashed at start on =(elem :none 1)=, because it shares the per-user AOT cache under the same compiler key. Six such entries had been written to =~/.cache/beam_lisp/aot/native-declarations/e86a…/= (the current SDK's key). They were deleted, and negatives now use their own name, which an older reader never opens.
+
+Verified without an SDK build: =scripts/sealed-boot/build-image= copies the store image, overlays the edited host beams that =scripts/check-runtime-hosts= compiled, runs the sealing functions in a second VM and adds the result to =/nix/store=. The overlaid beams are restamped with the shipped source digest, so the compiler key stays the same; that is an experiment device, not an SDK. =scripts/sealed-boot/measure= then alternates paired cold starts through the SDK's own =boot.exs= path. The sealing VM decoded all 2,567 rows live and found them equal to the table. Five rounds at load ~8:
+
+#+begin_rosetta
+Image | cold =bl run= median (spread) | =:beam_lisp= app start median
+unchanged SDK | 2,962 ms (2,718–3,062) | 1,944 ms
+scratch copy, unchanged code (control) | 2,860 ms (2,581–3,035) | 1,872 ms
+edited hosts, no image table (first round) | 2,352 ms (2,234–2,452) | 1,470 ms
+edited hosts + image table (first round) | 2,280 ms (2,091–2,347) | 1,373 ms
+all of the branch | 2,163 ms (2,079–2,366) | 1,326 ms
+#+end_rosetta
+
+That is −27% against the SDK and −24% against the control. It does not reach the card's 1.2 s. After the change the same sampler puts the remaining app start in three places. Namespace loading (=compile_sdk_source!='s retention, preload and callable checks, then the namespace initializers that publish ~1,400 definitions) is about a third of the samples. The owner registry's =prepare_sdk_class!= walks and leases the whole SDK runtime closure, loading the modules it proves; that is about 15%. The native host stubs are compiled at every start (=compile:*=, 3%), because their bytes embed the image's physical =.so= path. Those are executions, not derivations: what they leave behind holds loaded code, pids, leases and ETS custody rows, so it cannot be written to a file and read back the way a decode can. Getting to 1.2 s needs either a lazy owner registry and SDK lease (the first actor pays, a =bl run= does not), or a restorable Env snapshot that carries no process identity. Both are design changes, and neither is a seal.
+
+Evidence: =research/checked-tiles/evidence/cold-start-k1.json=.

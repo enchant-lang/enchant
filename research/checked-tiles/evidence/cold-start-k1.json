@@ -1,0 +1,75 @@
+{
+ "card": "K1 sealed boot state",
+ "date": "2026-11-23",
+ "branch": "lane/sealed-boot",
+ "sdk": "/nix/store/2nvkh1n5l7qjwy97qv0syapji2r7kix4-beam-lisp-sdk-selection (image /nix/store/hrcaf3f27nbss1j38f92px7ijfb29w4q-beam-lisp-sdk-image-0.1.0)",
+ "baseline": {
+  "method": "$SDK/bin/bl --cold run probe.bl ((println 1)) from a scratch dir under work run, 5 runs",
+  "ms": [16974, 2691, 2816, 2737, 3079],
+  "note": "first run is a cold page cache; median of runs 2-5 is 2,777 ms",
+  "load": "36-43",
+  "stage_split_ms_median_of_4": {"erts_and_elixir_to_boot_exs": 260, "dependency_apps": 75, "beam_lisp_app_start": 1870, "vm.native_build_all": 90, "bl.cli_load": 300, "run": 55, "halt": 35},
+  "stage_probe": "scripts/sealed-boot/phases.exs (start_app! cut at its own stage boundaries)"
+ },
+ "profile_before": {
+  "method": "deep-stack sampler (/tmp probe deepstacks.erl: running + file/code-server-blocked processes, backtrace depth 80), 2 cold runs, 1,367 samples",
+  "inclusive_samples": {
+   "Application:start (owner registry start-child! -> prepare_sdk_class! -> retain_sdk_runtime!)": 287,
+   "  complete_image_sdk_closure! (inventory walk)": 164,
+   "    seed_artifact_metadata! -> sealed_seed_table_at (sha256 of the 0.9 MB sealed seed table on every seed miss)": 102,
+   "  bootstrap_sdk_native_hosts! (wildcard over all tier sources, stat stamp, reader parse of sources that only mention defnative, native host stub compile)": 101,
+   "BeamLisp:init": 164,
+   "  sdk_preinit_floor_ready? (run twice; live_toolchain_keys -> packaged_compiler? Path.wildcard over priv/**, 5 call sites)": 89,
+   "Loader.Server ensure_loaded (namespace loads, compile_sdk_source!, initializers)": 367,
+   "decode_sdk_image_metadata! (beam_lib chunks, forwarder disassembly)": 45
+  }
+ },
+ "changes": [
+  "AOT/sealed_seed_table_at: a /nix/store table is read and decoded once per VM (no sha256 per miss); other paths keep the digest check",
+  "AOTCache/immutable_toolchain + immutable_memo: packaged_compiler? and the live compiler/build keys are computed once per VM when priv/ and the codegen roots are all under /nix/store (packaged floor proof never memoized)",
+  "Env/live_toolchain_keys: no per-call stamp (wildcard + ~250 stats) on an immutable toolchain",
+  "AOT native declarations: negative answers primed and cached under a separate .none name; the bootstrap scan's answer (declaring sources) primed as native-declarations/<key>/declaring.term and used on an immutable root instead of the wildcard and stat walk",
+  "AOT/prime_image_metadata! (selfbuild do-prime): priv/image-metadata.term, one deterministic decode per sdk-code.term row (2,567 rows, 6.5 MB, 4.9 s to prime); Env/sdk_image_metadata_at! and sdk_image_metadata! take the sealed row on an immutable root when the entry's :sha256 and the sha256 of the whole caller row match",
+  "AOT/sdk_preinit_floor_ready?: a TRUE proof is remembered under its post-proof inputs (it ran twice per cold start)"
+ ],
+ "scratch_image_method": {
+  "why": "the sealed artifact needs an SDK build, which this lane must not run",
+  "how": "scripts/sealed-boot/build-image copies the store image (reflink), overlays the edited host beams compiled by scripts/check-runtime-hosts (restamped with the shipped source digest, so the compiler key and every unit stay valid), runs the producer's sealing functions in a second VM, and adds the result to /nix/store with nix store add-path; scripts/sealed-boot/measure runs alternating paired cold starts through the SDK's own boot.exs path (boot-at.exs) with bl-cold's environment",
+  "images": {"O": "the SDK image itself", "C": "scratch copy, unchanged hosts, resealed with the shipped code (control)", "A": "edited hosts, no image-metadata.term", "B": "edited hosts + image-metadata.term", "B2": "B plus the preinit-memo fix"},
+  "equality": "seal.exs decodes every one of the 2,567 rows live and compares: equal=2567 differ=0"
+ },
+ "measured": {
+  "round_1_load": "8.3-11.1 (22:00-22:02)",
+  "round_1": {
+   "cold_ms": {"O": [3245, 2836, 2669, 2715, 3038], "C": [3111, 2744, 2954, 2930, 2756], "A": [2234, 2352, 2452, 2439, 2313], "B": [2091, 2331, 2347, 2280, 2231]},
+   "cold_median_ms": {"O": 2836, "C": 2930, "A": 2352, "B": 2280},
+   "probe_total_median_ms": {"O": 2852, "C": 2765, "A": 2310, "B": 2130},
+   "beam_lisp_app_start_median_ms": {"O": 1959, "C": 1922, "A": 1470, "B": 1373},
+   "bl.cli_load_median_ms": {"O": 310, "C": 301, "A": 298, "B": 209}
+  },
+  "round_2_load": "8.0-8.6 (22:07-22:09)",
+  "round_2": {
+   "cold_ms": {"O": [2962, 3009, 3062, 2733, 2718], "C": [2977, 2860, 3035, 2738, 2581], "B2": [2135, 2163, 2366, 2262, 2079]},
+   "cold_median_ms": {"O": 2962, "C": 2860, "B2": 2163},
+   "probe_total_median_ms": {"O": 2768, "C": 2735, "B2": 2087},
+   "beam_lisp_app_start_median_ms": {"O": 1944, "C": 1872, "B2": 1326},
+   "bl.cli_load_median_ms": {"O": 294, "C": 287, "B2": 217}
+  },
+  "summary": "cold bl run 2,962 -> 2,163 ms median (-27%) against the unchanged SDK, 2,860 -> 2,163 ms (-24%) against the resealed control; the :beam_lisp app start 1,944 -> 1,326 ms. The card's 1.2 s target is not reached."
+ },
+ "profile_after": {
+  "method": "same sampler on B (3 runs 2,482-2,554 ms under the sampler), 964 samples over 2 runs",
+  "inclusive_samples": {
+   "Loader.Server namespace loads": 312,
+   "  compile_sdk_source! (retain 47, preload closure 26, callable-ready 24, source evidence 14)": 142,
+   "  namespace initializers (__bl_init_namespace__, incl. compiler)": 108,
+   "Application:start": 255,
+   "  owner registry start-child! -> prepare_sdk_class! (closure walk 69, of which code:ensure_loaded 32)": 148,
+   "  bootstrap_sdk_native_hosts! (create-host: native stub compile + emission rows)": 60,
+   "BeamLisp:init": 100,
+   "  packaged_compiler? Path.wildcard, once": 15,
+   "compile:* (native host stubs)": 27
+  }
+ },
+ "gate": "build the SDK from this branch, then scripts/sealed-boot/measure $OLD_SDK 4 OLD=<old image root> NEW=<new image root> (or $SDK/bin/bl --cold run in alternation); expect the new image to carry priv/image-metadata.term (2,5xx rows) and native-declarations/<key>/declaring.term and *.none files; test/bl/image_metadata_table_test.bl on the built SDK exercises the sealed path (built? true)"
+}

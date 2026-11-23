@@ -215,10 +215,11 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
 ### K — cold start
 
-#### K1 ⏳ Sealed boot state · S+ · `priv/std/vm/native.bl`, `priv/host` (env, aot), `priv/build/selfbuild.bl`
+#### K1 🧪 Sealed boot state · S+ · `priv/host` (aot, aot_cache, env), `priv/build/selfbuild.bl` · branch `lane/sealed-boot`
 - **Why.** Cold `bl run` on a store SDK is 2.56–2.77 s after U8. 65–70% is the `:beam_lisp` start plus `vm.native` `build-all!` (U5, `research/checked-tiles/evidence/cold-start-phases.json`). That work re-derives and re-checks SDK publication state on every start: environment tables, 1,438 published definitions, forwarder disassembly, MD5 leases. U6–U8 trimmed 5–26% each; that curve does not reach 1 s.
 - **Change.** The SDK build writes the post-start runtime state as one sealed artifact (U8's `priv/seed-metadata.term` is the precedent). An immutable `/nix/store` SDK loads it in one step, trusted by store-path identity. MD5 checks remain only for modules actually loaded. A writable checkout image keeps today's path.
 - **Done when.** Cold `$SDK/bin/bl --cold run` of `(println 1)` ≤ 1.2 s median over 4 pairs against the old SDK, load recorded. The ten files pass on the sealed SDK.
+- **Branch result (scratch store image, not an SDK).** Re-derivations sealed or done once per VM on a `/nix/store` root: image unit metadata (`priv/image-metadata.term`, 2,567 rows equal to a live decode), the native bootstrap scan and negative declarations, the live toolchain keys and `packaged_compiler?` walk, the sealed seed table's per-miss sha256, the doubled floor proof. Cold run 2,962 → 2,163 ms median over 5 alternating rounds (−27%, load ~8); app start 1,944 → 1,326 ms. **1.2 s is not reachable by sealing:** what remains is execution (namespace loads and initializers about a third of the samples, the owner registry's SDK closure lease about 15%, native stub compiles 3%). The next levers are a lazy owner registry/SDK lease and a restorable Env snapshot; see the journal's K1 section and `research/checked-tiles/evidence/cold-start-k1.json`.
 
 #### K2 ⏳ The checkout's cold path · S · `bin/bl`, `scripts/prepare-checkout-sdk`
 - Before `elixir` starts, `./bin/bl --cold` runs `scripts/prepare-checkout-sdk --selection` (Python `scripts/sdk-inputs`: 184 ms warm, 1.5 s with a cold file cache), a second Python check and `exec elixir -e`.
