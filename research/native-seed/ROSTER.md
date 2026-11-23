@@ -286,16 +286,28 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - `test/bl/emit_test.bl` ("the live module's bytes ARE the committed seed's bytes"), `test/bl/seed_publication_test.bl` (its `/tmp/bl-seed-test-host-out` manifest is missing) and `test/bl/perf/cold_namespace_load_test.bl` fail the same way on the batch-7 and batch-8 SDKs. Find whether it is the seeded floor (a `bl seed --check` question) or the tests' environment.
 - **Done when.** Each passes on a fresh integration SDK, or its premise is corrected and the reason recorded.
 
-#### U10 🔨 Remove the fixed recomputation per request (34 ms) — prototype resident hangs in the real checkout; reverted from main (`da07cadf8`); branch `lane/warm-floor2`
+#### U10 ✅ Remove the fixed recomputation per request · landed batch 17 (`611414488`)
 - **Why.** U9: of a ~51 ms warm request, engine capture is 22.8 ms (976 files) and project generation 11.1 ms, both recomputed though the tree did not change.
-- **Change.** A per-tree resident that observes the tree, or a generation token the realm records and the client trusts only while cheap inputs are unchanged. A wrong answer must retire the realm, never serve stale code.
-- **Done when.** Warm median −25 ms or better; an edit to a loaded file still retires; an unrelated edit does not; `cargo test` and loader tests pass.
+- **What landed.** A per-tree generation service, observed by the kernel, answers the tree's generations. The first version hung in the real checkout and was reverted (`da07cadf8`). The fixed version is `1739d87a2`.
+- **Measured (gate 17d, one SDK, load ~12).**
+  - Warm request median 40 ms with the service, 91 ms without, over 15 runs.
+  - 0 declined requests.
+  - The ten files pass 10/10 in both orders.
+  - `seed_runtime_abi` passes warm twice, and `warm_request_env` passes.
+  - Two successive helper edits are both seen.
 
 #### U11 🔨 One request, one process in the VM (13.6 → 2–4 ms) · S+ · BL runtime · branch `lane/warm-floor2`
 - The handler spawns ~10 processes per request (5 `Refs/spawn_owned`, io proxy, heartbeat). Run the command in the connection process, open a realm handle once per generation, write frames directly, heartbeat only past a threshold, return on the same connection, skip custody for unchanged module sets. Keep dead-owner recovery.
 
 #### U12 🔨 Compact keep-alive request (~6 ms) · S+ · client + protocol · branch `lane/warm-floor2`
-- Skip connect+hello; send an environment generation/delta instead of 91 variables (10.7 KB frame); cache the evaluated user file by source hash.
+- **U12a ✅ (batch 17).** `run FILE` replays an unchanged file's compiled forms, keyed by source hash, while the realm's `definition_context` is unchanged.
+  - The code is in `priv/host/beam_lisp.bl`, forwarded through `priv/host/compiler.bl`.
+  - `run_file_cache_test` and `run_file_scope_test` are green on the SDK.
+  - Gate 17 needed three fixes:
+    - host constants became `defn`s;
+    - a floor guard for the producer;
+    - facade forwards, because without them the guard was always false.
+- **U12b ⏳.** Skip connect and hello. Send an environment generation or delta instead of 91 variables (a 10.7 KB frame).
 
 ### N — the native compiler on the default path
 
