@@ -398,7 +398,13 @@ census to start from.
 - `(- 0.0)` prints `0.0` on JS, `-0.0` on the BEAM; `erlang/-/1` has no JS leaf.
 - **Done when.** Both answer as on the BEAM; a js_diff case for each.
 
-#### W2 ⏳ Two files still fail inside a multi-file test run · S · BL
+#### W3 🔨 `seed_runtime_abi_test` fails on a second run in the same realm · S · BL test helper · branch `lane/ward4`
+- A 54-file `bl test` set run twice in one warm realm: pass 1 green, pass 2 `seed_runtime_abi` 3 passed/8 failed with
+  `/tmp/bl-seed-host-supervisor-src/anf_interpreter.bl: no such pinned host source`. `host-scratch` removes and recreates
+  that directory each call, so a child process or a recorded path is the suspect.
+- **Done when.** The trigger sequence then the file, twice, in one warm realm, passes.
+
+#### W2 ✅ Two files still fail inside a multi-file test run · S · BL
 - On the batch-5 and batch-10 SDKs: in a run of the ten realm/seed/JS files (W1's list),
   `realm_ownership_test` fails `a-shared-namespace-is-named-from-its-hash` with
   "Shared namespace admission refused … {:reason :compiler-authority-unavailable}" and
