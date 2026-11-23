@@ -16,12 +16,21 @@ image=$(readlink -f "$sdk/image")
 platform=$(sed -n 's|^export PATH=\(/nix/store/[^:]*\)/bin:.*|\1|p' "$sdk/bin/bl-cold" | head -1)
 dest=$work/$name
 mkdir -p "$dest"
-[ -e "$dest/image" ] && { echo "exists: $dest/image" >&2; exit 2; }
-mkdir "$dest/image"
-cp -a --reflink=auto "$image/ebin" "$image/priv" "$dest/image/"
-chmod -R u+w "$dest/image"
-ln -s "$(readlink -f "$sdk/lib")" "$dest/lib"
-K1_LIB=$(readlink -f "$sdk/lib") K1_IMAGE=$dest/image BL_ROOT=$dest/image BL_EBIN=$dest/image/ebin BEAM_LISP_DEV=0 \
-  "$platform/bin/elixir" "$here/boot-at.exs" --script "$here/seal.exs" "$dest/image" "$overlay" "$mode" >&2
-chmod -R a-w "$dest/image"
+[ -e "$dest/lib" ] && { echo "exists: $dest/lib" >&2; exit 2; }
+# The store SDK's layout: lib/<app>/ per dependency and image -> lib/beam_lisp-*,
+# so code:priv_dir(:beam_lisp) resolves into THIS copy. Dependencies are links.
+mkdir "$dest/lib"
+app=$(basename "$image")
+for entry in "$(readlink -f "$sdk/lib")"/*; do
+  [ "$(basename "$entry")" = "$app" ] || ln -s "$entry" "$dest/lib/$(basename "$entry")"
+done
+mkdir "$dest/lib/$app"
+cp -a --reflink=auto "$image/ebin" "$image/priv" "$dest/lib/$app/"
+chmod -R u+w "$dest/lib/$app"
+ln -s "lib/$app" "$dest/image"
+for phase in overlay "$mode"; do
+  K1_LIB=$dest/lib K1_IMAGE=$dest/image BL_ROOT=$dest/image BL_EBIN=$dest/image/ebin BEAM_LISP_DEV=0 \
+    "$platform/bin/elixir" "$here/boot-at.exs" --script "$here/seal.exs" "$dest/image" "$overlay" "$phase" >&2
+done
+chmod -R a-w "$dest/lib/$app"
 nix store add-path "$dest" --name "$name"

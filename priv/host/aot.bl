@@ -3520,11 +3520,28 @@
             (elem t 2)))
         (catch _ nil)))))
 
+(defn- native_declaration_file [digest ns none?]
+  ;; A negative answer (`:none`) lives under its own `.none` name, so a reader
+  ;; that predates negatives (same compiler key, e.g. a cache shared with an
+  ;; older VM) never reads one as a declaration.
+  (if none?
+    (erlang/iolist_to_binary (list (native_declaration_name digest ns) ".none"))
+    (native_declaration_name digest ns)))
+
 (defn- disk_native_declaration [digest ns]
-  (or (read_native_declaration
-        (Path/join (Path/join (Path/join (BeamLisp.Tiers/priv_root) "native-declarations")
-                              (BeamLisp.AOTCache/compiler_key)) (native_declaration_name digest ns)) digest ns)
-      (read_native_declaration (native_declaration_path digest ns) digest ns)))
+  ;; The declaration, `:none` for a stored negative answer, or nil (unknown).
+  (let [shipped (Path/join (Path/join (BeamLisp.Tiers/priv_root) "native-declarations")
+                           (BeamLisp.AOTCache/compiler_key))
+        cache (Path/dirname (native_declaration_path digest ns))
+        found (or (read_native_declaration (Path/join shipped (native_declaration_name digest ns)) digest ns)
+                  (read_native_declaration (Path/join cache (native_declaration_name digest ns)) digest ns))]
+    (cond
+      (and found (erlang/not (erlang/== :none found))) found
+      (or (erlang/== :none (read_native_declaration
+                             (Path/join shipped (native_declaration_file digest ns true)) digest ns))
+          (erlang/== :none (read_native_declaration
+                             (Path/join cache (native_declaration_file digest ns true)) digest ns))) :none
+      :else nil)))
 
 (defn prime_native_declarations!
   "Ship content-keyed native syntax with the SDK, as with its source parts.
@@ -3550,14 +3567,16 @@
                   declaration (when ns (sdk_native_source_declaration_content ns path content))]
               (if ns
                 (let [digest (crypto/hash :sha256 content)]
-                  (File/write! (Path/join output (native_declaration_name digest ns))
+                  (File/write! (Path/join output (native_declaration_file digest ns (nil? declaration)))
                     (erlang/term_to_binary (tuple digest ns (if declaration declaration :none))
                                            (list :deterministic)))
                   (if declaration (erlang/+ count 1) count)) count)) count))))))
 
 (defn- store_native_declaration! [digest ns declaration]
   (try
-    (let [path (native_declaration_path digest ns)
+    (let [path (if (erlang/== :none declaration)
+                 (erlang/iolist_to_binary (list (native_declaration_path digest ns) ".none"))
+                 (native_declaration_path digest ns))
           tmp (erlang/iolist_to_binary (list path ".tmp-" (os/getpid)))]
       (File/mkdir_p! (Path/dirname path))
       (File/write! tmp (erlang/term_to_binary (tuple digest ns declaration) (list :deterministic)))

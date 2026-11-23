@@ -106,3 +106,24 @@
     (File/write! path "truncated")
     (is (= nil (BeamLisp.AOT/read_native_declaration path digest ns))))
    (finally (File/rm_rf! root)))))
+
+(deftest a-source-without-one-declaration-is-primed-as-a-separate-negative
+ ;; K1: sources that only mention `defnative` (the compiler, the loader) were
+ ;; re-parsed on every VM start. Their negative answer is primed under its own
+ ;; `.none` name, which a reader predating negatives never opens.
+ (let [root (str (System/tmp_dir!) "/bl-prime-none-" (System/unique_integer (list :positive)))
+       ns (str "prime-none-" (System/unique_integer (list :positive)))
+       source (str root "/std/" ns ".bl")
+       content (str "(ns " ns ") (def mentions \"defnative\")")]
+  (try
+   (File/mkdir_p! (Path/dirname source)) (File/write! source content)
+   (is (= 0 (BeamLisp.AOT/prime_native_declarations! root)))
+   (let [digest (crypto/hash :sha256 content)
+         dir (Path/join (Path/join root "native-declarations") (BeamLisp.AOTCache/compiler_key))
+         positive (Path/join dir (BeamLisp.AOT/native_declaration_name digest ns))
+         negative (str positive ".none")]
+    (is (not (File/exists? positive)))
+    (is (= :none (BeamLisp.AOT/read_native_declaration negative digest ns)))
+    (is (= (tuple 1 (list (str "std/" ns ".bl")))
+           (erlang/binary_to_term (File/read! (Path/join dir "declaring.term"))))))
+   (finally (File/rm_rf! root)))))
