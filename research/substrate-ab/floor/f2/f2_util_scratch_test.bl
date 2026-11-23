@@ -1,0 +1,140 @@
+(ns f2-util-scratch-test)
+
+(defn- each [f xs] (doseq [x xs] (f x)) nil)
+
+(defn- path->binary
+  "A code-path entry as a binary. `code.get_path` answers charlists and the
+   library store answers binaries; comparing the two needs one shape."
+  [p]
+  ; `unicode:characters_to_binary`, not `list_to_binary`: a code-path entry is
+  ; a CHARLIST, and a directory named with a non-Latin-1 character (a test's
+  ; tmp dir titled "compile → load") is not a valid iolist — measured: every
+  ; `bl test` run in a VM that had such a path died in `list_to_binary`.
+  (if (erlang/is_binary p) p (unicode/characters_to_binary p)))
+
+(defn- stamp
+  "`path`'s inode, mtime and ctime in whole seconds, or :absent."
+  [path]
+  (let [r (erlang/apply :file :read_file_info (list path (list (tuple :time :posix))))]
+    (if (= :ok (elem r 0))
+      (let [info (elem r 1)] [(elem info 11) (elem info 5) (elem info 6)])
+      :absent)))
+
+(defn- store-snapshot
+  "What decides `library_search_paths`: the store's `ebin` directory, and each
+   entry in it carrying this runtime's tag, with their stamps. A library that
+   is added, removed or finishes compiling (`.compiled`, `ebin/`) moves the
+   stamp of the directory it lands in, so an equal snapshot is an equal answer.
+   Taken BEFORE the paths are listed: a change after it moves a stamp."
+  []
+  (let [root (BeamLisp.Loader/shared_cache_root "ebin")
+        tag (BeamLisp.Loader/library_runtime_tag)
+        entries (filter (fn [d] (String/ends_with? d tag)) (Path/wildcard (Path/join root "*")))]
+    {:root root :root-stamp (stamp root)
+     :entries (mapv (fn [d] [d (stamp d)]) entries)}))
+
+(defn- snapshot-current? [snapshot]
+  (and (= (:root-stamp snapshot) (stamp (:root snapshot)))
+       (= (:root snapshot) (BeamLisp.Loader/shared_cache_root "ebin"))
+       (every? (fn [[d st]] (= st (stamp d))) (:entries snapshot))))
+
+(defn- snapshot-settled?
+  "Recorded only when nothing in it changed in the last 2 s: a write inside
+   the same second as the snapshot would not move a whole-second stamp."
+  [snapshot]
+  (let [now (erlang/system_time :second)
+        stamps (cons (:root-stamp snapshot) (map second (:entries snapshot)))]
+    (every? (fn [st] (or (= st :absent) (< (max (nth st 1) (nth st 2)) (- now 2)))) stamps)))
+
+(def ^:private STORE-PATHS (tuple :bl_util :store_paths_scratch))
+
+(defn register-store-paths!
+  "Put the library STORE's compiled ebins on the VM code path. Idempotent: a
+   directory already on the path is left alone, so this costs nothing when it
+   runs twice and never leaves the path half-applied.
+
+   Machine-global — it reads no command state, because it has none to read.
+   Any `.bl` namespace may call a library module (`Jason` behind every `--json`,
+   the store behind everything else), and the directories that hold them exist
+   for the whole VM, not for one invocation. `run-argv` calls this on every
+   entry, ahead of dispatch, so no command can reach a library module before
+   the path that carries it is in place.
+
+   Once per VM, not per request (F2): the registered set is remembered with the
+   store snapshot it was listed under, and a request whose snapshot is
+   unchanged, with those directories still on the code path, does nothing
+   more. Listing the store and building a set of the whole code path cost a
+   warm `bl run` about 0.8 ms."
+  []
+  (let [memo (erlang/apply :persistent_term :get (list STORE-PATHS nil))
+        path (code/get_path)]
+    (when-not (and (some? memo)
+                   (snapshot-current? (:snapshot memo))
+                   (every? (fn [d] (lists/member d path)) (:charlists memo)))
+      (let [snapshot (store-snapshot)
+            dirs (BeamLisp.Loader/library_search_paths)
+            have (set (map path->binary path))]
+        (each (fn [d]
+                (when-not (contains? have (path->binary d))
+                  (Code/prepend_path d)))
+              dirs)
+        (when (snapshot-settled? snapshot)
+          (let [wanted (set (map path->binary dirs))
+                charlists (distinct (filter (fn [c] (contains? wanted (path->binary c))) (code/get_path)))]
+            ;; remembered only when every directory is found as the code path holds it
+            (when (= (count charlists) (count dirs))
+              (erlang/apply :persistent_term :put
+                (list STORE-PATHS {:snapshot snapshot :charlists (vec charlists)})))))))
+    :ok))
+
+
+(defn- memo [] (erlang/apply :persistent_term :get (list STORE-PATHS nil)))
+(defn- on-path? [d] (contains? (set (map path->binary (code/get_path))) d))
+
+(deftest store-paths-are-registered-once-and-follow-the-store
+  (let [xdg (str (System/tmp_dir!) "/f2-store-" (System/unique_integer (list :positive)))
+        tag (BeamLisp.Loader/library_runtime_tag)
+        root (str xdg "/beam_lisp/ebin")
+        lib (fn [n] (let [d (str root "/" n "-" tag)]
+                      (File/mkdir_p! (str d "/ebin"))
+                      (File/write! (str d "/.compiled") "app-v3")
+                      (str d "/ebin")))
+        saved (erlang/get :bl-osenv-overlay)]
+    (erlang/put :bl-osenv-overlay (assoc (if (map? saved) saved {}) "XDG_CACHE_HOME" xdg))
+    (try
+      (let [a (lib "alpha")]
+        (is (= root (BeamLisp.Loader/shared_cache_root "ebin")))
+        (register-store-paths!)
+        (is (on-path? a) "a compiled library is registered")
+        (is (nil? (memo)) "a store written within 2 s is not remembered")
+        (Process/sleep 3100)
+        (register-store-paths!)
+        (is (some? (memo)) "a settled store is remembered")
+        (let [m1 (memo)]
+          (register-store-paths!)
+          (is (erlang/=:= m1 (memo)) "an unchanged store does nothing more"))
+        (let [b (lib "beta")]
+          (register-store-paths!)
+          (is (on-path? b) "a library added after the memo is registered on the next request"))
+        (Process/sleep 3100)
+        (register-store-paths!)
+        (is (some? (memo)))
+        (code/del_path (erlang/binary_to_list a))
+        (is (not (on-path? a)))
+        (register-store-paths!)
+        (is (on-path? a) "a remembered directory that left the code path is put back")
+        (let [c (str root "/gamma-" tag)]
+          (File/mkdir_p! (str c "/ebin"))
+          (Process/sleep 3100)
+          (register-store-paths!)
+          (is (not (on-path? (str c "/ebin"))) "an interrupted compile (no marker) is not registered")
+          (File/write! (str c "/.compiled") "app-v3")
+          (register-store-paths!)
+          (is (on-path? (str c "/ebin")) "its marker landing moves its directory's stamp")))
+      (finally
+        (erlang/put :bl-osenv-overlay saved)
+        (each (fn [d] (when (String/starts_with? (path->binary d) xdg) (code/del_path d))) (code/get_path))
+        (erlang/apply :persistent_term :erase (list STORE-PATHS))
+        (File/rm_rf! xdg)))))
+
+(run-tests)

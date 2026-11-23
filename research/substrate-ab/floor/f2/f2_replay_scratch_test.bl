@@ -1,0 +1,129 @@
+(ns f2-replay-scratch-test (:require [compiler :as c] [lower :as sc]))
+
+(defn- installed-beam?
+  "Whether `mname` is loaded with exactly these bytes. A retained module (a
+   closure-producing form) is still loaded when a cached form is replayed, and
+   loading identical bytes would churn the code server for nothing."
+  [mname beam]
+  (and (erlang/module_loaded mname)
+       (let [parsed (beam_lib/md5 beam)]
+         (and (erlang/is_tuple parsed) (erlang/== :ok (elem parsed 0))
+              (erlang/== (elem (elem parsed 1) 1)
+                         (erlang/apply mname :module_info (list :md5)))))))
+
+(defn replay-retained-limit
+  "How many replayed eval modules stay loaded at once, VM-wide."
+  []
+  64)
+
+(defn replay-retained
+  "The replayed eval modules this VM keeps loaded: `{:order (oldest … newest)
+   :beams #{module → beam}}`. A persistent_term, read without copying on every
+   replay and written only when a new module joins."
+  []
+  (persistent_term/get :bl_replay_retained_scratch {:order (list) :beams {}}))
+
+(defn- retain-replay-module!
+  "Keep `mname` (loaded from `beam`) loaded for later replays. Past
+   `replay-retained-limit` the oldest leaves the table and goes through
+   eval-anf's own retirement, so the code a replay keeps is bounded however
+   many files a VM has run. Serialized: two first replays must not drop each
+   other's entry, which would leave a module loaded that nothing releases."
+  [mname beam]
+  (erlang/apply :global :trans
+    (list (tuple :bl_replay_retained_scratch (erlang/self))
+          (fn []
+            (let [table (replay-retained)
+                  beams (:beams table)]
+              (when-not (maps/is_key mname beams)
+                (let [order (erlang/++ (:order table) (list mname))
+                      excess (erlang/- (erlang/length order) (replay-retained-limit))
+                      gone (if (erlang/> excess 0) (lists/sublist order excess) (list))
+                      kept (if (erlang/> excess 0) (lists/nthtail excess order) order)]
+                  (persistent_term/put :bl_replay_retained_scratch
+                    {:order kept :beams (maps/put mname beam (maps/without gone beams))})
+                  (lists/foreach (fn [m] (sc/release-eval-module! m)) gone))))))))
+
+(defn run-eval-beam
+  "Run a form from its compiled bytes, without compiling: load (unless the
+   identical module is already loaded), then run/0. Returns run/0's value.
+
+   A replayed module STAYS loaded (F2): a run cache replays the same modules
+   request after request, and loading and retiring one per form per request
+   was the largest part of an unchanged `bl run` in a warm VM (3.8 ms of the
+   VM handler, research/checked-tiles/evidence/warm-floor-f1.json). Its
+   lifetime is `retain-replay-module!`'s table, bounded VM-wide; a module that
+   left it, or that something else retired, is loaded again here."
+  [mname beam]
+  (let [known (maps/get mname (:beams (replay-retained)) nil)]
+    (when-not (and (erlang/=:= known beam) (erlang/module_loaded mname))
+      (when-not (installed-beam? mname beam)
+        (let [filename (erlang/binary_to_list (str mname ".beam"))
+              result (code/load_binary mname filename beam)]
+          (when (not= result (tuple :module mname))
+            (throw (ex-info "lower/run-eval-beam: load failed" {:module mname :result result})))))
+      (retain-replay-module! mname beam)))
+  (erlang/apply mname :run (list)))
+
+
+(def kenv (assoc (c/new-env "user") :ns "user"))
+(def ctr (atom 0))
+(defn- fresh [] (erlang/binary_to_atom (str "bl_rml_" (System/unique_integer (list :positive)) "_" (swap! ctr inc))))
+(defn- compile-anf [src] (c/compile (BeamLisp.Reader/read_one src) kenv))
+(defn- loaded? [m] (erlang/module_loaded m))
+(defn- retained? [m] (maps/is_key m (:beams (replay-retained))))
+
+(defn- recorded
+  "A form compiled and run once the way `eval_string_forms` records it: its
+   module is released (closure-free) and its bytes are kept for replay."
+  [src]
+  (let [m (fresh) r (sc/eval-anf-record m (compile-anf src))]
+    [m (:beam r) (:value r)]))
+
+(deftest a-replayed-module-stays-loaded
+  (let [[m beam v] (recorded "(+ 40 2)")]
+    (is (= 42 v))
+    (is (not (loaded? m)) "the recording run releases it, as before")
+    (is (= 42 (run-eval-beam m beam)))
+    (is (loaded? m) "the first replay loads it and keeps it")
+    (is (retained? m))
+    (let [md5 (erlang/apply m :module_info (list :md5))]
+      (is (= 42 (run-eval-beam m beam)))
+      (is (= md5 (erlang/apply m :module_info (list :md5))) "the second replay runs the same loaded code"))))
+
+(deftest a-module-retired-elsewhere-is-loaded-again
+  (let [[m beam _] (recorded "(* 6 7)")]
+    (is (= 42 (run-eval-beam m beam)))
+    (code/delete m)
+    (code/soft_purge m)
+    (is (not (loaded? m)))
+    (is (= 42 (run-eval-beam m beam)) "a replay of a module that is gone loads it again")
+    (is (loaded? m))))
+
+(deftest the-retained-table-is-bounded
+  (let [limit (replay-retained-limit)
+        [first-m first-beam _] (recorded "(+ 1 1)")]
+    (run-eval-beam first-m first-beam)
+    (is (retained? first-m))
+    (doseq [i (range limit)]
+      (let [[m beam _] (recorded (str "(+ " i " 2)"))]
+        (run-eval-beam m beam)))
+    (let [table (replay-retained)]
+      (is (= limit (count (:order table))))
+      (is (= limit (count (:beams table))))
+      (is (not (retained? first-m)) "the oldest leaves the table")
+      (is (not (loaded? first-m)) "and, closure-free, is retired"))
+    (is (= 2 (run-eval-beam first-m first-beam)) "and replays again by loading")))
+
+(deftest a-closure-bearing-replay-keeps-working-after-it-leaves
+  (let [[m beam f] (recorded "(let [k :kept] (fn [x] [k x]))")]
+    (is (= [:kept 1] (f 1)))
+    (let [g (run-eval-beam m beam)]
+      (doseq [i (range (replay-retained-limit))]
+        (let [[m2 beam2 _] (recorded (str "(+ " i " 3)"))]
+          (run-eval-beam m2 beam2)))
+      (is (not (retained? m)))
+      (is (loaded? m) "a module whose closure may be live is kept by the retirement rule")
+      (is (= [:kept 9] (g 9))))))
+
+(run-tests)
