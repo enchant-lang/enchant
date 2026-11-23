@@ -158,11 +158,11 @@
     (lambda () (set! native-env-rows rows) (set! native-env-index-exact? indexed))))
   (native-fetch! ns name exact)))
 (define (native-global ns name)
- (let ((value (native-base-fetch! ns name #f)))
+ (let ((value (if native-env-view-active? (native-base-fetch! ns name #f) (native-fetch! ns name))))
   (if (and (bl-tag? value 'tuple) (= (bl-count value) 2) (eq? (bl-nth value 0) (bl-key "$macro")))
    (bl-nth value 1) value)))
 (define (native-global-exact ns name)
- (let ((value (native-base-fetch! ns name #t)))
+ (let ((value (if native-env-view-active? (native-base-fetch! ns name #t) (native-fetch! ns name #t))))
   (if (and (bl-tag? value 'tuple) (= (bl-count value) 2) (eq? (bl-nth value 0) (bl-key "$macro")))
    (bl-nth value 1) value)))
 ;; Resolve the live EXACT canonical runtime when Enum consumes a deferred
