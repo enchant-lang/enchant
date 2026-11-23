@@ -51,14 +51,18 @@
 (define native-macro-trace-enabled? (equal? (getenv "BL_NATIVE_TRACE" #f) "1"))
 (define native-macro-trace-start
  (if native-macro-trace-enabled? (time->seconds (current-time)) #f))
+;; Inside a private Env view (Env/with_env on a forked env, the front end's
+;; constructor world) a sealed row may be shadowed: the row map holds the
+;; view's value until the view is destroyed, and the linked slot is untouched.
+(define native-env-view-active? #f)
 (define (native-env-put! key value)
- (if (and native-image-sealed? (native-sealed-row? key))
+ (if (and native-image-sealed? (native-sealed-row? key) (not native-env-view-active?))
   (native-sealed-refuse! (string-append (bl-nth key 0) "/" (bl-nth key 1))))
  (set! native-env-rows (bl-assoc native-env-rows key value))
  (if (native-env-index-key? key) (table-set! native-env-index key value)
   ;; a row the index cannot hold might equal an indexed key: stop using it
   (set! native-env-index-exact? #f))
- (native-env-row-changed! key)
+ (if (not (and native-env-view-active? (native-sealed-row? key))) (native-env-row-changed! key))
  (if (and native-macro-trace-enabled?
           (bl-tag? value 'tuple) (= (bl-count value) 2)
           (eq? (bl-nth value 0) (bl-key "$macro"))

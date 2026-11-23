@@ -625,7 +625,7 @@
                 (table-set! old k native-missing)))
      (native-map-pairs rows))
     (table-for-each (lambda (k v) (if (not (eq? v native-missing)) (set! changed (cons k changed)))) old)
-    (for-each native-env-row-changed! changed)
+    (for-each (lambda (k) (if (not (native-sealed-row? k)) (native-env-row-changed! k))) changed)
     (native-link-changed!)))))
 (nf-leaf! "Elixir.BeamLisp.Env/capture/0"
  (lambda () (bl-map (bl-key "rows") native-env-rows (bl-key "ns") native-env-current
@@ -656,7 +656,9 @@
 (nf-leaf! "Elixir.BeamLisp.Env/with_env/2"
  (lambda (token thunk)
   (let ((saved nf-env-current))
-   (dynamic-wind (lambda () (set! nf-env-current token)) (lambda () (nf-call thunk)) (lambda () (set! nf-env-current saved))))))
+   (dynamic-wind (lambda () (set! nf-env-current token) (set! native-env-view-active? (not (eq? token (bl-key "global")))))
+                 (lambda () (nf-call thunk))
+                 (lambda () (set! nf-env-current saved) (set! native-env-view-active? (and saved (not (eq? saved (bl-key "global"))) #t)))))))
 (nf-leaf! "Elixir.BeamLisp.Env/with_namespace_lock/2" (lambda (ns thunk) (nf-call thunk)))
 (nf-leaf! "Elixir.BeamLisp.Env/with_publication/2" (lambda (ns thunk) (nf-call thunk)))
 (nf-leaf! "Elixir.BeamLisp.Env/with_module_locks/2" (lambda (mods thunk) (nf-call thunk)))
