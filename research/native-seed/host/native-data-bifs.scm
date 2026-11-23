@@ -1051,3 +1051,12 @@
    (table-for-each (lambda (k cell) (set! live (+ live 1)) (set! bytes (+ bytes (vector-ref cell 3)))) native-memo-cells)
    (set! native-memo-live live) (set! native-memo-retained bytes)
    bytes)))
+;; beam_lib:md5/1 for front-end/hook.bl's stand-in {:nf-beam MODULE}: the MD5
+;; of the SDK's own beam of MODULE (custody). Real bytes have no native answer.
+(nf-set-leaf! "beam_lib/md5/1"
+ (lambda (beam)
+  (if (and (bl-tag? beam 'tuple) (= 2 (bl-count beam)) (eq? (bl-nth beam 0) (bl-key "nf-beam")))
+   (let ((md5 (native-raw-map-get (nf-world-get (bl-key "beam-md5s") (bl-empty-map)) (bl-nth beam 1) native-missing)))
+    (if (eq? md5 native-missing) (bl-make-tuple (bl-key "error") (bl-key "beam_lib"))
+     (bl-make-tuple (bl-key "ok") (bl-make-tuple (bl-nth beam 1) md5))))
+   (native-badarg "beam_lib:md5 has no native counterpart for beam bytes"))))
