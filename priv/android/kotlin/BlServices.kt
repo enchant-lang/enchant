@@ -160,6 +160,7 @@ class BlReader : AccessibilityService() {
         @Volatile @JvmStatic var instance: BlReader? = null
         @JvmStatic fun connected(): Boolean = instance != null
         @Volatile @JvmStatic var streaming: Boolean = false
+        @Volatile @JvmStatic var scanStreaming: Boolean = false
 
         fun nodeJson(n: AccessibilityNodeInfo, depth: Int, maxDepth: Int): JSONObject {
             val r = Rect(); n.getBoundsInScreen(r)
@@ -167,6 +168,8 @@ class BlReader : AccessibilityService() {
                 .put("class", n.className?.toString() ?: JSONObject.NULL)
                 .put("text", n.text?.toString() ?: JSONObject.NULL)
                 .put("desc", n.contentDescription?.toString() ?: JSONObject.NULL)
+                .put("hint", n.hintText?.toString() ?: JSONObject.NULL)
+                .put("showing-hint", n.isShowingHintText)
                 .put("id", n.viewIdResourceName ?: JSONObject.NULL)
                 .put("bounds", JSONArray(listOf(r.left, r.top, r.right, r.bottom)))
                 .put("clickable", n.isClickable)
@@ -174,6 +177,17 @@ class BlReader : AccessibilityService() {
                 .put("focused", n.isFocused)
                 .put("selected", n.isSelected)
                 .put("checked", n.isChecked)
+                .put("visible", n.isVisibleToUser)
+                .put("scrollable", n.isScrollable)
+                .put("child-count", n.childCount)
+            n.collectionInfo?.let {
+                o.put("collection", JSONObject()
+                    .put("rows", it.rowCount).put("columns", it.columnCount)
+                    .put("hierarchical", it.isHierarchical))
+            }
+            n.collectionItemInfo?.let {
+                o.put("item", JSONObject().put("row", it.rowIndex).put("row-span", it.rowSpan))
+            }
             if (depth < maxDepth && n.childCount > 0) {
                 val kids = JSONArray()
                 for (i in 0 until n.childCount) n.getChild(i)?.let { kids.put(nodeJson(it, depth + 1, maxDepth)) }
@@ -189,6 +203,7 @@ class BlReader : AccessibilityService() {
         serviceInfo = serviceInfo.apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                AccessibilityEvent.TYPE_VIEW_SCROLLED or
                 AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or
                 AccessibilityEvent.TYPE_VIEW_CLICKED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
@@ -207,20 +222,34 @@ class BlReader : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(e: AccessibilityEvent) {
-        if (!streaming) return
-        // Content changes fire in bursts; only window changes and user actions
-        // are forwarded as they happen. bl pulls the tree when it wants it.
+        if (!streaming && !scanStreaming) return
         val kind = when (e.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> "window"
             AccessibilityEvent.TYPE_VIEW_CLICKED -> "click"
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> "text"
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> if (scanStreaming) "scroll" else return
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ->
+                if (scanStreaming && e.contentChangeTypes and AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE != 0)
+                    "content" else return
             else -> return
         }
-        BlBridge.emit("reader/event", JSONObject()
+        val payload = JSONObject()
             .put("kind", kind)
             .put("package", e.packageName?.toString() ?: JSONObject.NULL)
             .put("class", e.className?.toString() ?: JSONObject.NULL)
-            .put("text", JSONArray(e.text.map { it.toString() })))
+            .put("text", JSONArray(e.text.map { it.toString() }))
+        if (scanStreaming) {
+            val source = if (kind == "scroll" || kind == "content") e.source else null
+            try {
+                payload.put("window", e.windowId).put("event-time", e.eventTime)
+                    .put("source-id", source?.viewIdResourceName ?: JSONObject.NULL)
+                    .put("item-count", e.itemCount)
+            } finally {
+                @Suppress("DEPRECATION")
+                source?.recycle()
+            }
+        }
+        BlBridge.emit("reader/event", payload)
     }
 
     override fun onInterrupt() {}
@@ -230,6 +259,7 @@ class BlReader : AccessibilityService() {
         val root = rootInActiveWindow ?: return JSONObject.NULL.toString()
         return JSONObject()
             .put("package", root.packageName?.toString() ?: JSONObject.NULL)
+            .put("window", root.windowId)
             .put("root", nodeJson(root, 0, maxDepth)).toString()
     }
 
