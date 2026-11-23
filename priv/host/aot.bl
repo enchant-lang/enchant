@@ -3531,8 +3531,17 @@
    Fresh machines need no reader pass to rediscover already-built declarations.
    Every use still verifies source bytes and physical native code identity."
   [root]
-  (let [output (Path/join (Path/join root "native-declarations") (BeamLisp.AOTCache/compiler_key))]
+  (let [output (Path/join (Path/join root "native-declarations") (BeamLisp.AOTCache/compiler_key))
+        physical (physical_sdk_path root)]
     (File/mkdir_p! output)
+    ;; K1: the bootstrap scan's answer, relative to the image root.
+    (File/write! (Path/join output "declaring.term")
+      (erlang/term_to_binary
+        (tuple 1 (Enum/map
+                   (Enum/filter (sdk_native_tier_files physical)
+                     (fn [file] (String/contains? (BeamLisp.Loader/read_source file) "defnative")))
+                   (fn [file] (Path/relative_to file physical))))
+        (list :deterministic)))
     (Enum/reduce (BeamLisp.Tiers/sources root) 0
       (fn [path count]
         (let [content (BeamLisp.Loader/read_source path)]
@@ -3674,6 +3683,35 @@
       (BeamLisp.Env/bump_sdk_receipt_revision!)))
   :ok)
 
+(defn- sdk_native_tier_files [root]
+  ;; Every current tier source under `root`, the bootstrap's discovery input.
+  (Enum/sort (Enum/uniq (Enum/flat_map (BeamLisp.Tiers/dirs root)
+    (fn [dir] (Enum/flat_map (BeamLisp.Tiers/source_extensions)
+      (fn [ext] (Path/wildcard (erlang/iolist_to_binary (list dir "/**/*" ext))))))))))
+
+(defn- native_declaring_seal_path [root]
+  (Path/join (Path/join (Path/join root "native-declarations") (BeamLisp.AOTCache/compiler_key))
+             "declaring.term"))
+
+(defn- sealed_native_declaring [root]
+  ;; The producer's list of tier sources mentioning `defnative`, for an image
+  ;; under /nix/store/ only (the sources cannot change there). Pure discovery
+  ;; data like the scan cache: every listed file is still read, hashed, parsed
+  ;; and identity-checked by sdk_native_input / native_host_emission_row!.
+  (let [path (native_declaring_seal_path root)]
+    (when (and (immutable_root? path) (File/regular? path))
+      (try
+        (let [t (erlang/binary_to_term (File/read! path) (list :safe))]
+          (when (and (erlang/is_tuple t) (erlang/== 2 (erlang/tuple_size t))
+                     (erlang/== 1 (elem t 0)) (erlang/is_list (elem t 1))
+                     (erlang/=< (erlang/length (elem t 1)) 512)
+                     (Enum/all? (elem t 1) (fn [rel] (and (erlang/is_binary rel)
+                                                         (erlang/== :relative (Path/type rel))
+                                                         (erlang/not (String/contains? rel ".."))))))
+            (Enum/filter (Enum/map (elem t 1) (fn [rel] (Path/join root rel)))
+                          (fn [file] (File/regular? file)))))
+        (catch _ nil)))))
+
 (defn- sdk_native_scan_stamp [root files]
   ;; Identity of the DISCOVERY INPUT, never of a declaration: (path, size,
   ;; mtime, inode) for every current tier source. Contents are not read here;
@@ -3762,11 +3800,12 @@
           (erlang/error :sdk_native_bootstrap_after_runtime_publication))
         (let [started (erlang/monotonic_time :microsecond)
               root (physical_sdk_path (BeamLisp.Tiers/priv_root))
-              files (Enum/sort (Enum/uniq (Enum/flat_map (BeamLisp.Tiers/dirs root)
-                      (fn [dir] (Enum/flat_map (BeamLisp.Tiers/source_extensions)
-                        (fn [ext] (Path/wildcard (erlang/iolist_to_binary (list dir "/**/*" ext)))))))))
-              declaring (sdk_native_declaring_files root files)]
-          (when (erlang/> (erlang/length files) 8192) (erlang/error :sdk_native_source_inventory_bound))
+              ;; K1: an immutable image ships the answer of this scan
+              ;; (`prime_native_declarations!`); anything else walks and stats.
+              sealed (sealed_native_declaring root)
+              files (when-not sealed (sdk_native_tier_files root))
+              declaring (or sealed (sdk_native_declaring_files root files))]
+          (when (and files (erlang/> (erlang/length files) 8192)) (erlang/error :sdk_native_source_inventory_bound))
           ;; The policy unit is ordinary SDK bootstrap support. No native
           ;; provider unit __bl_init__, def value or business callback runs.
           (BeamLisp.Loader/ensure_loaded "vm.native")
