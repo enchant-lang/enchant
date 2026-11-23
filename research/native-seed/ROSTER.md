@@ -364,6 +364,19 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - Cold passes 53 / 111 / 43.
 - **Left.** `contextual_session_retirement_test` still assumes it is the VM's only session. It passes cold, but run warm it takes the realm down, so keep it out of warm runs.
 
+#### U15 ⏳ A `priv/std` or `priv/lib` edit runs in the warm realm without an SDK · S+ · BL runtime + loader
+- **Why.** The SDK is the only route today. A one-file std edit costs 440 s (N4's measurement), and under 10% of that is compiling. Project code already reloads in place. SDK namespaces refuse with `sdk_forwarder_route_changed`, and `:shadow` reaches only callers inside the project.
+- **Change.** In a checkout, a changed SDK namespace under `priv/std` or `priv/lib` is compiled in the realm, from the checkout, and routed for every caller, library to library included. The realm then retires as it does for a project edit.
+  - Keep `priv/boot` and `priv/host` on the SDK path: they are the compiler and the floor.
+  - A released SDK never does this.
+- **Done when.**
+  - Editing `priv/std/vm/session.bl` and then running `bl test test/bl/vm/session_test.bl` uses the edit in seconds, with no SDK preparation.
+  - Reverting the edit restores the SDK's code.
+  - The ten files pass afterwards.
+  - Preparing the SDK for the same tree gives the same results.
+
+### N — the native compiler on the default path
+
 #### N1 ✅ `cerl` as data on the native host · S+ · native-only
 - **Why.** The native image already carries `lower` and `lower-core`
   (`priv/boot/lower.bl`, `priv/boot/lower-core.bl`): bl-ANF → Core Erlang.
