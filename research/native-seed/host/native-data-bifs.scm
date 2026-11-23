@@ -691,14 +691,23 @@
  (lambda (kw keys) (let loop ((ks (native-finite-items keys)) (out '()))
   (if (null? ks) (reverse out) (loop (cdr ks) (let ((p (native-keyword-find kw (car ks)))) (if p (cons p out) out)))))))
 (nf-leaf! "Elixir.Keyword/get/3"
- (lambda (kw k d) (let ((p (native-keyword-find kw k))) (if p (bl-nth p 1) (bl-invoke d '())))))
+ (lambda (kw k d) (let ((p (native-keyword-find kw k))) (if p (bl-nth p 1) d))))
 (nf-leaf! "Elixir.Keyword/fetch!/2"
  (lambda (kw k) (let ((p (native-keyword-find kw k))) (if p (bl-nth p 1) (nf-key-error k kw)))))
 (nf-leaf! "Elixir.List/to_string/1"
  (lambda (xs) (let loop ((cs (native-finite-items xs)) (out ""))
   (if (null? cs) out (loop (cdr cs) (string-append out (native-atom-name (car cs))))))))
+;; Elixir Range.new/2: first..last with step -1 when first > last (the
+;; deprecated implicit decreasing range, which 0..-1 still is).
 (nf-leaf! "Elixir.Range/new/2"
- (lambda (a b) (bl-struct "Elixir.Range" (bl-map (bl-key "first") a (bl-key "last") b))))
+ (lambda (a b) (bl-struct "Elixir.Range" (bl-map (bl-key "first") a (bl-key "last") b (bl-key "step") (if (<= a b) 1 -1)))))
+(define nf-range-key (bl-key "Elixir.Range"))
+(define (nf-range? x) (and (bl-tag? x 'map) (eq? (native-raw-map-get x native-struct-key bl-nil) nf-range-key)))
+(define (nf-range-items r)
+ (let ((first (native-raw-map-get r (bl-key "first") 0)) (last (native-raw-map-get r (bl-key "last") 0))
+       (step (native-raw-map-get r (bl-key "step") 1)))
+  (let loop ((i first) (out '()))
+   (if (if (> step 0) (> i last) (< i last)) (reverse out) (loop (+ i step) (cons i out))))))
 (nf-leaf! "Elixir.Macro/camelize/1"
  (lambda (s) (let loop ((cs (string->list (native-char-data s))) (out '()) (up #t))
   (if (null? cs) (list->string (reverse out))
@@ -812,7 +821,16 @@
          (display "NF-TRACE ") (write text) (display " ") (write (nf-trace-frames)) (newline)))
        (k (lambda () (handler e))))
       (lambda () (call-with-values thunk (lambda vs (lambda () (apply values vs))))))))))))
-(nf-leaf! "host/nf-trace!/1" (lambda (n) (set! nf-trace-left n) (bl-key "ok")))
+(define (nf-traced-resolve f xs)
+ (let ((call (native-invoke-original-resolve f xs)))
+  (let ((g (car call)))
+   (if (not (or (procedure? g) (native-keyword? g) (bl-tag? g 'map) (bl-tag? g 'vec) (bl-tag? g 'set)))
+    (begin (display "NF-NOT-CALLABLE ") (write (native-render g #t)) (display " ARGS ")
+           (write (map (lambda (x) (native-render x #t)) (cdr call))) (newline)))
+   call)))
+(nf-leaf! "host/nf-trace!/1"
+ (lambda (n) (set! nf-trace-left n)
+  (set! native-resolve-call (if (> n 0) nf-traced-resolve native-invoke-original-resolve)) (bl-key "ok")))
 
 ;; ── Front end: Elixir Map over BL vectors and sets ──────────────────────────
 ;; On the BEAM a vector is %BeamLisp.Vector{items, meta} and a set is
@@ -830,3 +848,75 @@
 (nf-set-leaf! "Elixir.Map/to_list/1" (lambda (m) (native-map-pairs (native-assert-map m))))
 (nf-set-leaf! "Elixir.Map/has_key?/2" (lambda (m k) (native-raw-map-has? (nf-view m) k)))
 (nf-set-leaf! "Elixir.Map/new/1" (lambda (xs) (nf-rebuild (h-bmap (native-finite-items xs)))))
+
+;; ── Front end: crypto:hash(sha256, IoData) ─────────────────────────────────
+;; Staging digests sources and compiler terms (term_to_binary bytes). FIPS
+;; 180-4 over exact integers masked to 32 bits; the digest is a byte binary.
+(define (nf-iodata-bytes x)
+ (cond ((string? x) (native-utf8-bytes x))
+  ((native-bytes? x) (bytevector->u8-list (vector-ref x 1)))
+  ((and (integer? x) (exact? x)) (list x))
+  ((null? x) '())
+  ((pair? x) (append (nf-iodata-bytes (car x)) (nf-iodata-bytes (cdr x))))
+  (else (native-badarg "iodata expected"))))
+(define nf-sha256-k
+ '#(#x428a2f98 #x71374491 #xb5c0fbcf #xe9b5dba5 #x3956c25b #x59f111f1 #x923f82a4 #xab1c5ed5
+    #xd807aa98 #x12835b01 #x243185be #x550c7dc3 #x72be5d74 #x80deb1fe #x9bdc06a7 #xc19bf174
+    #xe49b69c1 #xefbe4786 #x0fc19dc6 #x240ca1cc #x2de92c6f #x4a7484aa #x5cb0a9dc #x76f988da
+    #x983e5152 #xa831c66d #xb00327c8 #xbf597fc7 #xc6e00bf3 #xd5a79147 #x06ca6351 #x14292967
+    #x27b70a85 #x2e1b2138 #x4d2c6dfc #x53380d13 #x650a7354 #x766a0abb #x81c2c92e #x92722c85
+    #xa2bfe8a1 #xa81a664b #xc24b8b70 #xc76c51a3 #xd192e819 #xd6990624 #xf40e3585 #x106aa070
+    #x19a4c116 #x1e376c08 #x2748774c #x34b0bcb5 #x391c0cb3 #x4ed8aa4a #x5b9cca4f #x682e6ff3
+    #x748f82ee #x78a5636f #x84c87814 #x8cc70208 #x90befffa #xa4506ceb #xbef9a3f7 #xc67178f2))
+(define (nf-u32 x) (bitwise-and x #xffffffff))
+(define (nf-rotr x n) (nf-u32 (bitwise-ior (arithmetic-shift x (- n)) (arithmetic-shift x (- 32 n)))))
+(define (nf-sha256 bytes)
+ (let* ((len (length bytes))
+        (pad (let ((r (modulo (+ len 9) 64))) (if (= r 0) 0 (- 64 r))))
+        (total (+ len 9 pad))
+        (bv (make-bytevector total 0))
+        (h (vector #x6a09e667 #xbb67ae85 #x3c6ef372 #xa54ff53a #x510e527f #x9b05688c #x1f83d9ab #x5be0cd19))
+        (w (make-vector 64 0)))
+  (let fill ((i 0) (xs bytes)) (if (pair? xs) (begin (bytevector-u8-set! bv i (car xs)) (fill (+ i 1) (cdr xs)))))
+  (bytevector-u8-set! bv len #x80)
+  (let put ((i 0)) (if (< i 8) (begin (bytevector-u8-set! bv (- total 1 i) (bitwise-and (arithmetic-shift (* 8 len) (* -8 i)) 255)) (put (+ i 1)))))
+  (let block ((off 0))
+   (if (< off total)
+    (begin
+     (let ws ((t 0))
+      (if (< t 64)
+       (begin
+        (vector-set! w t
+         (if (< t 16)
+          (bitwise-ior (arithmetic-shift (bytevector-u8-ref bv (+ off (* 4 t))) 24) (arithmetic-shift (bytevector-u8-ref bv (+ off (* 4 t) 1)) 16)
+                       (arithmetic-shift (bytevector-u8-ref bv (+ off (* 4 t) 2)) 8) (bytevector-u8-ref bv (+ off (* 4 t) 3)))
+          (let* ((a (vector-ref w (- t 15))) (b (vector-ref w (- t 2)))
+                 (s0 (bitwise-xor (nf-rotr a 7) (nf-rotr a 18) (arithmetic-shift a -3)))
+                 (s1 (bitwise-xor (nf-rotr b 17) (nf-rotr b 19) (arithmetic-shift b -10))))
+           (nf-u32 (+ (vector-ref w (- t 16)) s0 (vector-ref w (- t 7)) s1)))))
+        (ws (+ t 1)))))
+     (let round ((t 0) (a (vector-ref h 0)) (b (vector-ref h 1)) (c (vector-ref h 2)) (d (vector-ref h 3))
+                 (e (vector-ref h 4)) (f (vector-ref h 5)) (g (vector-ref h 6)) (hh (vector-ref h 7)))
+      (if (< t 64)
+       (let* ((S1 (bitwise-xor (nf-rotr e 6) (nf-rotr e 11) (nf-rotr e 25)))
+              (ch (bitwise-xor (bitwise-and e f) (bitwise-and (bitwise-xor e #xffffffff) g)))
+              (t1 (nf-u32 (+ hh S1 ch (vector-ref nf-sha256-k t) (vector-ref w t))))
+              (S0 (bitwise-xor (nf-rotr a 2) (nf-rotr a 13) (nf-rotr a 22)))
+              (maj (bitwise-xor (bitwise-and a b) (bitwise-and a c) (bitwise-and b c)))
+              (t2 (nf-u32 (+ S0 maj))))
+        (round (+ t 1) (nf-u32 (+ t1 t2)) a b c (nf-u32 (+ d t1)) e f g))
+       (for-each (lambda (i v) (vector-set! h i (nf-u32 (+ (vector-ref h i) v))))
+        '(0 1 2 3 4 5 6 7) (list a b c d e f g hh))))
+     (block (+ off 64)))))
+  (let ((out (make-bytevector 32 0)))
+   (let put ((i 0)) (if (< i 8) (begin
+    (bytevector-u8-set! out (* 4 i) (arithmetic-shift (vector-ref h i) -24))
+    (bytevector-u8-set! out (+ (* 4 i) 1) (bitwise-and (arithmetic-shift (vector-ref h i) -16) 255))
+    (bytevector-u8-set! out (+ (* 4 i) 2) (bitwise-and (arithmetic-shift (vector-ref h i) -8) 255))
+    (bytevector-u8-set! out (+ (* 4 i) 3) (bitwise-and (vector-ref h i) 255)) (put (+ i 1)))))
+   out)))
+(nf-set-leaf! "crypto/hash/2"
+ (lambda (kind data)
+  (if (eq? kind (bl-key "sha256")) (native-bytes (nf-sha256 (nf-iodata-bytes data)))
+   (native-badarg "crypto:hash supports sha256 natively"))))
+(nf-set-leaf! "Elixir.Enum/to_list/1" (lambda (xs) (if (nf-range? xs) (nf-range-items xs) (native-finite-items xs))))
