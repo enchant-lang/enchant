@@ -267,3 +267,31 @@
     (BeamLisp.Env/intern "core" "__fingerprint_dependency_probe" :changed)
     (is (= digest (cache/fingerprint context)))
     (is (= 3 (:size (cache/stats :data.cache.fingerprints))))))
+
+(deftest complete-key-walk-preserves-nested-tags-and-depth-boundary
+  (let [input {:items (list (tuple 1 1.0 false nil "x"))}
+        expected (tuple :map
+                   {(tuple :atom :items)
+                    (tuple :list [(tuple :tuple [(tuple :integer 1) (tuple :float 1.0)
+                                                (tuple :atom false) (tuple :atom nil) (tuple :binary "x")])])})
+        nest (fn [n] (loop [left n value :leaf]
+                        (if (zero? left) value (recur (dec left) (tuple value)))))
+        improper (erlang/binary_to_term (erlang/list_to_binary (list 131 108 0 0 0 1 97 1 97 2)))]
+    (is (erlang/=:= expected (cache/key-data input 0)))
+    (is (some? (cache/key-data (nest 128) 0)))
+    (is (nil? (cache/key-data (nest 129) 0)))
+    (is (some? (cache/footprint (nest 128))))
+    (is (nil? (cache/footprint (nest 129))))
+    (is (nil? (cache/key-data improper 0)))
+    (is (nil? (cache/footprint improper)))
+    (doseq [value [(erlang/self) (erlang/make_ref) (fn [] nil)]]
+      (is (nil? (cache/footprint {:items (list (tuple value))}))))))
+
+(deftest finite-footprint-keeps-exact-charge-and-repeated-parent-accounting
+  (let [parent (binary/copy "p" 1048576)
+        slice (binary/part parent 0 256)]
+    (doseq [[value extra] [[{:items (list (tuple 1 1.0 false nil "x"))} 0]
+                         [(tuple slice slice) (* 2 (- (binary/referenced_byte_size slice) 256))]]]
+      (is (= (+ 256 (* 2 (+ (* (erlang/system_info :wordsize) (erts_debug/flat_size value))
+                              (erlang/external_size value) extra)))
+             (cache/footprint value))))))
