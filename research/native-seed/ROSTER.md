@@ -199,6 +199,11 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - A real failed preparation shows its cause in the client message.
   - The test fails without the change.
 - **Note.** `nix/` is an SDK input: batch this with other SDK-input cards.
+- **Follow-up (batch 17).** On 2026-11-23 the first three `error:` lines were all
+  `Cannot build '<drv>'.` — the leaf (`{:artifact-failed host.beam-lisp}`, then the producer's
+  `** (ArgumentError) …`) sits higher in the same file. Prefer distinct lines that are not
+  `Cannot build`, falling back to the first three; add a fixture whose chain hides its leaf.
+  `nix/` is an SDK input, so land it with the next SDK-input batch.
 
 #### U4 ✅ Lock work per request proportional to change — retargeted: locks cost 1–3 ms per request, Env full-table scans cost 15–30 ms; U4b replaces the scans with exact-key lookups (`lane/runtime`, Env own time per spawn 1,904 → 971 µs) · S+ · BL runtime (after U1)
 - **Why.** Journal 06, "Where a warm request waits": ~84
