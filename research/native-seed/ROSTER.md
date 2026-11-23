@@ -502,19 +502,22 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - A compiler edit that changes no output finishes an SDK in under 2 minutes.
   - An edit that changes one unit's output rebuilds one unit.
   - Both are measured end to end.
-- **Measured (batch 20 preparation, 2026-11-23: 2848 s; `priv/std/vm` and `tooling/drop` changed).**
-  - **Where the numbers come from.** The foundry events file is capped at 64 KB and was cut at 1199 s, so read the full logs on the build station: `ssh beam-build-station "nix log /nix/store/<drv>.drv"`. Every line in those logs appears twice, so de-duplicate before summing.
-  - **Compiler bootstrap, 1510 s, about 53%.** Generations P, B and C took 592, 453 and 465 s. Each one recompiles all 91 boot and host units (`COMPILER-UNIT-RESULT {"modules":139,"compiled":91,"cached":0}`). The biggest units per generation:
-    - `host.aot` 104–115 s;
-    - `host.env` 59–83 s;
-    - `compiler` 31–56 s;
-    - `rt` 27–35 s.
-  - **Library producer, 729 s wall, about 26%.** Four children, run in parallel, each `compile` about 170 SDK units in 416–461 s. A fifth child takes 40 s. Everything else in the library (setup, floor, boot, staging, assembly) adds up to about 60 s.
-  - **Everything else, about 600 s.** Copying to and from nixbuild.net, VM starts, and image packing (`sdk-image` 135 MB gz).
+- **Measured (2026-11-23).** The foundry events file is capped at 64 KB, so read the full logs on the build station: `ssh beam-build-station "nix log /nix/store/<drv>.drv"`. Every line in those logs appears twice, so de-duplicate before summing.
+  - **A one-file `priv/std` edit (gate 19b): 440 s, with 6 units compiled, 661 cached, and the compiler reused whole.**
+    - About 100 s before the library starts: Nix evaluation, copying to nixbuild.net, and the unit archive (14 s).
+    - The library derivation, 321 s. Its producer is 159 s. Inside the producer:
+      - the unit work is only 40 s: `verify-restored` 17.7 s, `copy-restored` 16.6 s, `closure-hash` 5.7 s. The 6 compiles themselves take seconds;
+      - the fixed phases are each 2–15 s: setup, materialize, prepare-release, check-floor, assemble-runtime, prime-library-inputs, stage-library, child install/boot, assemble-library-image, prime-freshness, provenance, retain-unit-store.
+    - After the producer: `copy-sdk-library` 24 s, then the image and selection.
+    - So the edit's own compile is under 10% of the cost. The rest is a fixed pipeline paid in full for every edit.
+  - **A change under `priv/boot` (rotates the compiler key) adds the bootstrap.** Generations P, B and C each recompile all 91 boot and host units: 592, 453 and 465 s in the batch-20 log. `host.aot` alone is 104–115 s per generation. The library children then recompile every SDK unit, 416–461 s each with four in parallel.
+  - **Gate 20's 2848 s is not representative.** Its `previous-sdk` was a pre-batch-17 SDK, because the integration tree had been checked out at `7e4b5823a` for a baseline. `prepare-checkout-sdk` takes `previous` from the tree's `current-sdk` when the job starts. After checking out an old commit in a tree, expect the next preparation to rebuild everything.
 - **Where the leverage is, in order.**
-  1. **Generation C.** It exists only to show that B is a fixpoint (C = B). Today it is a third full compile, 465 s. When B's unit bytes equal P's, C is redundant and can be skipped. Otherwise, check the fixpoint per unit, with each unit keyed by its own source and the compiler's emitted bytes.
-  2. **Per-unit early cutoff inside P/B/C and the library.** Key each unit on (source, the bytes of the compiler units it actually loads), not on the compiler key. A compiler edit that leaves `host.aot`'s output unchanged then stops recompiling the other 90.
-  3. **Native front end.** Compile with Chez on Work's 16 cores, outside QEMU. N2b's 663/667 identical Core makes this possible; the 4 differing units fall back to the BEAM.
+  1. **Don't build an SDK to try a `priv/std` or `priv/lib` edit.** The fixed pipeline (~400 s) can't get near 2 minutes by trimming phases. The qualitative fix is a hot path: let the warm realm load changed SDK namespaces from the checkout, the way project code loads, instead of refusing with `sdk_forwarder_route_changed`. Keep the SDK build for qualification and release. This is the inner-loop table's "`priv/` code: No hot path" row, and it is the single largest remaining edit cost.
+  2. **Restored units by reference.** Units are content-addressed, so link them and verify by digest instead of re-verifying and copying (34 s of the 40 s unit work).
+  3. **Generation C.** It only shows that B is a fixpoint (C = B), at the price of a third full compile (465 s). When B's unit bytes equal P's, skip it. Otherwise check the fixpoint per unit.
+  4. **Per-unit cutoff across a compiler-key change.** Key each unit on its source plus the bytes of the compiler units it actually loads, not on the whole compiler key.
+  5. **Native front end.** Compile with Chez on Work's 16 cores, outside QEMU (N2b: 663/667 identical).
 - **Pitfall.** Two consecutive layered SDKs must both prepare. On 2026-11-22
   the first layered SDK broke the next preparation (`d2cd91781`). Every
   SDK-layout change is qualified by preparing twice in a row, across a
