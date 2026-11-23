@@ -545,14 +545,23 @@
 ;;
 ;; The checkout client pins a realm to a hash of its sources. Instead of walking
 ;; the tree for them it reads `<root>/.bl/realm-sources.v1`, which this module
-;; writes: every candidate path `find_file` examines, in search order up to the
-;; match. Lines, tab separated, after the header `bl-realm-sources 1<TAB><root>`:
+;; writes: what `find_file` examined, in search order up to the match. Lines,
+;; tab separated, after the header `bl-realm-sources 2<TAB><root>`:
 ;;
 ;;   L <sha256> <path>   a file the loader read (the bytes it got)
-;;   A <path>            a candidate that did not exist, collapsed to its
-;;                       highest missing ancestor (a file OR directory that
-;;                       appearing there would change the resolution)
+;;   D <sha256> <path>   a directory whose entries were candidates that did not
+;;                       exist: any entry appearing there could change which
+;;                       file a namespace resolves to. The digest is over the
+;;                       directory's entry names, so the client verifies the
+;;                       whole batch by listing the directory once.
 ;;   X                   not everything could be recorded: the manifest is unusable
+;;
+;; A MISS is recorded once per DIRECTORY, not once per absent candidate: the
+;; candidate paths that missed directly under a directory are exactly what a
+;; change to that directory's listing can invalidate, so one line stands for the
+;; batch (`source_record_candidate` collapses to the parent of the highest
+;; missing ancestor). It is also strictly conservative — an unrelated new entry
+;; in that directory retires the realm rather than being missed.
 ;;
 ;; Each path is recorded once (a public ETS set, heired by the loader server, is
 ;; seeded from the file the first time a manifest is used in this VM). The
@@ -562,12 +571,39 @@
 ;; past 1 MiB an `X` line makes it unusable. Either way the client
 ;; walks the tree. Nothing here changes what is loaded, and nothing raises.
 
+(defn- source_listing_digest
+  "sha256 over `dir`'s entries, in sorted name order: each name, NUL, then one
+   byte for what it is — `f` a regular file, `d` a directory, `o` anything else
+   (all following symlinks, as the loader's own `File/regular?` does). A name
+   that merely changes TYPE therefore also changes the digest. nil when the
+   directory cannot be listed. `directory_entries_digest` in
+   `tooling/drop/src/checkout.rs` computes the same bytes."
+  [dir]
+  (try
+    (let [names (Enum/sort (File/ls! dir))
+          kind (fn [name]
+                 (let [path (Path/join dir name)]
+                   (cond
+                     (File/regular? path) "f"
+                     (File/dir? path) "d"
+                     :else "o")))]
+      (Base/encode16 (crypto/hash :sha256
+                       (erlang/iolist_to_binary
+                         (Enum/map names (fn [n] (list n 0 (kind n))))))
+                     (list (tuple :case :lower))))
+    (catch _ nil)))
+
 (defn source_entry_line
-  "One manifest line for `path`: its bytes when `raw` is given, else absent."
+  "One manifest line for `path`: its bytes as `L` when `raw` is given, else a
+   `D` line for `path` as the DIRECTORY whose entries missed."
   [path raw]
   (cond
     (or (String/contains? path "\n") (String/contains? path "\t")) "X\n"
-    (nil? raw) (erlang/iolist_to_binary (list "A\t" path "\n"))
+    (nil? raw)
+    (let [digest (source_listing_digest path)]
+      (if (nil? digest)
+        "X\n"
+        (erlang/iolist_to_binary (list "D\t" digest "\t" path "\n"))))
     :else (erlang/iolist_to_binary
             (list "L\t" (Base/encode16 (crypto/hash :sha256 raw) (list (tuple :case :lower)))
                   "\t" path "\n"))))
@@ -599,7 +635,7 @@
         ;; The client folds it into the generation, so a manifest that was
         ;; deleted and restarted under a live realm cannot look like the one
         ;; the realm was opened against: the realm retires and records afresh.
-        prefix (erlang/iolist_to_binary (list "bl-realm-sources 1\t" root "\t"))
+        prefix (erlang/iolist_to_binary (list "bl-realm-sources 2\t" root "\t"))
         header (erlang/iolist_to_binary
                  (list prefix (erlang/integer_to_binary (erlang/system_time :nanosecond)) "-"
                        (erlang/integer_to_binary (erlang/unique_integer (list :positive))) "\n"))]
@@ -676,8 +712,10 @@
                    ;; a miss in a scratch directory (a test's temporary project)
                    ;; is not part of the project's own search path
                    (erlang/not (and (nil? raw) (sources_scratch? root abs))))
-          (let [at (if (nil? raw) (source_highest_missing abs) abs)]
-            (when (erlang/not (ets/member table (tuple :listed manifest at)))
+          (let [at (if (nil? raw) (Path/dirname (source_highest_missing abs)) abs)]
+            ;; A candidate below a FILE can never appear: nothing to record.
+            (when (and (or (some? raw) (File/dir? at))
+                       (erlang/not (ets/member table (tuple :listed manifest at))))
               (ets/insert table (tuple (tuple :listed manifest at) true))
               (File/write! manifest (source_entry_line at raw) (list :append))
               (when (erlang/> (filelib/file_size manifest) 1048576)
