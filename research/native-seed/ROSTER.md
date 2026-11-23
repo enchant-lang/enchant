@@ -360,21 +360,34 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - **SDK build.** Only for the BEAM-side function.
 
 #### N2b 🔨 The front half: source → staged unit → Core on Chez · branch `lane/native-front` (worktree `lane-cerl`)
-- **State (2026-11-23).** The agent stopped on an API balance error (402).
-  Its work is committed as WIP `5897c6e58`:
-  - `research/native-seed/front-end/{stage,hook,custody,compare,trace-unit}.bl`;
-  - 355 lines of data BIFs in `host/native-data-bifs.scm`.
-  The harness evaluates the real `priv/host/aot.bl` staging (`stage-sdk-unit!`,
-  `describe_module`) on Chez, with the BEAM supplying only custody data.
-- **Where it stood.**
-  - Run `e` reached all 118 units, and every one failed with
-    `SDK declaration staging refused` (`:unsupported-sdk-stage-action-macro`).
-  - Runs `f` and `g` crash earlier, in native eval, with a raised map
-    (`.qualify-out/nf-native-g.txt`).
-- **Next.**
-  1. Find why staging sees an action macro on Chez but not on the BEAM. The
-     hooked macro table in `front-end/hook.bl` is the first suspect.
-  2. Then compare descriptors and Core per unit with `compare.bl`.
+- **What runs.** `front-end/run.sh TAG simple|all` evaluates the SDK's own
+  `host/record.bl`, `host/aot.bl` (hooked) and `boot/lower*.bl` on the derived
+  Chez image and stages every unit inside a real constructor context, exactly
+  as `AOT/prepare_unit` does (`front-end/stage.bl`). The BEAM supplies custody
+  data only: `custody.bl` (paths, closure hashes, stamps, sha256s, the SDK's
+  declaration tables, generated-module MD5s) and `kernel.bl` (the constructor
+  kernel: boot manifest, Core seed rows, C++ alias rows, the core/sugar phase
+  libraries). `compare.bl` prepares each unit on the BEAM and checks the
+  native descriptors `=:=` and the native Core's beam bytes `=` the BEAM's.
+- **Why `e` refused every unit.** Not the hook: `stage-action-macros!` refuses
+  a loaded macro only when *no* constructor context is open, and `e` staged
+  without one (the BEAM always stages inside one). **Why `f`/`g` crashed:**
+  `stage.bl`'s `nf-unit` was missing a `)`; the native reader reads the whole
+  file before evaluating, so the `:unterminated-collection` diagnostic (the
+  12-key raised map) came before any output.
+- **Measured (2026-11-23, SDK `ll0kiray…`, 667 units, run `nf-e`).** 516
+  identical (1883 modules + 18 generated), 79 descriptor-differs, 72 staging
+  refusals. The differs: 69 × `[:clauses 0 :ann :line]`, every one a unit with
+  more than 32 definitions: body-module clause order follows map iteration, and
+  the BEAM's large maps iterate in HAMT hash order while the native map is
+  sorted (a native HAMT order is the fix); 3 × a `:private false` meta key
+  from the native image's own Core metadata (`clojure.core-ext`, `clojure.re`
+  install into Core); 7 others. The refusals: 52 × generated-module MD5
+  (fixed after `nf-e` by the custody MD5 stand-in; see run `nf-f`), 19 ×
+  `value is not callable` (`formal.*`, `reload.*`), 1 × dependency-not-ready.
+- **Next.** Native HAMT iteration order for maps over 32 keys (the biggest
+  lever, 69 units); the 19 `formal.*`/`reload.*` callable failures; then the
+  per-reason list under 5%.
 - **Done when.** Same as N2's front half: per-unit Core `=` the BEAM's, or a
   named reason, for under 5% of SDK units.
 
