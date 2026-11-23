@@ -66,7 +66,7 @@ per batch, and runs the gate tests.** A card is ✅ only after that gate.
 | any native speed claim | `... -- pair --base $MAIN/research/native-seed/out/chez-main/prelude.scm --cand OUT/prelude.scm --out OUT2 --reps 8 --rounds 8` | a few minutes |
 | a native behaviour | `... -- eval --image OUT --file CHECK.bl` runs a BL file on the native image | seconds |
 | `tooling/drop/` (Rust client) | `cd $WT/tooling/drop && CARGO_TARGET_DIR=$WT/.cargo-target work run --memory 4G --timeout 1500 -- nix shell nixpkgs#cargo nixpkgs#rustc nixpkgs#gcc --command cargo test --release` | 66 s cold, seconds warm |
-| `priv/host/*.bl` (runtime host: aot, env, loader, reader …) | `cd $WT && work run --memory 4G --timeout 1800 -- python3 scripts/check-runtime-hosts --sdk-image "$(readlink -f $MAIN/.bl/sdks/current-sdk)/image" --work-dir /tmp/hc-$USER-NAME test/bl/ONE_test.bl ...`. It builds `.#erlang .#elixir` itself (cached), compiles only the edited host files with the SDK's compiler, and runs the tests in a capped VM on those beams. It checks host behaviour; it is not a compiler-floor or SDK qualification, and `priv/lib` edits are not seen (the image's library stays the SDK's). | `js_local_shadow_test.bl`: 40 s with hosts unchanged (14 s in the VM); 192 s after editing `env.bl` (compiling it takes ~2.5 min), and the break was caught: 3 of 5 assertions failed, exit 1. A `work run` may first wait in the queue |
+| `priv/host/*.bl` (runtime host: aot, env, loader, reader …) | `cd $WT && work run --memory 4G --timeout 1800 -- python3 scripts/check-runtime-hosts --sdk-image "$(readlink -f $MAIN/.bl/sdks/current-sdk)/image" --work-dir /tmp/hc-$USER-NAME test/bl/ONE_test.bl ...`. It builds `.#erlang .#elixir` itself (cached), compiles only the edited host files with the SDK's compiler, and runs the tests in a capped VM on those beams. It checks host behaviour; it is not a compiler-floor or SDK qualification, and `priv/lib` edits are not seen (the image's library stays the SDK's). **It does not run the pinned-host emitter**, so a host module it accepts can still be refused by an SDK build — see the rule below. | `js_local_shadow_test.bl`: 40 s with hosts unchanged (14 s in the VM); 192 s after editing `env.bl` (compiling it takes ~2.5 min), and the break was caught: 3 of 5 assertions failed, exit 1. A `work run` may first wait in the queue |
 | client speed or behaviour | run the binary cargo built, the way `bin/bl` does: `$WT/.cargo-target/release/drop-launcher --checkout $MAIN -- run /tmp/x.bl`, with `BL_CHECKOUT_PLATFORM`, `BL_BIN` and the rest exported as in `$MAIN/bin/bl` | ms |
 | a BL file the coordinator or a script runs directly (`nix/*.bl`, `scripts/*.bl`, `research/**.bl`) | `$MAIN/bin/bl run FILE ...` or a test file next to it, on the main SDK | seconds |
 | `priv/` code (runtime, library, compiler) | **No hot path:** reload refuses SDK namespaces (`sdk_forwarder_route_changed`), and `:shadow` only reaches callers inside the project, not library-to-library calls. Check the logic by copying the changed function into a scratch namespace under your own project dir and calling it from a test there (`$MAIN/bin/bl test`). Then hand the branch over with the exact gate test files listed. | seconds; the real check is the integration gate |
@@ -75,6 +75,23 @@ per batch, and runs the gate tests.** A card is ✅ only after that gate.
 `scripts/check-runtime-hosts` is meant for host checks without an SDK, but it
 is stale: it needs Elixir on `PATH`, and the flake has no dev shell. Fixing it
 is card T1.
+
+**Pinned host modules carry only top-level `defn`s.** `priv/host/aot.bl`
+(`pinned_unit_descriptor`, ~line 848) refuses a host unit holding any value
+definition: `pinned host module BeamLisp cannot yet carry value definitions
+(host.beam-lisp); only top-level defns are emitted`. A constant is a `defn-`
+returning it. `scripts/check-runtime-hosts` compiles the file and passes, so
+this costs one SDK build to find (batch 17: generation P failed at
+`host.beam-lisp` after 20 units). Before handing back a `priv/host` edit, run
+`grep -n "^(def \|^(def \^" priv/host/*.bl`; the only hits should be none.
+
+**A failed SDK preparation's message shows the error chain, not its leaf.** U3
+reports the first three `error:` lines, which for a Nix dependency failure are
+all `Cannot build '<drv>'.` The cause is higher in the same events file, e.g.
+`{:artifact-failed host.beam-lisp}` followed by the producer's own
+`** (ArgumentError) …` lines. Read
+`.bl/sdks/<fp>/job-*/foundry-state/ledger/events/<job>.jsonl` and look near the
+first failure.
 
 ### What an agent hands back
 1. A branch name, with each commit message ending in the attribution line the
@@ -398,11 +415,30 @@ census to start from.
 - `(- 0.0)` prints `0.0` on JS, `-0.0` on the BEAM; `erlang/-/1` has no JS leaf.
 - **Done when.** Both answer as on the BEAM; a js_diff case for each.
 
-#### W3 🔨 `seed_runtime_abi_test` fails on a second run in the same realm · S · BL test helper · branch `lane/ward4`
+#### W3 🧪 `seed_runtime_abi_test` fails on a second run in the same realm · S · BL test helper · branch `lane/ward4`, `5de731337`
 - A 54-file `bl test` set run twice in one warm realm: pass 1 green, pass 2 `seed_runtime_abi` 3 passed/8 failed with
   `/tmp/bl-seed-host-supervisor-src/anf_interpreter.bl: no such pinned host source`. `host-scratch` removes and recreates
   that directory each call, so a child process or a recorded path is the suspect.
-- **Done when.** The trigger sequence then the file, twice, in one warm realm, passes.
+- **Found.** `host-scratch`/`scratch` used fixed names in `/tmp` and every call begins with `rm_rf!`. `/tmp` is shared by
+  every realm and VM on the machine, so a concurrent call with the same name (the daemon runs each request as its own
+  process) deletes the first call's directory mid-compile; `compile-host` checks `File/exists?` per entry, so the victim
+  reports `no such pinned host source` for whichever suffix it had not reached. No preceding file is needed — two
+  concurrent runs of the file in one realm reproduce it.
+- **Fix.** A suffix of OS pid + `unique_integer` on both helper directories, and a test
+  `a-scratch-host-directory-belongs-to-one-call` that fails against the old helper (12/1) and passes after (13/13).
+- **Gates run by the agent.** Cross-realm collision fixed; `seed_runtime_abi` twice warm 13/13; W1's ten files both
+  orders 10/10; the 53-file set twice in one warm realm, both green; realm stopped.
+- **Done when.** The ten-file gate and `seed_runtime_abi_test` warm twice pass on the integration SDK.
+- **Left undone.** `priv/build/seed.bl` names its compile scratch
+  `/tmp/bl-seed-host-<unique_integer>` (no pid), so two producer VMs can collide the same way. It is an SDK input;
+  fold the pid suffix in with the next `priv/build` change.
+
+#### W4 ⏳ Two identical `bl test` requests in one realm collide inside the compiler · S+ · BL · from W3
+- After W3, a 4-way same-realm run of identical suites still fails: `floor-ebin/1 is undefined or private` and
+  `SDK declaration metadata is unavailable for seed/host-sources`. Not `/tmp` — namespace/compiler-level state.
+- **Done when.** Four identical `bl test` requests in one warm realm all pass, and a deliberately shared path still
+  collides (the isolation is the compiler's, not a fixed-name accident).
+
 
 #### W2 ✅ Two files still fail inside a multi-file test run · S · BL
 - On the batch-5 and batch-10 SDKs: in a run of the ten realm/seed/JS files (W1's list),
