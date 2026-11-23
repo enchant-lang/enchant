@@ -940,6 +940,12 @@ export function sub(a, b) {
   if (a instanceof Flt || b instanceof Flt) return new Flt(Number(numOf(a)) - Number(numOf(b)));
   return norm(BigInt(a) - BigInt(b));
 }
+/** Unary minus. A float negates its sign bit (`(- 0.0)` is -0.0 on the BEAM);
+ *  `0 - x` would turn +0.0 into +0.0. Everything else is the subtraction. */
+export function neg(a) {
+  if (a instanceof Flt) return new Flt(-a.v);
+  return sub(0, a);
+}
 export function mul(a, b) {
   if (typeof a === "number" && typeof b === "number") { const r = a * b; if (r <= MAX && r >= MIN) return r === 0 ? 0 : r; return norm(BigInt(a) * BigInt(b)); }
   if (isDec(a) || isDec(b)) return decArith("*", a, b);
