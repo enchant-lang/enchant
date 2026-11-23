@@ -31,8 +31,11 @@ that fanned the cards out) merges finished branches in batches, builds one SDK
 per batch, and runs the gate tests.** A card is ✅ only after that gate.
 
 ### Where an agent works
-- **In its own git worktree** on its own branch, never the shared checkout.
+- **In its own git worktree** on its own branch, never the shared checkout, and **never
+  `git checkout` a branch in `$MAIN`**. On 2026-11-23 an agent checked its branch out there, and
+  six landed batches went onto that branch instead of `main` (recovered by fast-forwarding).
   Commit there freely, and finish with a clean, committed branch.
+- **Checks that don't change engine inputs:** prefix `$MAIN/bin/bl` with `BL_SDK_REUSE_CURRENT=1`, so they run on the current SDK instead of queueing behind a rebuild of a moving main.
 - **Never run the worktree's own `./bin/bl`.** It would prepare a whole SDK for
   that tree (~14 min on the 4-CPU build station, which is shared). Use the main
   checkout's client against the main SDK:
@@ -63,7 +66,7 @@ per batch, and runs the gate tests.** A card is ✅ only after that gate.
 | any native speed claim | `... -- pair --base $MAIN/research/native-seed/out/chez-main/prelude.scm --cand OUT/prelude.scm --out OUT2 --reps 8 --rounds 8` | a few minutes |
 | a native behaviour | `... -- eval --image OUT --file CHECK.bl` runs a BL file on the native image | seconds |
 | `tooling/drop/` (Rust client) | `cd $WT/tooling/drop && CARGO_TARGET_DIR=$WT/.cargo-target work run --memory 4G --timeout 1500 -- nix shell nixpkgs#cargo nixpkgs#rustc nixpkgs#gcc --command cargo test --release` | 66 s cold, seconds warm |
-| `priv/host/*.bl` (runtime host: aot, env, loader, reader …) | `cd $WT && work run --memory 4G --timeout 1800 -- python3 scripts/check-runtime-hosts --sdk-image "$(readlink -f $MAIN/.bl/sdks/current-sdk)/image" --work-dir /tmp/hc-$USER-NAME test/bl/ONE_test.bl ...`. It builds `.#erlang .#elixir` itself (cached), compiles only the edited host files with the SDK's compiler, and runs the tests in a capped VM on those beams. It checks host behaviour; it is not a compiler-floor or SDK qualification, and `priv/lib` edits are not seen (the image's library stays the SDK's). | `js_local_shadow_test.bl`: 40 s with hosts unchanged (14 s in the VM); 192 s after editing `env.bl` (compiling it takes ~2.5 min), and the break was caught: 3 of 5 assertions failed, exit 1. A `work run` may first wait in the queue |
+| `priv/host/*.bl` (runtime host: aot, env, loader, reader …) | `cd $WT && work run --memory 4G --timeout 1800 -- python3 scripts/check-runtime-hosts --sdk-image "$(readlink -f $MAIN/.bl/sdks/current-sdk)/image" --work-dir /tmp/hc-$USER-NAME test/bl/ONE_test.bl ...`. It builds `.#erlang .#elixir` itself (cached), compiles only the edited host files with the SDK's compiler, and runs the tests in a capped VM on those beams. It checks host behaviour; it is not a compiler-floor or SDK qualification, and `priv/lib` edits are not seen (the image's library stays the SDK's). **It does not run the pinned-host emitter**, so a host module it accepts can still be refused by an SDK build — see the rule below. | `js_local_shadow_test.bl`: 40 s with hosts unchanged (14 s in the VM); 192 s after editing `env.bl` (compiling it takes ~2.5 min), and the break was caught: 3 of 5 assertions failed, exit 1. A `work run` may first wait in the queue |
 | client speed or behaviour | run the binary cargo built, the way `bin/bl` does: `$WT/.cargo-target/release/drop-launcher --checkout $MAIN -- run /tmp/x.bl`, with `BL_CHECKOUT_PLATFORM`, `BL_BIN` and the rest exported as in `$MAIN/bin/bl` | ms |
 | a BL file the coordinator or a script runs directly (`nix/*.bl`, `scripts/*.bl`, `research/**.bl`) | `$MAIN/bin/bl run FILE ...` or a test file next to it, on the main SDK | seconds |
 | `priv/` code (runtime, library, compiler) | **No hot path:** reload refuses SDK namespaces (`sdk_forwarder_route_changed`), and `:shadow` only reaches callers inside the project, not library-to-library calls. Check the logic by copying the changed function into a scratch namespace under your own project dir and calling it from a test there (`$MAIN/bin/bl test`). Then hand the branch over with the exact gate test files listed. | seconds; the real check is the integration gate |
@@ -72,6 +75,41 @@ per batch, and runs the gate tests.** A card is ✅ only after that gate.
 `scripts/check-runtime-hosts` is meant for host checks without an SDK, but it
 is stale: it needs Elixir on `PATH`, and the flake has no dev shell. Fixing it
 is card T1.
+
+**Pinned host modules carry only top-level `defn`s.** `priv/host/aot.bl`
+(`pinned_unit_descriptor`, ~line 848) refuses a host unit holding any value
+definition: `pinned host module BeamLisp cannot yet carry value definitions
+(host.beam-lisp); only top-level defns are emitted`. A constant is a `defn-`
+returning it. `scripts/check-runtime-hosts` compiles the file and passes, so
+this costs one SDK build to find (batch 17: generation P failed at
+`host.beam-lisp` after 20 units). Before handing back a `priv/host` edit, run
+`grep -n "^(def \|^(def \^" priv/host/*.bl`; the only hits should be none.
+
+**The producer's own entry point runs on the installed floor.** Generation B
+runs `produce.exs` through `priv/host/beam_lisp.bl`'s `run_file` using the
+compiler of the floor that was already installed. A new boot function called
+from there (batch 17: `BeamLisp.Compiler/eval_string_forms/3`) is undefined on
+that floor and fails the build with `UndefinedFunctionError`. Guard a new call
+whose absence is acceptable with
+`(erlang/function_exported :Elixir.BeamLisp.Compiler :name arity)` and keep the
+old path; the file's first use of `assert_native_framework_execution!` is the
+precedent.
+
+**`BeamLisp.Compiler` is the host facade, not the boot compiler.** The
+public module is `priv/host/compiler.bl` (`host.compiler`, ~25 exports), and
+each function forwards to `BeamLisp.Ns.Compiler` (`priv/boot/compiler.bl`). A
+new boot compiler function is invisible to `BeamLisp.Compiler/...` callers and to
+`function_exported` checks until the facade forwards it (batch 17: U12a's guard
+was always false, so every run compiled; only an SDK-built check showed it).
+Add the forward in the same change.
+
+**A failed SDK preparation's message shows the error chain, not its leaf.** U3
+reports the first three `error:` lines, which for a Nix dependency failure are
+all `Cannot build '<drv>'.` The cause is higher in the same events file, e.g.
+`{:artifact-failed host.beam-lisp}` followed by the producer's own
+`** (ArgumentError) …` lines. Read
+`.bl/sdks/<fp>/job-*/foundry-state/ledger/events/<job>.jsonl` and look near the
+first failure.
 
 ### What an agent hands back
 1. A branch name, with each commit message ending in the attribution line the
@@ -87,8 +125,12 @@ Numbers in "Done" rows are measured, never estimated.
 
 ### The integration gate (integrator only)
 For each batch:
-1. Merge the branches into `main`.
-2. Run `work run --memory 4G --timeout 3000 -- scripts/prepare-checkout-sdk`.
+1. Merge the branches into `main`. First `git -C $MAIN branch --show-current` must print `main`;
+   after, `git -C $MAIN log --oneline -1` must show the merge.
+2. Run `work run --memory 4G --timeout 3000 -- scripts/prepare-checkout-sdk`, then
+   **`./bin/bl realm stop`** on that tree before the gates. A warm realm started before the rebuild
+   keeps the old SDK modules, and a gate on it reports errors (undefined functions, a keyword
+   called with six arguments) that do not exist on the rebuilt image.
    Only when `priv/`, `nix/`, `scripts/`, `bin/`, `native/` or `tooling/drop/`
    changed. The two most recent runs took 862 s and 1301 s.
 3. Run every gate test the cards named, in one `./bin/bl test a.bl b.bl ...`.
@@ -105,7 +147,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
 ### U — the request path (what every user pays)
 
-#### U1 🔨 The checkout client inventories declared inputs only · S · Rust
+#### U1 ✅ The checkout client inventories declared inputs only · S · Rust
 - **Why.** Each `./bin/bl` request first hashes the project's sources so the
   warm VM can tell whether they changed.
   - `checkout_sources_walk` in `tooling/drop/src/checkout.rs` (~line 374)
@@ -175,6 +217,11 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - A real failed preparation shows its cause in the client message.
   - The test fails without the change.
 - **Note.** `nix/` is an SDK input: batch this with other SDK-input cards.
+- **Follow-up (batch 17).** On 2026-11-23 the first three `error:` lines were all
+  `Cannot build '<drv>'.` — the leaf (`{:artifact-failed host.beam-lisp}`, then the producer's
+  `** (ArgumentError) …`) sits higher in the same file. Prefer distinct lines that are not
+  `Cannot build`, falling back to the first three; add a fixture whose chain hides its leaf.
+  `nix/` is an SDK input, so land it with the next SDK-input batch.
 
 #### U4 ✅ Lock work per request proportional to change — retargeted: locks cost 1–3 ms per request, Env full-table scans cost 15–30 ms; U4b replaces the scans with exact-key lookups (`lane/runtime`, Env own time per spawn 1,904 → 971 µs) · S+ · BL runtime (after U1)
 - **Why.** Journal 06, "Where a warm request waits": ~84
@@ -197,7 +244,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
     with `ls test/bl | grep -E 'reload|execution|env'`.
 - **SDK build.** Yes (~14 min). Batch with U3.
 
-#### U5 🔨 Where a cold start goes · S · measurement only
+#### U5 ✅ Where a cold start goes · S · measurement only
 - **Why.** Cold `bl run` of `(println 1)` takes 7.6 s, and nobody knows the
   split.
 - **Do.** Time phases of `./bin/bl --cold run /tmp/x.bl` under `work run`:
@@ -214,6 +261,53 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   the fix for the top phase: a lazy app start, a boot script, or a spare
   pre-started VM per SDK. Change nothing.
 - **Done when.** The phases sum to within 10% of the measured total, over 3 runs.
+
+#### U6 ✅ The SDK inventory is walked once per VM · S · BL runtime · branch `lane/cold-start`
+- **Why.** U5 measured a cold `bl run` at ~4.3 s (load ~4). 65–70% is the `:beam_lisp` app start
+  plus `vm.native`'s `build-all!`, and the VM re-reads the whole SDK `priv` tree (~2,800 `.bl` files,
+  `precompiled.term` 8 times) in 12–17 sweeps per run: 1.5–1.7 s. Phases 1–3 (client, erts boot,
+  dependency apps) total only 0.3–0.45 s, so boot scripts and lazy app start would not help.
+  Evidence: `research/checked-tiles/evidence/cold-start-phases.json`.
+- **Change.** Memoize the inventory per VM, keyed by the image's identity. For an immutable image,
+  take digests from the sealed manifest it already carries. Keep the full walk for mutable
+  checkouts, with the same authentication authority.
+- **Done when.** The sweeps happen once (counted with a probe), the cold total drops (measured on
+  the integration SDK), and the inventory and custody tests pass.
+
+#### U7 ✅ Cold-start hot spots · S · BL runtime · branch `lane/cold-start`
+- **Why.** U6's sampler over 3 cold runs of an unchanged store SDK (3.5–3.65 s) ranks
+  `Emit.collect_execution_entries` 9.6%, `seed_artifact_metadata!` 6.7% (first decode of 95 seeds),
+  `Loader.find_file` 5.2%, `compile_sdk_source!` 3.5% (a compile on an unchanged SDK), and
+  `code_server:call`/`gen:do_call` ~21% (serialized loads).
+- **Change.** For each: why it runs on an unchanged immutable SDK; remove it or seal the answer at
+  SDK build time; keep authentication; measure. Drop what doesn't pay.
+
+#### T2 ⏳ Three test files fail on main (predate U7) · S
+- `test/bl/emit_test.bl` ("the live module's bytes ARE the committed seed's bytes"), `test/bl/seed_publication_test.bl` (its `/tmp/bl-seed-test-host-out` manifest is missing) and `test/bl/perf/cold_namespace_load_test.bl` fail the same way on the batch-7 and batch-8 SDKs. Find whether it is the seeded floor (a `bl seed --check` question) or the tests' environment.
+- **Done when.** Each passes on a fresh integration SDK, or its premise is corrected and the reason recorded.
+
+#### U10 ✅ Remove the fixed recomputation per request · landed batch 17 (`611414488`)
+- **Why.** U9: of a ~51 ms warm request, engine capture is 22.8 ms (976 files) and project generation 11.1 ms, both recomputed though the tree did not change.
+- **What landed.** A per-tree generation service, observed by the kernel, answers the tree's generations. The first version hung in the real checkout and was reverted (`da07cadf8`). The fixed version is `1739d87a2`.
+- **Measured (gate 17d, one SDK, load ~12).**
+  - Warm request median 40 ms with the service, 91 ms without, over 15 runs.
+  - 0 declined requests.
+  - The ten files pass 10/10 in both orders.
+  - `seed_runtime_abi` passes warm twice, and `warm_request_env` passes.
+  - Two successive helper edits are both seen.
+
+#### U11 🔨 One request, one process in the VM (13.6 → 2–4 ms) · S+ · BL runtime · branch `lane/warm-floor2`
+- The handler spawns ~10 processes per request (5 `Refs/spawn_owned`, io proxy, heartbeat). Run the command in the connection process, open a realm handle once per generation, write frames directly, heartbeat only past a threshold, return on the same connection, skip custody for unchanged module sets. Keep dead-owner recovery.
+
+#### U12 🔨 Compact keep-alive request (~6 ms) · S+ · client + protocol · branch `lane/warm-floor2`
+- **U12a ✅ (batch 17).** `run FILE` replays an unchanged file's compiled forms, keyed by source hash, while the realm's `definition_context` is unchanged.
+  - The code is in `priv/host/beam_lisp.bl`, forwarded through `priv/host/compiler.bl`.
+  - `run_file_cache_test` and `run_file_scope_test` are green on the SDK.
+  - Gate 17 needed three fixes:
+    - host constants became `defn`s;
+    - a floor guard for the producer;
+    - facade forwards, because without them the guard was always false.
+- **U12b ⏳.** Skip connect and hello. Send an environment generation or delta instead of 91 variables (a 10.7 KB frame).
 
 ### N — the native compiler on the default path
 
@@ -264,6 +358,25 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - The listed units are under 5% and each reason is one of a short enumerated set.
   - Evidence goes in `research/checked-tiles/evidence/native-beam-backend.json`.
 - **SDK build.** Only for the BEAM-side function.
+
+#### N2b 🔨 The front half: source → staged unit → Core on Chez · branch `lane/native-front` (worktree `lane-cerl`)
+- **State (2026-11-23).** The agent stopped on an API balance error (402).
+  Its work is committed as WIP `5897c6e58`:
+  - `research/native-seed/front-end/{stage,hook,custody,compare,trace-unit}.bl`;
+  - 355 lines of data BIFs in `host/native-data-bifs.scm`.
+  The harness evaluates the real `priv/host/aot.bl` staging (`stage-sdk-unit!`,
+  `describe_module`) on Chez, with the BEAM supplying only custody data.
+- **Where it stood.**
+  - Run `e` reached all 118 units, and every one failed with
+    `SDK declaration staging refused` (`:unsupported-sdk-stage-action-macro`).
+  - Runs `f` and `g` crash earlier, in native eval, with a raised map
+    (`.qualify-out/nf-native-g.txt`).
+- **Next.**
+  1. Find why staging sees an action macro on Chez but not on the BEAM. The
+     hooked macro table in `front-end/hook.bl` is the first suspect.
+  2. Then compare descriptors and Core per unit with `compare.bl`.
+- **Done when.** Same as N2's front half: per-unit Core `=` the BEAM's, or a
+  named reason, for under 5% of SDK units.
 
 #### N3 🔒 The native compile service, in shadow mode · S+ (after N2)
 - **Why.** Nothing in `bl` calls the native compiler.
@@ -352,7 +465,46 @@ census to start from.
 
 ### W — the test runner
 
-#### W1 🔨 A multi-file `bl test` breaks after a realm-retirement test · S · BL
+#### J4 ⏳ Two small JS disagreements · H · `priv/lib/js`
+- `(- 0.0)` prints `0.0` on JS, `-0.0` on the BEAM; `erlang/-/1` has no JS leaf.
+- **Done when.** Both answer as on the BEAM; a js_diff case for each.
+
+#### W3 ✅ `seed_runtime_abi_test` fails on a second run in the same realm · landed batch 18 (`db6b22fba`)
+- A 54-file `bl test` set run twice in one warm realm: pass 1 green, pass 2 `seed_runtime_abi` 3 passed/8 failed with
+  `/tmp/bl-seed-host-supervisor-src/anf_interpreter.bl: no such pinned host source`. `host-scratch` removes and recreates
+  that directory each call, so a child process or a recorded path is the suspect.
+- **Found.** `host-scratch`/`scratch` used fixed names in `/tmp` and every call begins with `rm_rf!`. `/tmp` is shared by
+  every realm and VM on the machine, so a concurrent call with the same name (the daemon runs each request as its own
+  process) deletes the first call's directory mid-compile; `compile-host` checks `File/exists?` per entry, so the victim
+  reports `no such pinned host source` for whichever suffix it had not reached. No preceding file is needed — two
+  concurrent runs of the file in one realm reproduce it.
+- **Fix.** A suffix of OS pid + `unique_integer` on both helper directories, and a test
+  `a-scratch-host-directory-belongs-to-one-call` that fails against the old helper (12/1) and passes after (13/13).
+- **Gates run by the agent.** Cross-realm collision fixed; `seed_runtime_abi` twice warm 13/13; W1's ten files both
+  orders 10/10; the 53-file set twice in one warm realm, both green; realm stopped.
+- **Done when.** The ten-file gate and `seed_runtime_abi_test` warm twice pass on the integration SDK.
+- **Left undone.** `priv/build/seed.bl` names its compile scratch
+  `/tmp/bl-seed-host-<unique_integer>` (no pid), so two producer VMs can collide the same way. It is an SDK input;
+  fold the pid suffix in with the next `priv/build` change.
+
+#### W4 ⏳ Two identical `bl test` requests in one realm collide inside the compiler · S+ · BL · from W3
+- After W3, a 4-way same-realm run of identical suites still fails: `floor-ebin/1 is undefined or private` and
+  `SDK declaration metadata is unavailable for seed/host-sources`. Not `/tmp` — namespace/compiler-level state.
+- **Done when.** Four identical `bl test` requests in one warm realm all pass, and a deliberately shared path still
+  collides (the isolation is the compiler's, not a fixed-name accident).
+
+
+#### W2 ✅ Two files still fail inside a multi-file test run · S · BL
+- On the batch-5 and batch-10 SDKs: in a run of the ten realm/seed/JS files (W1's list),
+  `realm_ownership_test` fails `a-shared-namespace-is-named-from-its-hash` with
+  "Shared namespace admission refused … {:reason :compiler-authority-unavailable}" and
+  `seed_runtime_abi_test` fails 8 assertions ("publishes … public surface" → false). Both pass alone.
+- W1 made the runs coherent; something an earlier file does still breaks the compiler authority and
+  the seed publication. Bisect which earlier file, and fix the isolation.
+- **Done when.** The ten files pass in both orders.
+- Card `0c9a9cf3d` records the first observation.
+
+#### W1 ✅ A multi-file `bl test` breaks after a realm-retirement test · S · BL
 - **Why.** On `main` (checked 2026-11-22 on the batch-2 SDK, without U1), `./bin/bl test` with
   `test/bl/contextual_realm_retirement_test.bl` first and nine realm/seed/JS files after it:
   - the first file fails one case, `shutdown-retains-pending-real-consumers-in-the-manager`
@@ -374,7 +526,7 @@ census to start from.
 
 ### J — JavaScript target
 
-#### J1 🔨 Four JS test files fail on `main` · S · BL (`priv/lib/js`)
+#### J1 ✅ Four JS test files fail on `main` · S · BL (`priv/lib/js`)
 - **Why.** These four fail at HEAD, both with and without the 2026-11-22
   shadowing fix. Both sessions checked:
   - `test/bl/js_compiled_core_test.bl`
@@ -419,6 +571,22 @@ Cards in one lane conflict; lanes run at the same time.
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | J4: JS unary minus keeps the float sign | Floats negate their sign bit; `erlang/-/1` leaf; `js_diff` 547/547 | (batch 9) |
+| ✅ | T2: three tests corrected; seed floor helper finds the SDK ebin | emit_test 138, seed_publication 227, cold_namespace_load 2, realm_namespace 17 | (batch 11) |
+| ✅ | U1c: one manifest line per searched directory | Misses batched per directory with an entry digest; the client lists each once; declared roots only from top-level `:paths`. Manifest after ten files 1,348 → ~21 lines; project statx −73.6%; warm run 87–96 → 77–87 ms, 7,509 statx per request | (batch 10) |
+| ✅ | U1: the client digests what the realm loaded | The loader records each resolved source and absent candidate in `.bl/realm-sources.v1` (epoch token, self-healing); the client digests declared roots plus exactly those. An edited test helper is seen; warm run 152 → 87–96 ms, `--version` 77–80 ms. Next (U1c): 2,506 absent lines and ~35k statx per request | `2d71662e7` |
+| ✅ | `Loader/ns_home` answers in JavaScript | A page has no realms (`:global`); all 23 js_* files pass | `2d71662e7` |
+| ✅ | U8 sealed seed metadata (`seed_artifact_metadata!`, 5.2%) | producer writes `priv/seed-metadata.term` (105 rows, 716 KB); immutable-root reader checks manifest digest per row; derive 2.2 ms/seed vs sealed 0.5 ms/seed, table read 8.3 ms; 447-assertion equality test | `lane/cold-start` |
+| ✅ | U9: the warm request floor, measured | 50.7 ms median = engine capture 22.8 + project generation 11.1 (fixed, recomputed) + VM handler 13.6 + client exec ~3 + connect 1.2 + exit 0.8. Three removals proposed; 1.5–2 ms reachable | `3e6b30096` |
+| ✅ | W2: multi-file runs stay isolated, and warm requests keep the engine env | The ward loads its test library at `:global` (a realm-scoped compiler generation made the authority decline every later file's certificates); workers exit `:shutdown` so linked servers die with their file; `bl run` interns `*command-line-args*` at `:global`; the daemon stops tombstoning the VM's own `BL_ROOT`/`BL_EBIN`… on warm requests (that made the seed floor fall back to `<checkout>/build`, and a client could relabel the image). Ten files 10/10 in three orders; seed_runtime_abi 11/11 warm | (batch 15) |
+| ✅ | U8: seed metadata sealed at SDK build time | The producer writes `priv/seed-metadata.term` (105 rows, proofs per seed); an immutable image reads it, checking version, compiler key, decoder MD5 and the manifest digest per row. Derive 2.4 ms → read 0.5 ms per seed; cold run median 3,190 → 2,810 ms (4 pairs, load ~20) | (batch 14) |
+| ✅ | U7: execution receipts derived on first use | `Env/mark_emitted` stored a computed receipt (an ANF walk) for all 1,438 definitions a cold start publishes; it now stores `{:deferred …}` and the row's decoder derives it. Republication of 158 definitions 70 → 17.7 ms; cold start median 3,375 → 3,247 ms (4 pairs). Batch preload, `find_file` memo and "something compiles" measured and dropped | `0c9a9cf3d` |
+| ✅ | U6: SDK files hashed once per VM | Store files hashed once; artifact metadata and kernel disassembly reused; a warm inventory walk 118 → 98 ms; cold run paired with the previous SDK 3,594 → 3,483 ms median (load ~10). U5's "1.5 s of repeated walks" was too high: a repeat walk is ~100 ms | `c8a408a94` |
+| ✅ | J3: `js_compiled_core` passes | Fixed by W1's realm-local link fix: 11/11 | `c8a408a94` |
+| ✅ | Portable JS leaves, literate JS namespaces, `system.inputs` (from another session, lane/rich-edit) | `js_portable_leaves` 77/77, `system_inputs` 12/12, `js_boot_order` 3/3 | `c8a408a94` |
+| ✅ | W1: multi-file test runs stay isolated | `vm.manager` shutdown drained the realm running the tests (now per-file scope); the compiler baked a realm-local provider's platform module name ("module … is not available"). Ten realm/seed/JS files no longer go incoherent; an edited test helper is seen after a retirement | `e4973a0f3` |
+| ✅ | SDK lock wait visible and bounded | A waiter prints the holder and a heartbeat; `BL_SDK_LOCK_WAIT` bounds it (exit 75); `BL_SDK_REUSE_CURRENT=1` uses the current SDK; `realm stop` never queues. `checkout_sdk_lock_wait.py` passes | `e4973a0f3` (from another session, d9efc7f5d) |
+| ✅ | U5: where a cold start goes | 4.3 s at load ~4: `:beam_lisp` start + `vm.native` ~65–70%, repeated SDK tree sweeps ~35%; client + erts + deps < 8% | `33fd76cc4` |
 | ✅ | U4b: Env custody cleanup by exact key | Profile keys and handoff targets kept in the owner's own row; departure and offer lookups no longer scan 22,800-row tables. Env own time per spawn 1,904 → 971 µs, reductions 90k → 24k. 27 custody/execution/env files green with `BL_CUSTODY_SCAN_CHECK=1` | `90e0347ae` |
 | ✅ | T1: `scripts/check-runtime-hosts` works | Brings its own erlang/elixir, runs against a store SDK image: `priv/host` edits checked in ~40 s (+2.5 min when `env.bl` changes), a deliberate break fails | `e69f3863f` |
 | ✅ | U3: a failed preparation names its first cause | The refusal carries the first `error:` lines from the job's events; `preparation_failure_cause_test` 11/11 | `e69f3863f` |
@@ -457,6 +625,10 @@ Cards in one lane conflict; lanes run at the same time.
 | 🧪 | Macro answer per call head per form | 57% hits, no gain; superseded by one lookup per call | dropped |
 | 🧪 | C1 `ident` memoized in the process dictionary (on top of one `iolist_to_binary`) | qualified 13/13; same bytes; pair median 119.5 -> 119.7 ms, emit 26.3 -> 25.0 ms: no better than the plain `iolist_to_binary` (emit 26.7 -> 25.7 ms); not kept | dropped |
 | 🧪 | C2 identity-keyed first level in `native-fetch-value` (profile: hashing is `table-ref` on the equal-keyed global cache, 604 of 7130 samples inclusive, `string-hash` 190 self, callers `expand-macro`, `macro-lookup`, `compat-reduced?`; the reader's own symbols/keywords are not hashed) | derive qualified 12/12 (`qualify`), same bytes; pair median 111.24 -> 110.84 ms (0.4%), emit 24.59 -> 24.57 ms: within noise; not kept | dropped |
+| 🧪 | U7 batch preload of the cold-start module set (`code:ensure_modules_loaded`, 369 modules from a recorded cold run, `-s` module before `start_cli`) | the batch itself takes 116-183 ms and the cold run is unchanged: 3283 / 3547 / 3360 ms against 3313 / 3479 / 3340 ms without it. Loading is about 4% of a cold start and is not serialized behind `code_server` hops; most of the 21% `code_server:call` + `gen:do_call` own time in the sampler is a process parked in `receive` that `process_info` reports as running | dropped |
+| 🧪 | U7 "something compiles" (`compile_sdk_source!`, 3.1% inclusive) | nothing is compiled on an unchanged SDK: the function stages and admits library Sources (callable-ready checks, retention). The only `compile:forms` work is the 7 native host stubs (14 `compile_descriptor` calls, about 0.5% of samples); their bytes embed the physical `.so` path, so they cannot be sealed before the image has its store path | dropped |
+| 🧪 | U7 native-host bootstrap (782 ms in the checker) | a checker artifact: the edited hosts change the live compiler key, so the primed `native-declarations` miss and 6 Sources are re-read. On the real SDK `bootstrap_sdk_native_hosts!` is 1.2% of samples | dropped |
+| 🧪 | U7 `Loader.find_file` memo | 2.3% inclusive; a memo would need a stat of every earlier search dir to keep shadowing safe, so at most about 1% | dropped |
 
 ## Scratch
 

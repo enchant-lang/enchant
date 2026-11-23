@@ -1,0 +1,38 @@
+; ward_manager_scope_test.bl — a test file's view of the VM manager is its own (W1).
+;
+; The VM manager is ONE node-registered daemon, and under `bl test` its table also
+; holds the realm that is RUNNING the test. A file that calls `manager/shutdown`
+; used to drain that realm too: the realm's env died under the ward's warm base and
+; every later file failed to load (`undefined var: <ns>/deftest`). Ward now gives
+; each file its own manager scope (the `:manager_scope` row in the file's fork), and
+; `shutdown` ends the caller's scope only.
+;
+; Run it in a multi-file call after a file that owns the realm — the order is the
+; test: `bl test test/bl/ward_manager_scope_test.bl test/bl/realm_aot_reuse_test.bl`.
+
+(ns ward-manager-scope-test (:require [vm.manager :as manager]))
+
+(defn- spec [] {:id (str "ward-scope-" (erlang/unique_integer (list :positive)))})
+
+(deftest shutdown-ends-only-the-vms-the-calling-file-opened
+ (manager/start)
+ (let [before (set (map :id (manager/list-vms)))
+       mine (spec)]
+  (manager/ensure mine)
+  (try
+   (is (= {:drained 1 :pending 0} (manager/shutdown)))
+   (is (nil? (manager/get-vm (:id mine))))
+   (is (= before (set (map :id (manager/list-vms))))
+       "every VM that was open before this file is still open")
+   (finally (manager/drain (:id mine))))))
+
+(deftest a-vm-the-file-did-not-open-survives-the-files-shutdown
+ (manager/start)
+ (let [other (spec) mine (spec)]
+  ;; opened from a process with no scope: the node's own, like a realm host's
+  (BeamLisp.Env/with_env :global (fn [] (manager/ensure other)))
+  (manager/ensure mine)
+  (try
+   (is (= {:drained 1 :pending 0} (manager/shutdown)))
+   (is (some? (manager/get-vm (:id other))) "a VM of another scope is not drained")
+   (finally (manager/drain (:id mine)) (manager/drain (:id other))))))

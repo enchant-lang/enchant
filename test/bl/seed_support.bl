@@ -13,8 +13,25 @@
 
 (defn has? [coll x] (> (count (filter (fn [y] (= y x)) coll)) 0))
 
+(defn- scratch-suffix
+  "A tag unique to ONE call, inside this VM and across VMs.
+
+   A warm realm serves N requests as N processes (`bl.daemon/handle-in-vm`), and
+   `/tmp` is shared even by SEPARATE realms (another lane's checkout runs its own
+   VM against the same filesystem). A fixed `/tmp/bl-seed-host-<name>` is
+   therefore shared state: one call's `File/rm_rf!` deletes another call's host
+   sources while `seed/run` compiles them. Measured both ways: a foreign
+   host-scratch of the same name in another realm wiped a victim call's sources,
+   and two concurrent `seed_runtime_abi_test` runs gave `3 passed, 8 failed` with
+   `/tmp/bl-seed-host-supervisor-src/anf_interpreter.bl: no such pinned host
+   source` (a different missing suffix on each run, from timing). The OS pid
+   keeps two VMs apart; the monotonic counter keeps two calls in one VM apart."
+  []
+  (str (erlang/list_to_binary (erlang/apply :os :getpid (list))) "-"
+       (erlang/unique_integer (list :positive :monotonic))))
+
 (defn scratch [name]
-  (let [d (Path/join (System/tmp_dir) (str "bl-seed-test-" name))]
+  (let [d (Path/join (System/tmp_dir) (str "bl-seed-test-" name "-" (scratch-suffix)))]
     (File/rm_rf! d)
     (File/mkdir_p! d)
     d))
@@ -43,7 +60,7 @@
    itself, so this fixture can never test a shape the seed does not look for."
   ([name extra] (host-scratch name extra {}))
   ([name extra real]
-   (let [d (Path/join (System/tmp_dir) (str "bl-seed-host-" name))]
+   (let [d (Path/join (System/tmp_dir) (str "bl-seed-host-" name "-" (scratch-suffix)))]
      (File/rm_rf! d)
      (File/mkdir_p! d)
      (doseq [e (seed/host-sources d)]
@@ -103,12 +120,29 @@
     (BeamLisp.Env/with_ns "core"
       (fn [] (BeamLisp/eval (File/read! (str priv "/std/test.bl")))))))
 
+;; The ebin the RUNNING APPLICATION booted from: its `priv` directory's sibling
+;; `ebin`. On an SDK that is the selected image's floor.
+(defn- runtime-ebin
+  []
+  (let [priv (erlang/apply :code :priv_dir (list :beam_lisp))]
+    (when (erlang/is_list priv)
+      (let [ebin (Path/join (Path/dirname (erlang/list_to_binary priv)) "ebin")]
+        (when (File/dir? ebin) ebin)))))
+
 ;; The floor a seed test reads: an explicit BL_SEED_EBIN, else the selected SDK
-;; image's ebin (BL_EBIN, which bin/bl exports for every checkout VM), else the
-;; tree's own `build` output. A checkout's `build/` is only current right after
-;; a tree build, so preferring it made these tests judge whatever was left there.
+;; image's ebin (BL_EBIN, which bin/bl exports on its COLD path), else the ebin
+;; the running application actually booted from, else the tree's own `build`
+;; output.
+;;
+;; The application-image fallback is REQUIRED on the native checkout transport:
+;; bin/bl execs the client BEFORE it exports BL_EBIN, and a reused realm keeps
+;; the environment it started with, so a test VM can have neither BL_SEED_EBIN
+;; nor BL_EBIN (measured: this helper answered `<checkout>/build`, which does
+;; not exist, and every seed suite refused an "incomplete boot closure").
+;; A checkout's `build/` is only current right after a tree build, so it stays
+;; last: preferring it made these tests judge whatever was left there.
 (defn floor-ebin [root]
-  (or (not-empty (System/get_env "BL_SEED_EBIN")) (not-empty (System/get_env "BL_EBIN")) (Path/join root "build")))
+  (or (not-empty (System/get_env "BL_SEED_EBIN")) (not-empty (System/get_env "BL_EBIN")) (runtime-ebin) (Path/join root "build")))
 
 (defn seed-run! [opts] (let [r (seed/run opts)] (restore-assertions!) r))
 (defn seed-check! [opts] (let [c (seed/check opts)] (restore-assertions!) c))

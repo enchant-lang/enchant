@@ -1,0 +1,82 @@
+(ns sdk.file-digest-test)
+
+;; The SDK walk hashes each sealed artifact and Source against its inventory row.
+;; `Env/sdk_file_digest!` lets an unchanged file be hashed once per VM. These
+;; tests pin when a remembered digest may and may not be reused: never for a file
+;; modified in the last seconds, never after any later write (even same size and
+;; restored mtime), and without further reads for an immutable store file.
+
+(def ^:private uncached (tuple :Elixir.BeamLisp.Env :sdk_file_digest_uncached 2))
+
+(defn- reads [] (elem (erlang/trace_info uncached :call_count) 1))
+
+(defn- scratch [] (Path/join (System/tmp_dir!) (str "bl-sdk-file-digest-" (erlang/unique_integer (list :positive)))))
+
+(deftest an-unsettled-file-is-hashed-every-time
+ (let [root (scratch) path (Path/join root "artifact.beam")]
+  (try
+   (erlang/trace_pattern uncached true (list :local :call_count))
+   (File/mkdir_p! root)
+   (File/write! path "aaaa")
+   (let [start (reads)]
+    (is (= (crypto/hash :sha256 "aaaa") (BeamLisp.Env/sdk_file_digest! path :bytes)))
+    (is (= (crypto/hash :sha256 "aaaa") (BeamLisp.Env/sdk_file_digest! path :bytes)))
+    (is (= (+ start 2) (reads)))
+    ;; Same size, written inside the same clock second: must still be seen.
+    (File/write! path "bbbb")
+    (is (= (crypto/hash :sha256 "bbbb") (BeamLisp.Env/sdk_file_digest! path :bytes))))
+   (finally (erlang/trace_pattern uncached false (list :local :call_count))
+            (File/rm_rf! root)))))
+
+(deftest a-settled-file-is-hashed-once-and-any-later-write-is-seen
+ (let [root (scratch) path (Path/join root "artifact.beam")]
+  (try
+   (erlang/trace_pattern uncached true (list :local :call_count))
+   (File/mkdir_p! root)
+   (File/write! path "aaaa")
+   (Process/sleep 3300)
+   (let [before (File/stat! path) start (reads)]
+    (is (= (crypto/hash :sha256 "aaaa") (BeamLisp.Env/sdk_file_digest! path :bytes)))
+    (is (= (+ start 1) (reads)))
+    (is (= (crypto/hash :sha256 "aaaa") (BeamLisp.Env/sdk_file_digest! path :bytes)))
+    (is (= (+ start 1) (reads)))
+    ;; Different bytes, same size, mtime restored: ctime still moves.
+    (File/write! path "bbbb")
+    (File/touch! path (:mtime before))
+    (is (= (crypto/hash :sha256 "bbbb") (BeamLisp.Env/sdk_file_digest! path :bytes)))
+    (is (= (+ start 2) (reads)))
+    ;; The new file is not yet settled, so it is not remembered either.
+    (is (= (crypto/hash :sha256 "bbbb") (BeamLisp.Env/sdk_file_digest! path :bytes)))
+    (is (= (+ start 3) (reads))))
+   (finally (erlang/trace_pattern uncached false (list :local :call_count))
+            (File/rm_rf! root)))))
+
+(deftest source-digests-hash-the-loadable-text
+ (let [root (scratch) path (Path/join root "unit.bl")]
+  (try
+   (File/mkdir_p! root)
+   (File/write! path "#!/usr/bin/env bl\n(ns unit)\n")
+   (is (= (crypto/hash :sha256 (BeamLisp.Loader/read_source path))
+          (BeamLisp.Env/sdk_file_digest! path :source)))
+   (is (not= (crypto/hash :sha256 (File/read! path)) (BeamLisp.Env/sdk_file_digest! path :source)))
+   (finally (File/rm_rf! root)))))
+
+(deftest only-bytes-and-source-are-digest-kinds
+ (let [refused (fn [f] (try (f) :accepted (catch _ :refused)))]
+  (is (= :refused (refused #(BeamLisp.Env/sdk_file_digest! "/tmp/none" :other))))
+  (is (= :refused (refused #(BeamLisp.Env/sdk_file_digest! :not-a-path :bytes))))
+  (is (= :refused (refused #(BeamLisp.Env/sdk_file_digest! "/tmp/bl-sdk-file-digest-missing" :bytes))))))
+
+(deftest an-immutable-store-file-is-hashed-once-for-the-vm
+ (let [path (Path/join (List/to_string (code/lib_dir :elixir)) "ebin/Elixir.Enum.beam")]
+  (when (String/starts_with? path "/nix/store/")
+   (try
+    (erlang/trace_pattern uncached true (list :local :call_count))
+    (let [expected (crypto/hash :sha256 (File/read! path))
+          first (BeamLisp.Env/sdk_file_digest! path :bytes)
+          start (reads)]
+     (is (= expected first))
+     (is (= expected (BeamLisp.Env/sdk_file_digest! path :bytes)))
+     (is (= expected (BeamLisp.Env/sdk_file_digest! path :bytes)))
+     (is (= start (reads))))
+    (finally (erlang/trace_pattern uncached false (list :local :call_count)))))))

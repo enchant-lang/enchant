@@ -1,0 +1,93 @@
+; test/bl/repl_surface_test.bl — what the web REPL's panels read.
+; Run: ./bin/bl test test/bl/repl_surface_test.bl
+
+(ns repl-surface-test
+  (:require [vm.repl.surface :as s]
+            [harness :as h]
+            [harness.repl :as r]
+            [deodorant.advice :as adv]))
+
+(defn- arglists [n nm] (str "[" n "/" nm "]"))
+
+(deftest a-path-names-its-namespace
+  (is (= "harness.repl" (s/ns-of-path "harness/repl.bl")))
+  (is (= "bl.repl" (s/ns-of-path "bl/repl.bl.md")))
+  (is (= "a.b-c" (s/ns-of-path "a/b_c.bl.org"))))
+
+(deftest a-first-line-is-a-gloss
+  (is (= "the harness as functions you call at the prompt."
+         (s/gloss-of "; harness/repl.bl — the harness as functions you call at the prompt.\n(ns x)")))
+  (is (= "a read-eval-print loop for beam-lisp" (s/gloss-of "# bl.repl — a read-eval-print loop for beam-lisp")))
+  (is (= "Notes" (s/gloss-of "#+title: Notes\n")))
+  (is (nil? (s/gloss-of "(ns x)"))))
+
+(deftest the-catalog-groups-by-tier
+  (let [c (s/catalog)
+        by (into {} (map (fn [m] [(get m "ns") m]) c))]
+    (is (= "lib" (get-in by ["harness.repl" "kind"])))
+    (is (= "std" (get-in by ["deodorant.advice" "kind"])))
+    (is (= "compat" (get-in by ["clojure.repl" "kind"])))
+    (is (includes? (get-in by ["harness.repl" "gloss"]) "prompt"))
+    (is (some #(= "here" (get % "kind")) (s/namespaces)) "the test's own ns has no tier file")))
+
+(deftest the-shelf-is-aliases-and-refers
+  (BeamLisp.Env/in_ns "shelf-probe")
+  (require '[deodorant.advice :as adv2] '[clojure.repl :refer [apropos dir]])
+  (let [rows (s/shelf "shelf-probe")
+        by (into {} (map (fn [m] [(get m "ns") m]) rows))]
+    (BeamLisp.Env/in_ns "repl-surface-test")
+    (is (= "adv2" (get-in by ["deodorant.advice" "alias"])))
+    (is (= ["apropos" "dir"] (get-in by ["clojure.repl" "refers"])))
+    (is (pos? (get-in by ["deodorant.advice" "publics"])))
+    (is (not (contains? by "core")))))
+
+(deftest a-namespace-record
+  (let [rec (s/ns-record "/nowhere" "deodorant.advice" arglists)
+        names (set (map #(get % "name") (get rec "publics")))]
+    (is (contains? names "advise-source"))
+    (is (= "[deodorant.advice/advise]" (some #(when (= "advise" (get % "name")) (get % "arglists")) (get rec "publics"))))
+    (is (some #(= "repl-surface-test" %) (get rec "usedBy")))
+    (is (ends-with? (get rec "path") "deodorant/advice.bl"))))
+
+(deftest a-var-record-has-its-source-and-callers
+  (let [rec (s/var-record "/nowhere" "deodorant.advice" "advise" arglists)]
+    (is (starts-with? (get rec "source") "(defn advise"))
+    (is (number? (get rec "line")))
+    (is (includes? (get rec "doc") "file at"))
+    (is (some #(= "harness.repl" (get % "ns")) (get rec "callers")) "harness.repl calls adv/advise")))
+
+(deftest a-prompt-in-a-test-namespace-is-advised
+  ;; advice reads the prompt as if it sat under the namespace's own header: a
+  ;; `-test` namespace (or one requiring browser.*) is where a sleep is a wait
+  (let [fs (s/prompt-smells "smell-probe-test" "(do (click! p \"#go\")\n    (Process/sleep 400))")]
+    (is (= [2] (mapv #(get % "line") fs)))
+    (is (= "fixed-sleep" (get (first fs) "smell")))
+    (is (= "Process/sleep" (get (first fs) "form"))))
+  (is (= [] (s/prompt-smells "user" "(Process/sleep 400)")) "no browser, no test: a sleep is fine"))
+
+(deftest enter-closes-only-what-is-open-at-the-end
+  (let [r (s/repair-prompt "(defn f [x] (+ x 1")]
+    (is (= true (get r "auto")))
+    (is (= "))" (get r "added")))
+    (is (= "(defn f [x] (+ x 1))" (get r "src"))))
+  (let [r (s/repair-prompt "(+ 1 2))")]
+    (is (= false (get r "auto")) "a stray closer is offered, never applied")
+    (is (includes? (get r "explain") "repair")))
+  (is (= true (get (s/repair-prompt "(+ 1 2)") "reads"))))
+
+(deftest tiles-read-the-keeper
+  (h/stop-keeper)
+  (is (= [] (s/tiles)) "no keeper, no tiles, and none is started")
+  (let [root (str (System/tmp_dir) "/bl-surface-test-" (erlang/unique_integer (list :positive)))]
+    (File/mkdir_p! root)
+    (h/start-keeper root nil {:step (fn [_ _ _] {:ok "Done."})})
+    (try
+      (r/await (r/task "Add one and two." {:id "task-1"}) 5000)
+      (r/keep! "task-1" "three" "(+ 1 2)")
+      (let [[t] (s/tiles)]
+        (is (= "task-1" (get t "task")))
+        (is (= "Add one and two." (get t "goal")))
+        (is (= ["three"] (get t "kept")))
+        (is (= "done" (get t "status"))))
+      (is (includes? (get (s/transcript "task-1") "text") "* keep three"))
+      (finally (h/stop-keeper)))))

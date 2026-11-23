@@ -521,8 +521,15 @@
   (cond
     (not= nsname "auto") [nsname name]
     (some? (index-of name "/"))
-    (let [parts (String/split name "/")] [(first parts) (join "/" (rest parts))])
+    (let [parts (String/split name "/")
+          a (first parts)
+          ;; `page/wait!` names an ALIAS: the doc lives in its target
+          target (try (get (ns-aliases (symbol (:ns row))) (symbol a)) (catch _ex nil))]
+      [(if (some? target) (str target) a) (join "/" (rest parts))])
     (has-var? (:ns row) name) [(:ns row) name]
+    ;; a name the prompt REFERRED (`task` from harness.repl) lives in its source
+    (some? (try (BeamLisp.Env/refer_source (:ns row) name) (catch _ex nil)))
+    [(str (BeamLisp.Env/refer_source (:ns row) name)) name]
     (has-var? "core" name) ["core" name]
     :else
     (let [hit (some (fn [ns] (if (has-var? (str ns) name) (str ns) nil))
@@ -553,6 +560,47 @@
                  results (to-list (map (fn [s] (= true (BeamLisp.Ns.Rt/invoke bal (to-list [s])))) srcs))]
              (erlang/send ws (tuple :push {"kind" "balanced" "id" id "results" results}))))))
 
+;; ── the panels: shelf, records, tiles, smells, repair (vm.repl.surface) ─────
+;;
+;; Loaded on first use, like bl.repl above: a daemon that never opens the page
+;; never loads the harness. Each op answers inside the SESSION's env and ns, so
+;; the shelf is what this prompt has required, not what the daemon has.
+
+(defn- surface [name]
+  (BeamLisp.Loader/ensure_loaded "vm.repl.surface")
+  (BeamLisp.Env/fetch! "vm.repl.surface" name))
+
+(defn- run-surface [ws sid id kind call]
+  (let [row (get-session sid)]
+    (spawn (fn []
+             (env/with-env (:env row)
+               (fn []
+                 (BeamLisp.Env/in_ns (:ns row))
+                 (let [r (try {"result" (call row)}
+                              (catch e {"error" (str (ex-message e))}))]
+                   (erlang/send ws (tuple :push (assoc r "kind" kind "id" id))))))))))
+
+(defn- surface-call [name & args]
+  (BeamLisp.Ns.Rt/invoke (surface name) (to-list args)))
+
+(defn- surface-op [ws sid id op msg]
+  (let [arg (fn [k] (get msg k ""))]
+    (run-surface ws sid id op
+      (fn [row]
+        (cond
+          (= op "namespaces") (surface-call "namespaces")
+          (= op "shelf") (surface-call "shelf" (:ns row))
+          (= op "record")
+          (if (= "" (arg "name"))
+            (surface-call "ns-record" (:root row) (arg "ns") arglists-str)
+            (surface-call "var-record" (:root row) (arg "ns") (arg "name") arglists-str))
+          (= op "tiles") (surface-call "tiles")
+          (= op "transcript") (surface-call "transcript" (arg "task"))
+          (= op "smells") (surface-call "prompt-smells" (:ns row) (arg "src"))
+          (= op "repair") (surface-call "repair-prompt" (arg "src")))))))
+
+(def ^:private SURFACE-OPS #{"namespaces" "shelf" "record" "tiles" "transcript" "smells" "repair"})
+
 ;; ── the socket ──────────────────────────────────────────────────────────────
 
 (defn- handle-op [ws sid msg]
@@ -577,6 +625,8 @@
           (erlang/send ws (tuple :push {"kind" "not-busy" "id" id}))))
 
       (= op "balanced") (run-balanced ws id (to-list (get msg "srcs" (to-list []))))
+
+      (contains? SURFACE-OPS op) (surface-op ws sid id op msg)
 
       (= op "index-state")
       ;; debug: the raw index row + entries matching a substring

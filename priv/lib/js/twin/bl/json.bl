@@ -1,0 +1,89 @@
+; priv/lib/js/twin/bl/json.bl — bl.json for the page. The BEAM's bl.json
+; crosses into a Rust NIF; a page has the host's own JSON. Same names, same
+; mapping as the head of priv/std/bl/json.bl:
+;   encode: nil→null, maps→objects (keys sorted by their text), vectors, lists,
+;           sets and seqs→arrays, keywords and symbols→strings, numbers, bools;
+;           a value with no JSON representation fails naming its path.
+;   decode: objects→maps (string keys, or :keys :keyword), arrays→VECTORS,
+;           null→nil. JS numbers carry no spelling: 1.0 decodes as 1 here
+;           (the BEAM keeps 1.0); 1.5 is a float on both.
+; js.build always prefers this file over the BEAM source (js.build/twin-root).
+(ns ^:js bl.json)
+
+(defn- fail [path what]
+  (throw (ex-info (str "bl.json: " what " at " (if (seq path) (str "/" (join "/" path)) "the root")) {:path path})))
+
+(defn- key-text [k path]
+  (cond (string? k) k
+        (keyword? k) (str k)
+        (symbol? k) (str k)
+        (number? k) (str k)
+        :else (fail path "an object key with no text")))
+
+(defn- quote-str [s] (.stringify js/JSON s))
+
+(declare emit)
+
+(defn- indent [pretty depth] (if (pos? pretty) (str "\n" (apply str (repeat (* pretty depth) " "))) ""))
+
+(defn- emit-seq [xs path pretty depth]
+  (if (empty? xs) "[]"
+    (str "["
+         (join "," (map-indexed (fn [i x] (str (indent pretty (inc depth)) (emit x (conj path i) pretty (inc depth)))) xs))
+         (indent pretty depth) "]")))
+
+(defn- emit-map [m path pretty depth]
+  (if (empty? m) "{}"
+    (let [pairs (sort-by first (map (fn [[k v]] [(key-text k path) v]) m))]
+      (str "{"
+           (join "," (map (fn [[k v]] (str (indent pretty (inc depth)) (quote-str k) (if (pos? pretty) ": " ":")
+                                           (emit v (conj path k) pretty (inc depth))))
+                          pairs))
+           (indent pretty depth) "}"))))
+
+(defn- emit [v path pretty depth]
+  (cond (nil? v) "null"
+        (true? v) "true"
+        (false? v) "false"
+        (string? v) (quote-str v)
+        (keyword? v) (quote-str (str v))
+        (symbol? v) (quote-str (str v))
+        (integer? v) (str v)
+        (number? v) (let [t (str v)] (if (or (= t "NaN") (includes? t "Infinity")) (fail path "a non-finite number") t))
+        (map? v) (emit-map v path pretty depth)
+        (or (vector? v) (list? v) (set? v) (seq? v)) (emit-seq (vec v) path pretty depth)
+        :else (fail path (str "a value of type " (type v) " has no JSON representation"))))
+
+(defn encode
+  "A value as JSON text. Options: :pretty N (or true for 2)."
+  ([v] (encode v {}))
+  ([v opts]
+   (let [p (get opts :pretty 0) pretty (cond (= true p) 2 (number? p) p :else 0)]
+     (emit v [] pretty 0))))
+
+(defn try-encode
+  ([v] (try-encode v {}))
+  ([v opts] (try {:ok (encode v opts)} (catch e {:error (str e)}))))
+
+(defn- build [x keyf]
+  (cond (nil? x) nil
+        (or (true? x) (false? x)) x
+        (string? x) x
+        (number? x) x
+        (.isArray js/Array x) (vec (for [i (range (.-length x))] (build (aget x i) keyf)))
+        :else (let [ks (.keys js/Object x)]
+                (into {} (for [i (range (.-length ks)) :let [k (aget ks i)]]
+                           [(keyf k) (build (aget x k) keyf)])))))
+
+(defn decode
+  "JSON text as data: objects as maps (string keys; :keys :keyword for
+   keywords), arrays as vectors, null as nil. One call is one document."
+  ([text] (decode text {}))
+  ([text opts]
+   (let [keyf (if (= :keyword (get opts :keys)) keyword identity)
+         raw (try (.parse js/JSON text) (catch e (throw (ex-info (str "bl.json: malformed JSON: " (ex-message e)) {}))))]
+     (build raw keyf))))
+
+(defn try-decode
+  ([text] (try-decode text {}))
+  ([text opts] (try {:ok (decode text opts)} (catch e {:error (str e)}))))

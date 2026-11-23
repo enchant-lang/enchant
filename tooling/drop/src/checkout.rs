@@ -55,7 +55,59 @@ fn checkout_prerequisites(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The three tokens one checkout request carries. `engine` is the fingerprint
+/// the SDK selection is keyed by (`BL_CHECKOUT_SDK_INPUTS`); `runtime` pins the
+/// running image (`BL_CHECKOUT_GENERATION`); `project` pins a realm to the
+/// sources it resolved (`BL_CHECKOUT_SOURCE_GENERATION`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Generations {
+    pub engine: String,
+    pub runtime: String,
+    pub project: String,
+}
+
+/// Compute the three tokens EXACTLY as the checkout client always has: one
+/// engine inventory, the runtime inventory over `priv`/`native`, and the
+/// project inventory folded with the realm's manifest. `generation.rs`'s
+/// service calls this same function, so a cached answer and a locally computed
+/// one are byte-identical.
+fn checkout_generations(
+    root: &Path,
+    project: &Path,
+    extra_sources: &[PathBuf],
+) -> std::io::Result<Generations> {
+    let evidence = engine_inputs::Snapshot::capture(root)?;
+    let runtime = checkout_runtime_generation(root, Some(&evidence))?;
+    let project_token = checkout_project_generation(root, project, extra_sources, Some(&evidence))?;
+    evidence.verify()?;
+    engine_inputs::save_digest_cache();
+    Ok(Generations { engine: evidence.fingerprint.clone(), runtime, project: project_token })
+}
+
+/// `BL_CHECKOUT_PHASE_TIMES=1` prints one `U10-PHASE name microseconds` line per
+/// phase to stderr. Off by default: a command's stderr is the command's.
+struct PhaseTimer { start: std::time::Instant, last: std::time::Instant, on: bool }
+impl PhaseTimer {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self { start: now, last: now, on: std::env::var_os("BL_CHECKOUT_PHASE_TIMES").is_some_and(|v| v == "1") }
+    }
+    fn mark(&mut self, name: &str) {
+        let now = std::time::Instant::now();
+        if self.on {
+            eprintln!("U10-PHASE {} {}", name, now.duration_since(self.last).as_micros());
+        }
+        self.last = now;
+    }
+    fn total(&self) {
+        if self.on {
+            eprintln!("U10-PHASE total {}", self.start.elapsed().as_micros());
+        }
+    }
+}
+
 fn checkout_main(args: &[String]) -> ! {
+    let mut timer = PhaseTimer::new();
     let root = args
         .first()
         .and_then(|s| std::fs::canonicalize(s).ok())
@@ -64,25 +116,36 @@ fn checkout_main(args: &[String]) -> ! {
     if args.get(1).map(String::as_str) != Some("--") {
         fail("usage: drop-launcher --checkout ROOT -- ARGV...");
     }
+    timer.mark("root");
     let argv = &args[2..];
-    let evidence = engine_inputs::Snapshot::capture(&root)
-        .unwrap_or_else(|e| fail(&format!("checkout engine inventory: {e}")));
-    std::env::set_var("BL_CHECKOUT_SDK_INPUTS", &evidence.fingerprint);
     let cwd = std::env::current_dir().unwrap_or_else(|e| fail(&e.to_string()));
     let project = root_override(argv)
         .or_else(|| project_dir(&cwd))
         .unwrap_or_else(|| cwd.clone());
     let project = std::fs::canonicalize(project).unwrap_or_else(|e| fail(&e.to_string()));
     let extra_sources = checkout_extra_sources(&project, &request_cwd(&cwd, argv), argv);
-    let runtime = checkout_runtime_generation(&root, Some(&evidence))
-        .unwrap_or_else(|e| fail(&format!("checkout runtime inventory: {e}")));
-    let sources = checkout_project_generation(&root, &project, &extra_sources, Some(&evidence))
-        .unwrap_or_else(|e| fail(&format!("checkout project inventory: {e}")));
-    evidence.verify().unwrap_or_else(|e| fail(&format!("checkout engine inventory: {e}")));
-    engine_inputs::save_digest_cache();
+    timer.mark("project+extra");
+    // The per-tree generation service answers engine/runtime/project from a
+    // kernel-observed tree (see `generation.rs`). It is an optimization with a
+    // safe failure mode: when it is absent, still warming, or unsure it says
+    // nothing, and this process computes the same three tokens itself.
+    let generations = generation_cached(&root, &project, &extra_sources);
+    timer.mark("service");
+    let generations = match generations {
+        Some(g) => g,
+        None => {
+            generation_ensure(&root);
+            let g = checkout_generations(&root, &project, &extra_sources)
+                .unwrap_or_else(|e| fail(&format!("checkout inventory: {e}")));
+            timer.mark("local");
+            g
+        }
+    };
+    std::env::set_var("BL_CHECKOUT_SDK_INPUTS", &generations.engine);
     std::env::set_var("BL_CHECKOUT_ROOT", &root);
-    std::env::set_var("BL_CHECKOUT_GENERATION", runtime);
-    std::env::set_var("BL_CHECKOUT_SOURCE_GENERATION", sources);
+    std::env::set_var("BL_CHECKOUT_GENERATION", generations.runtime);
+    std::env::set_var("BL_CHECKOUT_SOURCE_GENERATION", generations.project);
+    timer.total();
     exec_payload(&root, "src", argv)
 }
 
@@ -230,8 +293,14 @@ fn checkout_generation(root: &Path, project: &Path) -> std::io::Result<String> {
     ))
 }
 
-fn checkout_extra_sources(project: &Path, cwd: &Path, argv: &[String]) -> Vec<PathBuf> {
+/// The roots env.bl / .env.local.bl declare with `:paths`, `:path` and `:run`,
+/// and whether any file declared `:paths` at all. Without `:paths` the realm's
+/// only project root is the working tree itself (loader.bl `ambient_dirs`:
+/// the cwd, then `BEAM_LISP_PATH`; `cli.bl` `with-project` adds `:paths` and
+/// the tree's `overrides/`).
+fn declared_roots(project: &Path) -> (Vec<PathBuf>, bool) {
     let mut roots = Vec::new();
+    let mut paths_declared = false;
     for file in ["env.bl", ".env.local.bl"] {
         if let Ok(text) = std::fs::read_to_string(project.join(file)) {
             let tokens = literal_tokens(&text);
@@ -240,6 +309,12 @@ fn checkout_extra_sources(project: &Path, cwd: &Path, argv: &[String]) -> Vec<Pa
                     continue;
                 };
                 if key == ":paths" && next == "[" {
+                    // Only the PROJECT's own `:paths` are search roots. A nested
+                    // `:build {:paths […]}` describes where build sources live
+                    // (this tree's `priv/…`), which the runtime pin already
+                    // covers; walking it here inventoried the whole engine twice.
+                    if *depth != 1 { continue; }
+                    paths_declared = true;
                     for (d, value) in &tokens[i + 2..] {
                         if d <= depth {
                             break;
@@ -257,6 +332,16 @@ fn checkout_extra_sources(project: &Path, cwd: &Path, argv: &[String]) -> Vec<Pa
                 }
             }
         }
+    }
+    (roots, paths_declared)
+}
+
+fn checkout_extra_sources(project: &Path, cwd: &Path, argv: &[String]) -> Vec<PathBuf> {
+    let (mut roots, _) = declared_roots(project);
+    // The realm also searches the request's cwd. At the project root that is
+    // covered by the shallow top-level inventory; a deeper cwd is a root of its own.
+    if cwd != project {
+        roots.push(cwd.to_path_buf());
     }
     for path in collect_env_paths() {
         roots.push(cwd.join(path));
@@ -306,7 +391,24 @@ fn checkout_project_generation(
     evidence: Option<&engine_inputs::Snapshot>,
 ) -> std::io::Result<String> {
     let mut files = Vec::new();
-    checkout_sources(project, &mut files)?;
+    let sources = read_realm_sources(project);
+    if sources.is_some() {
+        // The realm recorded what it resolved (see `read_realm_sources`), so
+        // the walk is not needed: inventory the project's own files, its
+        // declared roots (`extra_sources`), `overrides/` and the loose
+        // sources at the top of the tree; the manifest adds the rest.
+        for name in ["env.bl", ".env.local.bl"] {
+            if project.join(name).is_file() {
+                files.push(project.join(name));
+            }
+        }
+        checkout_top_level(project, &mut files)?;
+        checkout_sources(&project.join("overrides"), &mut files)?;
+    } else {
+        // No usable manifest (first request, or unreadable): the working tree
+        // is the root, and every file in it counts.
+        checkout_sources(project, &mut files)?;
+    }
     // The runtime pin already covers these trees. In an engine checkout,
     // avoid reading its SDK and native binaries again for the project pin.
     // Explicit extra paths below retain their own complete inventory.
@@ -316,7 +418,162 @@ fn checkout_project_generation(
     for path in extra_sources {
         checkout_sources(path, &mut files)?;
     }
-    checkout_hash_files(root, files, evidence)
+    let base = checkout_hash_files(root, files, evidence)?;
+    match sources {
+        None => Ok(base),
+        Some(sources) => Ok(fold_realm_sources(root, &base, &sources)),
+    }
+}
+
+/// One recorded observation. `Loaded` is a file the loader read, with that
+/// digest of its bytes. `Entries` is a DIRECTORY whose entries were candidates
+/// that did not exist: its digest is over the entry names, so listing it once
+/// verifies every absent candidate under it.
+#[derive(Clone)]
+enum Recorded {
+    Loaded([u8; 32]),
+    Entries([u8; 32]),
+}
+
+/// What the warm realm wrote down about its own resolution, in
+/// `<project>/.bl/realm-sources.v1` (`source_record_candidate` in `priv/host/loader.bl`).
+/// One entry per path, the first record wins.
+struct RealmSources {
+    /// The header's token, new each time the manifest file is created.
+    token: String,
+    entries: std::collections::BTreeMap<PathBuf, Recorded>,
+}
+
+const REALM_SOURCES: &str = ".bl/realm-sources.v1";
+
+/// The manifest of `project` (canonical), or `None` when it is missing, from
+/// another root, torn (no final newline), or holds anything unparseable or an
+/// `X` (unrecordable) line. `None` always means: do the full walk.
+fn read_realm_sources(project: &Path) -> Option<RealmSources> {
+    let text = std::fs::read_to_string(project.join(REALM_SOURCES)).ok()?;
+    if !text.ends_with('\n') {
+        return None;
+    }
+    let mut lines = text.lines();
+    let header = lines.next()?.strip_prefix("bl-realm-sources 2\t")?;
+    let (root, token) = header.split_once('\t')?;
+    if token.is_empty() || token.contains('\t') {
+        return None;
+    }
+    if std::fs::canonicalize(root).ok()?.as_path() != project {
+        return None;
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    for line in lines {
+        let mut parts = line.splitn(3, '\t');
+        let (path, recorded) = match (parts.next()?, parts.next(), parts.next()) {
+            ("L", Some(hex), Some(path)) => (path, Recorded::Loaded(parse_digest(hex)?)),
+            ("D", Some(hex), Some(path)) => (path, Recorded::Entries(parse_digest(hex)?)),
+            _ => return None,
+        };
+        if !Path::new(path).is_absolute() {
+            return None;
+        }
+        entries.entry(PathBuf::from(path)).or_insert(recorded);
+    }
+    Some(RealmSources { token: token.to_string(), entries })
+}
+
+/// The digest of a directory's entries, in sorted name order: each name, NUL,
+/// then one byte for what it is (`f` regular file, `d` directory, `o` other —
+/// all following symlinks). A name changing TYPE changes the digest too.
+/// `source_listing_digest` in `priv/host/loader.bl` writes the same bytes.
+/// `None` when the directory cannot be listed.
+fn directory_entries_digest(dir: &Path) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let mut entries: Vec<(Vec<u8>, u8)> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| {
+            let kind = match std::fs::metadata(entry.path()) {
+                Ok(meta) if meta.is_file() => b'f',
+                Ok(meta) if meta.is_dir() => b'd',
+                _ => b'o',
+            };
+            (entry.file_name().as_encoded_bytes().to_vec(), kind)
+        })
+        .collect();
+    entries.sort();
+    let mut hash = Sha256::new();
+    for (name, kind) in entries {
+        hash.update(&name);
+        hash.update([0, kind]);
+    }
+    Some(hash.finalize().into())
+}
+
+fn parse_digest(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Fold the manifest into the project generation. A path contributes only when
+/// it differs from what the realm recorded: a file edited or deleted since it
+/// was read, or a candidate that did not exist and now does. Recording a new
+/// file therefore never changes the generation; changing one the realm used,
+/// or creating one it looked for, always does.
+fn fold_realm_sources(root: &Path, base: &str, sources: &RealmSources) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"checkout-realm-sources-v2\0");
+    hash.update(base.as_bytes());
+    hash.update(sources.token.as_bytes());
+    hash.update([0]);
+    // the runtime pin already covers the image's own trees
+    let sdk = root.join("priv");
+    let native = root.join("native");
+    for (path, recorded) in &sources.entries {
+        if path.starts_with(&sdk) || path.starts_with(&native) {
+            continue;
+        }
+        // A directory record covers every absent candidate directly under it,
+        // so one listing stands for the batch. A loaded file is a file edit or
+        // deletion only if its bytes (or its existence) now differ.
+        let current = match recorded {
+            Recorded::Entries(recorded) => {
+                let current = directory_entries_digest(path);
+                if current == Some(*recorded) {
+                    continue;
+                }
+                current
+            }
+            Recorded::Loaded(recorded) => {
+                let current = match std::fs::metadata(path) {
+                    Ok(meta) if meta.is_file() => {
+                        Some(engine_inputs::file_digest(path).unwrap_or([0xff; 32]))
+                    }
+                    Ok(_) => Some([0xfe; 32]),
+                    Err(_) => None,
+                };
+                if current == Some(*recorded) {
+                    continue;
+                }
+                current
+            }
+        };
+        let name = path.as_os_str().as_encoded_bytes();
+        hash.update((name.len() as u64).to_be_bytes());
+        hash.update(name);
+        match current {
+            Some(digest) => {
+                hash.update([1]);
+                hash.update(digest);
+            }
+            None => hash.update([0]),
+        }
+    }
+    format!("{:x}", hash.finalize())
 }
 
 fn checkout_hash_files(root: &Path, mut files: Vec<PathBuf>, evidence: Option<&engine_inputs::Snapshot>) -> std::io::Result<String> {
@@ -349,13 +606,31 @@ fn checkout_hash_files(root: &Path, mut files: Vec<PathBuf>, evidence: Option<&e
         hash.update(std::env::var_os(key).unwrap_or_default().as_encoded_bytes());
         hash.update([0]);
     }
+    let mut parents = std::collections::HashMap::<PathBuf, PathBuf>::new();
     for path in files {
+        // One stat for the file: the same metadata decides its digest (the
+        // cache is keyed by the full stamp) and whether it is a symlink. Only a
+        // regular file can reuse the path stat for a digest lookup.
+        let meta = std::fs::symlink_metadata(&path)?;
+        let is_symlink = meta.file_type().is_symlink();
         let digest = if let Some(digest) = evidence.and_then(|snapshot| snapshot.digest(&path)) {
             *digest
-        } else {
+        } else if is_symlink {
             engine_inputs::file_digest(&path)?
+        } else {
+            engine_inputs::file_digest_stamped(&path, &meta)?
         };
-        let canonical = std::fs::canonicalize(&path)?;
+        // Canonicalize each directory once; a file needs its own resolution
+        // only when it is itself a symlink.
+        let canonical = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) if !is_symlink => {
+                if !parents.contains_key(parent) {
+                    parents.insert(parent.to_path_buf(), std::fs::canonicalize(parent)?);
+                }
+                parents[parent].join(name)
+            }
+            _ => std::fs::canonicalize(&path)?,
+        };
         let physical = canonical.as_os_str().as_encoded_bytes();
         hash.update((physical.len() as u64).to_be_bytes());
         hash.update(physical);
@@ -367,15 +642,25 @@ fn checkout_hash_files(root: &Path, mut files: Vec<PathBuf>, evidence: Option<&e
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn checkout_sources(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    checkout_sources_walk(dir, files, &mut std::collections::BTreeSet::new())
+/// The loose source files directly in `dir`, without descending.
+fn checkout_top_level(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if (name.ends_with(".bl") || name.ends_with(".bl.md") || name.ends_with(".bl.org"))
+            && std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file())
+        {
+            files.push(entry.path());
+        }
+    }
+    Ok(())
 }
 
-fn checkout_sources_walk(
-    dir: &Path,
-    files: &mut Vec<PathBuf>,
-    visited: &mut std::collections::BTreeSet<PathBuf>,
-) -> std::io::Result<()> {
+fn checkout_sources(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if !dir.exists() {
         return Ok(());
     }
@@ -383,7 +668,20 @@ fn checkout_sources_walk(
         files.push(dir.to_path_buf());
         return Ok(());
     }
-    if !visited.insert(std::fs::canonicalize(dir)?) {
+    // One canonicalization per root. Below it a real directory's physical
+    // path is its parent's plus its name; only a symlinked directory needs
+    // resolving again, to catch cycles.
+    let physical = std::fs::canonicalize(dir)?;
+    checkout_sources_walk(dir, &physical, files, &mut std::collections::BTreeSet::new())
+}
+
+fn checkout_sources_walk(
+    dir: &Path,
+    physical: &Path,
+    files: &mut Vec<PathBuf>,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> std::io::Result<()> {
+    if !visited.insert(physical.to_path_buf()) {
         return Ok(());
     }
     for entry in std::fs::read_dir(dir)? {
@@ -397,7 +695,12 @@ fn checkout_sources_walk(
                 && !(name == "build" && dir.file_name().is_none_or(|n| n != "priv"))
                 && !["_build", "target", "deps", "node_modules", "tmp"].contains(&name.as_ref())
             {
-                checkout_sources_walk(&path, files, visited)?;
+                let below = if kind.is_symlink() {
+                    std::fs::canonicalize(&path)?
+                } else {
+                    physical.join(entry.file_name())
+                };
+                checkout_sources_walk(&path, &below, files, visited)?;
             }
         } else if (kind.is_file() || (kind.is_symlink() && path.is_file()))
             && (name.ends_with(".bl")
@@ -588,6 +891,282 @@ mod checkout_tests {
         std::fs::write(root.join("env.bl"), "{:deps []}").unwrap();
         assert_ne!(configured, checkout_runtime_generation(&root, None).unwrap());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn declared_project(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("checkout-declared-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("priv")).unwrap();
+        std::fs::create_dir_all(root.join("examples/deep")).unwrap();
+        std::fs::create_dir_all(root.join("overrides")).unwrap();
+        std::fs::write(root.join("priv/runtime.bl"), "runtime").unwrap();
+        std::fs::write(root.join("env.bl"), r#"{:name "t" :paths ["examples"]}"#).unwrap();
+        std::fs::write(root.join("examples/deep/app.bl"), "app 1").unwrap();
+        std::fs::write(root.join("overrides/shim.bl"), "shim 1").unwrap();
+        std::fs::write(root.join("top.bl"), "top 1").unwrap();
+        std::fs::create_dir_all(root.join("test/bl")).unwrap();
+        std::fs::write(root.join("test/bl/seed_support.bl"), "seed 1").unwrap();
+        // the realm loaded the helper from its cwd root and looked for it first
+        // in a directory where it was not
+        write_manifest(&root, &[
+            loaded(&root, "test/bl/seed_support.bl"),
+            absent(&root, "test/bl/seed_support.clj"),
+        ]);
+        let project = std::fs::canonicalize(&root).unwrap();
+        (root, project)
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn digest_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        hex(&Sha256::digest(bytes))
+    }
+
+    /// Write a manifest the way the realm does: header, then entries.
+    fn write_manifest(root: &Path, entries: &[String]) {
+        write_manifest_with(root, "epoch-1", entries)
+    }
+
+    fn write_manifest_with(root: &Path, token: &str, entries: &[String]) {
+        let project = std::fs::canonicalize(root).unwrap();
+        std::fs::create_dir_all(project.join(".bl")).unwrap();
+        let mut text = format!("bl-realm-sources 2\t{}\t{}\n", project.display(), token);
+        // the realm records each path once
+        let mut seen = std::collections::BTreeSet::new();
+        for line in entries {
+            let path = line.rsplit_once('\t').map(|(_, path)| path).unwrap_or(line);
+            if seen.insert(path.to_string()) {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+        std::fs::write(project.join(REALM_SOURCES), text).unwrap();
+    }
+
+    fn loaded(root: &Path, relative: &str) -> String {
+        let path = std::fs::canonicalize(root).unwrap().join(relative);
+        format!("L\t{}\t{}", digest_hex(&std::fs::read(&path).unwrap()), path.display())
+    }
+
+    /// The manifest line for a candidate that missed: the parent of its highest
+    /// missing ancestor, with that directory's entry digest.
+    fn absent(root: &Path, relative: &str) -> String {
+        let project = std::fs::canonicalize(root).unwrap();
+        // the realm has created its `.bl` before it records anything
+        std::fs::create_dir_all(project.join(".bl")).unwrap();
+        let parent = project.join(relative).parent().unwrap().to_path_buf();
+        let digest = directory_entries_digest(&parent).unwrap();
+        format!("D\t{}\t{}", hex(&digest), parent.display())
+    }
+
+    fn generation(root: &Path) -> String {
+        let project = std::fs::canonicalize(root).unwrap();
+        checkout_generation(&project, &project).unwrap()
+    }
+
+    #[test]
+    fn editing_a_declared_root_file_changes_the_project_generation() {
+        let (root, _) = declared_project("edit");
+        let before = generation(&root);
+        for (file, text) in [
+            ("examples/deep/app.bl", "app 2"),
+            ("overrides/shim.bl", "shim 2"),
+            ("top.bl", "top 2"),
+            ("env.bl", r#"{:name "t" :paths ["examples" "extra"]}"#),
+        ] {
+            let was = generation(&root);
+            std::fs::write(root.join(file), text).unwrap();
+            assert_ne!(was, generation(&root), "{file} is a realm input");
+        }
+        assert_ne!(before, generation(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn junk_outside_the_declared_roots_does_not_change_the_project_generation() {
+        let (root, _) = declared_project("junk");
+        let before = generation(&root);
+        for i in 0..1000 {
+            let dir = root.join(format!("scratch/out/d{i}/nested"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("junk.bl"), format!("junk {i}")).unwrap();
+        }
+        assert_eq!(before, generation(&root));
+        std::fs::write(root.join("scratch/out/d7/nested/junk.bl"), "changed").unwrap();
+        assert_eq!(before, generation(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_the_realm_loaded_outside_the_declared_roots_pins_the_generation() {
+        let (root, _) = declared_project("manifest-file");
+        let before = generation(&root);
+        std::fs::write(root.join("test/bl/seed_support.bl"), "seed 2").unwrap();
+        let edited = generation(&root);
+        assert_ne!(before, edited, "an edit to a manifest-listed file is a realm input");
+        std::fs::write(root.join("test/bl/seed_support.bl"), "seed 1").unwrap();
+        assert_eq!(before, generation(&root), "restored bytes restore the generation");
+        std::fs::remove_file(root.join("test/bl/seed_support.bl")).unwrap();
+        assert_ne!(before, generation(&root), "a deleted file is a change");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_candidate_the_realm_found_absent_changes_the_generation_when_it_appears() {
+        let (root, _) = declared_project("manifest-absent");
+        let before = generation(&root);
+        std::fs::write(root.join("test/bl/seed_support.clj"), "shadow").unwrap();
+        let appeared = generation(&root);
+        assert_ne!(before, appeared, "a name appearing in a searched directory");
+        // The realm recorded the directory only; it reads the file on its next
+        // resolution and then records its BYTES (`L`). Until then a content edit
+        // of a file it never loaded cannot change what it resolves.
+        std::fs::write(root.join("test/bl/seed_support.clj"), "shadow 2").unwrap();
+        assert_eq!(appeared, generation(&root));
+        // ...and once the realm has read it, its bytes pin the generation.
+        write_manifest(&root, &[
+            loaded(&root, "test/bl/seed_support.bl"),
+            absent(&root, "test/bl/seed_support.clj"),
+            loaded(&root, "test/bl/seed_support.clj"),
+        ]);
+        let read = generation(&root);
+        std::fs::write(root.join("test/bl/seed_support.clj"), "shadow 3").unwrap();
+        assert_ne!(read, generation(&root), "a read file's bytes are a realm input");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_manifest_restarted_under_a_live_realm_is_a_new_generation() {
+        let (root, _) = declared_project("manifest-epoch");
+        let entries = [loaded(&root, "test/bl/seed_support.bl")];
+        write_manifest_with(&root, "epoch-1", &entries);
+        let first = generation(&root);
+        assert_eq!(first, generation(&root));
+        write_manifest_with(&root, "epoch-2", &entries);
+        assert_ne!(first, generation(&root), "the token is part of the generation");
+        // a header without a token is not a manifest
+        let project = std::fs::canonicalize(&root).unwrap();
+        std::fs::write(project.join(REALM_SOURCES), format!("bl-realm-sources 2\t{}\n", project.display())).unwrap();
+        assert!(read_realm_sources(&project).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_absent_directory_that_appears_changes_the_generation() {
+        let (root, _) = declared_project("manifest-dir");
+        write_manifest(&root, &[
+            loaded(&root, "test/bl/seed_support.bl"),
+            absent(&root, "missing-dir"),
+        ]);
+        let before = generation(&root);
+        std::fs::create_dir_all(root.join("missing-dir/inner")).unwrap();
+        assert_ne!(before, generation(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_name_changing_type_changes_the_directory_digest() {
+        let dir = std::env::temp_dir().join(format!("checkout-listing-type-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("x.bl")).unwrap();
+        let as_directory = directory_entries_digest(&dir).unwrap();
+        std::fs::remove_dir(dir.join("x.bl")).unwrap();
+        std::fs::write(dir.join("x.bl"), "now a file").unwrap();
+        // the name is the same; only its type changed, and that is a realm input
+        assert_ne!(as_directory, directory_entries_digest(&dir).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn one_directory_record_covers_a_batch_of_absent_candidates() {
+        let (root, _) = declared_project("manifest-batch");
+        write_manifest(&root, &[
+            loaded(&root, "test/bl/seed_support.bl"),
+            absent(&root, "test/bl/first.clj"),
+            absent(&root, "test/bl/second.org"),
+            absent(&root, "test/bl/third.bl.md"),
+        ]);
+        // the three misses are one line: the directory, not each absent name
+        let text = std::fs::read_to_string(root.join(REALM_SOURCES)).unwrap();
+        assert_eq!(3, text.lines().count(), "{text}");
+        let before = generation(&root);
+        // any entry appearing in that directory is a change (conservative)
+        std::fs::write(root.join("test/bl/appeared.bl"), "x").unwrap();
+        assert_ne!(before, generation(&root));
+        // and the directory's listing coming back restores it
+        std::fs::remove_file(root.join("test/bl/appeared.bl")).unwrap();
+        assert_eq!(before, generation(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_manifest_from_the_old_grammar_falls_back_to_the_walk() {
+        let (root, project) = declared_project("manifest-v1");
+        let text = format!(
+            "bl-realm-sources 1\t{}\tepoch\nA\t{}/test/bl/seed_support.clj\n",
+            project.display(),
+            project.display()
+        );
+        std::fs::write(project.join(REALM_SOURCES), text).unwrap();
+        assert!(read_realm_sources(&project).is_none(), "v1 is not this client's manifest");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recording_more_does_not_change_the_generation_and_bad_manifests_fall_back_to_the_walk() {
+        let (root, project) = declared_project("manifest-shape");
+        let before = generation(&root);
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("lib/x.bl"), "x").unwrap();
+        write_manifest(&root, &[
+            loaded(&root, "test/bl/seed_support.bl"),
+            absent(&root, "test/bl/seed_support.clj"),
+            loaded(&root, "lib/x.bl"),
+            absent(&root, "lib/y.bl"),
+        ]);
+        assert_eq!(before, generation(&root), "unchanged entries add nothing");
+        let manifest = project.join(REALM_SOURCES);
+        let good = std::fs::read_to_string(&manifest).unwrap();
+        // every unusable manifest means: walk everything. A junk file then counts.
+        std::fs::create_dir_all(root.join("scratch")).unwrap();
+        for bad in [
+            format!("{good}X\\t\\n"),
+            good.trim_end().to_string(),
+            good.replacen(&project.display().to_string(), "/elsewhere", 1),
+            format!("{good}L\\tnothex\\t/x\\n"),
+            format!("{good}D\\t{}\\trelative.bl\\n", "0".repeat(64)),
+        ] {
+            std::fs::write(&manifest, &bad).unwrap();
+            std::fs::write(root.join("scratch/junk.bl"), "1").unwrap();
+            let one = generation(&root);
+            std::fs::write(root.join("scratch/junk.bl"), "2").unwrap();
+            assert_ne!(one, generation(&root), "walk for: {bad:?}");
+        }
+        std::fs::remove_file(&manifest).unwrap();
+        std::fs::write(root.join("scratch/junk.bl"), "3").unwrap();
+        let one = generation(&root);
+        std::fs::write(root.join("scratch/junk.bl"), "4").unwrap();
+        assert_ne!(one, generation(&root), "no manifest, full walk");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_declared_roots_and_cycles_are_followed_once() {
+        let (root, _) = declared_project("link");
+        let outside = std::env::temp_dir().join(format!("checkout-linked-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("lib.bl"), "lib 1").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("examples/linked")).unwrap();
+        std::os::unix::fs::symlink(root.join("examples"), root.join("examples/deep/loop")).unwrap();
+        let before = generation(&root);
+        std::fs::write(outside.join("lib.bl"), "lib 2").unwrap();
+        assert_ne!(before, generation(&root), "a symlinked root's files are inventoried");
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]

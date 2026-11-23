@@ -80,6 +80,7 @@ function mapGet(k, m, dflt) {
 const num = (x) => (x instanceof Flt ? x.v : x);
 export const ERLANG = {
   "erlang/+/2": (a, b) => R.add(a, b),
+  "erlang/-/1": (a) => R.neg(a),
   "erlang/-/2": (a, b) => R.sub(a, b),
   "erlang/*/2": (a, b) => R.mul(a, b),
   "erlang///2": (a, b) => {
@@ -345,6 +346,9 @@ export class Regex {
     this.source = source; this.blStruct = kw("Elixir.Regex");
     try {
       if (!/^[imsu]*$/.test(options)) throw new Error("unsupported options " + options);
+      // PCRE start-of-pattern verbs ((*UTF8), (*UCP) …) only select Unicode
+      // matching, which the "u" flag always gives here: drop them.
+      source = source.replace(/^(\(\*(?:UTF8?|UCP)\))+/, "");
       // PCRE permits a leading flag declaration in addition to compile options.
       const leading = source.match(/^\(\?([ims]+)\)/);
       const flags = new Set("u" + options + (leading?.[1] ?? ""));
@@ -481,6 +485,8 @@ export const BEAM_ONLY = Object.fromEntries([
 ].map((k) => [k, beamOnly(k)]));
 
 export const HOST_LEAVES = { ...ERLANG, ...LISTS, ...STRING, ...REGEX, ...IO, ...BEAM_ONLY };
+// The helpers portable-leaves.mjs shares (one definition of each).
+export { reOpts, badarg, badarith, exactInteger, beamOnly };
 // (COLLECTIONS, NUMBERS, REFS_ERRORS are merged in below, where they are defined)
 
 // ─── collections: Vector / Set / Sorted / Transient ──────────────────────────
@@ -558,7 +564,7 @@ function rangeEntries(c, lo, hi, rev) {
 export const NUMBERS = {
   "Elixir.BeamLisp.Num/add/2": R.add, "Elixir.BeamLisp.Num/sub/2": R.sub,
   "Elixir.BeamLisp.Num/mul/2": R.mul, "Elixir.BeamLisp.Num/div/2": R.div,
-  "Elixir.BeamLisp.Num/neg/1": (a) => R.sub(0, a),
+  "Elixir.BeamLisp.Num/neg/1": (a) => R.neg(a),
   "Elixir.BeamLisp.Num/lt/2": R.lt, "Elixir.BeamLisp.Num/gt/2": R.gt,
   "Elixir.BeamLisp.Num/le/2": R.le, "Elixir.BeamLisp.Num/ge/2": R.ge,
   "Elixir.BeamLisp.Num/num_eq/2": R.numEq,

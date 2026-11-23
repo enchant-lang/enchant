@@ -1,0 +1,35 @@
+(ns perf.emitted-definition-cost-test)
+
+;; Publishing the definitions of loaded SDK namespaces (`Env/mark_emitted`) is
+;; part of loading every namespace. This times a full republication of the CLI
+;; namespaces and checks the receipts still decode to the same data.
+
+(def ^:private namespaces ["bl.cli" "build" "vm.native" "bl.util"])
+
+(defn- republish [ns]
+ (BeamLisp.Env/with_env :global
+  (fn [] (BeamLisp.Env/mark_emitted ns (BeamLisp.Emit/module_for ns)))))
+
+(defn- best-ms [f]
+ (Enum/min (Enum/map (range 5)
+  (fn [_] (let [t (erlang/monotonic_time :microsecond)]
+           (f)
+           (/ (- (erlang/monotonic_time :microsecond) t) 1000.0))))))
+
+(deftest republishing-cli-definitions
+ (Enum/each namespaces (fn [ns] (BeamLisp.Loader/ensure_loaded ns)))
+ (let [total (Enum/reduce namespaces 0.0
+              (fn [ns acc] (+ acc (best-ms (fn [] (republish ns))))))
+       definitions (Enum/reduce namespaces 0
+                    (fn [ns acc] (+ acc (Enum/count (BeamLisp.Env/ns_defs ns)))))]
+  (println "EMITTED-DEF-COST best-of-5 total-ms" total "definitions" definitions)
+  (is (> definitions 0))
+  ;; The decoder still hands back a derived receipt for a published definition.
+  (let [ns "bl.util"
+        name (Enum/at (Map/keys (BeamLisp.Env/ns_defs ns)) 0)
+        row (BeamLisp.Env/lookup (tuple :emitted_definition ns name))
+        data (BeamLisp.Env/emitted_definition_data (elem row 1))]
+   (is (= :ok (elem row 0)))
+   (is (map? (:execution data)))
+   (is (not (:deferred (:execution data))))
+   (is (contains? #{:bound :unavailable} (:status (:execution data)))))))

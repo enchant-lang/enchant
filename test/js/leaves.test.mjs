@@ -24,7 +24,7 @@ test("the leaf table loads (no key is defined twice)", async () => {
 test("no leaf key is spelled twice in the leaf sources", () => {
   const seen = new Map();
   const dups = [];
-  for (const f of ["leaves.mjs", "host-leaves.mjs", "lazy.mjs"]) {
+  for (const f of ["leaves.mjs", "host-leaves.mjs", "portable-leaves.mjs", "lazy.mjs"]) {
     const src = fs.readFileSync(path.join(dir, f), "utf8");
     const lines = src.split("\n");
     lines.forEach((line, i) => {

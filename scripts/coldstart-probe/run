@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Where a cold `bl run` spends its time, without editing the SDK.
+#
+#   scripts/coldstart-probe/run BL_BINARY OUT_DIR [sampler|stacks|callcount|plain]
+#
+# BL_BINARY is an SDK selection's bin/bl (or any bl). Each probe is an Erlang
+# module started through ERL_AFLAGS `-s`, so the SDK is not touched:
+#   sampler    every ~1 ms, the stack of every running process is sampled; the
+#              file holds own-time and inclusive counts per function
+#   callcount  call counts of every Elixir.BeamLisp.* function (local too)
+#   plain      wall time of `bl --cold run` of (println 1), as the baseline
+# Needs erlc: ERLC=/nix/store/...-erlang-29.../bin/erlc (nix build .#erlang). Run it under `work run`, one VM at a time, and compare before/after on the
+# same binary pair. Summarize sampler output with `summarize`.
+set -euo pipefail
+bl=${1:?bl binary}; out=${2:?output dir}; mode=${3:-sampler}
+here=$(cd "$(dirname "$0")" && pwd)
+mkdir -p "$out"; cd "$out"
+"${ERLC:-erlc}" -o "$out" "$here/sampler.erl" "$here/callcount.erl" "$here/stacks.erl" >/dev/null
+echo '(println 1)' > "$out/probe.bl"
+case "$mode" in
+  plain)
+    t0=$(date +%s%6N); "$bl" --cold run "$out/probe.bl" >/dev/null; t1=$(date +%s%6N)
+    echo "plain_ms $(( (t1-t0)/1000 )) $(uptime)" ;;
+  sampler)
+    PROBE_MS=1 PROBE_OUT="$out/sampler.term" ERL_AFLAGS="-pa $out -s sampler start" "$bl" --cold run "$out/probe.bl" >/dev/null ;;
+  stacks)
+    PROBE_OUT="$out/stacks.term" ERL_AFLAGS="-pa $out -s stacks start" "$bl" --cold run "$out/probe.bl" >/dev/null ;;
+  callcount)
+    PROBE_OUT="$out/callcount.term" ERL_AFLAGS="-pa $out -s callcount start" "$bl" --cold run "$out/probe.bl" >/dev/null ;;
+  *) echo "mode: sampler|stacks|callcount|plain" >&2; exit 2 ;;
+esac

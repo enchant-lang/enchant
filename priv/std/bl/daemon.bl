@@ -41,12 +41,31 @@
   (let [f (env/find cwd)]
     (if (some? f) (Path/dirname f) (Path/expand cwd))))
 
+(def ^:private vm-owned-environment
+  "What the RUNNING VM owns: which image it is, which checkout it serves. A warm
+   request carries the CLIENT's environment, and must not change these — a client
+   that could relabel `BL_ROOT`/`BL_EBIN` could make a command believe (and load)
+   a different image. They are also not tombstoned when the client does not send
+   them: the checkout launcher exports them on the process that BOOTS the VM, not
+   on the attach client, so tombstoning removed them from every warm request —
+   which is how `seed_runtime_abi_test`'s floor-ebin fell back to `<root>/build`
+   and failed on a checkout without one. The VM's own values are the truth here."
+  ["BL_ROOT" "BL_EBIN" "BL_SDK_PRODUCT" "BL_SDK_INPUTS" "BL_BUILD_ID"
+   "BL_CHECKOUT_ROOT" "BL_CHECKOUT_GENERATION" "BL_CHECKOUT_SDK_INPUTS"
+   "BL_CHECKOUT_SOURCE_GENERATION" "BL_PREPARED_NATIVES" "BL_ARTIFACT_PLATFORM"
+   "BL_BIN"])
+
 (defn- client-environment [os-env]
   ;; A full request environment must hide variables present only at daemon boot.
-  ;; Keep with-env's partial-overlay API; supply explicit deletion tombstones here.
-  (reduce (fn [result key]
-            (if (contains? result key) result (assoc result key nil)))
-          (or os-env {}) (keys (erlang/apply :Elixir.System :get_env (list)))))
+  ;; Keep with-env's partial-overlay API; supply explicit deletion tombstones here
+  ;; — except for what belongs to the VM itself (see `vm-owned-environment`).
+  (let [owned (set vm-owned-environment)]
+    (reduce (fn [result key]
+              (cond
+                (contains? owned key) (dissoc result key)
+                (contains? result key) result
+                :else (assoc result key nil)))
+            (or os-env {}) (keys (erlang/apply :Elixir.System :get_env (list))))))
 
 (defn handle-in-vm
   "Route one client command THROUGH its project's realm.

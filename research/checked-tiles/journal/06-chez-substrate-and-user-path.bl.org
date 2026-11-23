@@ -121,6 +121,151 @@ The Rust client now keeps a content digest per physical path, together with the 
 
 The SDK build for these checks failed at first because the build station's disk was full: 1.8 GB free of 476 GB. =nix-store --gc --max-freed 60G= removed 2,766 dead store paths. No GC roots or project files were touched.
 
+* The warm request floor, measured end to end
+A warm =./bin/bl run= of =(println 1)= in a checkout measured 47-68 ms, median
+50.7 ms, over 20 runs at load average 14.5 on 16 cores. Through an installed
+drop it measured 108.9 ms median at the same load (a release launcher, no
+engine capture; its VM predates batch 15, so it is a comparability note, not the
+same measurement). Every number below comes from the checkout path.
+
+The split needed three instruments: timing marks in a scratch copy of the
+client; =strace= on =connect=/=sendto=/=recvfrom= for the client-visible round
+trip; and probes compiled into the warm VM (=u9_wall.erl= call/return
+timestamps, =u9_procs.erl= spawn/exit tracing, and a 1 ms =u9_sampler.erl=
+runner, adapted from =ab_sampler.erl=). The checkout client and realm are
+reproduced without building an SDK by a scratch root whose =current-sdk= points
+at an existing SDK and whose preparation lock is held, so the client reuses it
+(=BL_SDK_REUSE_CURRENT=1=). Evidence: =research/checked-tiles/evidence/warm-floor-u9.json=
+and =.../evidence/u9-warm-floor/=; probes in =research/substrate-ab/floor/u9/=.
+
+| Part | Median | Recomputed each request? |
+|---|---|---|
+| client shell → launcher exec | 3.0 ms (4.96 measured, less three =date= forks) | fixed |
+| launcher start + digest cache read | ~3 ms | fixed |
+| engine capture: 976 files verified by stat stamp | 22.8 ms | yes, content fixed |
+| project generation: =env.bl=, realm manifest, recorded sources | ~11.1 ms | yes, content fixed |
+| connect + hello/ready handshake | 1.2 ms (0.11 + 1.07) | yes |
+| request → first stdout (the VM handler) | 11.4 ms | yes |
+| result and cleanup: first → second stdout | 3.1 ms | yes |
+| exit frame + client exit | 0.8 ms | yes |
+| =/bin/true= for comparison | 0.98 ms | — |
+
+The engine capture is the single largest client cost: 22.8 ms with the digest
+cache and 243 ms without it. Project generation is the remainder of the 34 ms
+the client spends before it connects. The request frame is 10,711 bytes,
+because it carries the client's whole environment (91 variables).
+
+Inside the VM the handler is 13.6 ms inclusive (=request-handler/2=, 20
+requests, load 6.9-11.6 with call tracing on). Overlapping inclusive rows show
+where it goes:
+
+| VM part | Per request |
+|---|---|
+| =run-command/5=, spawn child + wait | 12.1 ms |
+| =handle-in-vm/3= | 11.1 ms |
+| =Bl.Cli/cmd-run= → =BeamLisp/run_file= → =Compiler/eval_string= | 5.1 → 4.3 → 4.2 ms |
+| =Vm.Realm/open/2= (idempotent, but reads =env.bl= and takes the lifecycle lock) | 2.4 ms |
+| 5 =Refs/spawn_owned= starts (10 traced rows; /3 delegates to /4), ~0.65 ms each | 3.4 ms |
+| =Vm.Io/start-with-send= + heartbeat spawn | 1.3 ms |
+| =Execution/register!= ×5.25, =release_eval_module!=, lock waits | ~3 ms |
+| =Vm.Wire/decode= | 0.12 ms |
+| =client-environment= (91 tombstones) + 58 =SeqCursor.new/1= | 0.5 + 0.8 ms |
+
+The request path spawns about ten processes per request: five owned starts (each wrapping an inner worker) plus compile workers. The 1 ms sampler found
+a running process in 94 of 364 ticks over 20 requests (26%); its top self frame
+is =SeqCursor:new/1= (20 samples), from lazy =concat=/=map= in the request path.
+A changed user file costs about 1.5-2 ms more in the VM (handler 15.8 vs 13.6
+ms); in the client total it is inside the noise.
+
+Three removals, largest first:
+
+1. *Cache the tree's generation outside the request process.* The engine and
+   project generations are content-fixed and recomputed on every command: 34
+   ms, two thirds of the floor. A per-tree resident (inotify, or the realm's own
+   directory records plus the digest cache) answers them from one token:
+   50.7 → about 17 ms.
+2. *One request, one process.* Run the command in the connection process with a
+   realm handle opened once per generation, write to the socket directly, start
+   the heartbeat only past a threshold, return on the same connection, and skip
+   custody registration for an unchanged module set (U4's target): the 9 spawns,
+   =realm/open=, the proxy and heartbeat, and the registration cost are 11 ms of
+   the 13.6. VM handler ≈ 2-3 ms.
+3. *Compact, keep-alive request.* A persistent connection removes connect+hello
+   (1.2 ms). Sending argv, cwd and an environment generation instead of 91
+   variables removes a 10 KB frame, its validation and the 58 lazy cursors. A
+   user file cached by source hash turns =run_file= + =eval_string= (4.3 ms)
+   into a call; changed files still pay their 2 ms compile.
+
+With all three, 1.5-2 ms is reachable: ~1 ms of process exec for a small
+launcher, 0.1-0.3 ms for one AF_UNIX round trip, and ~0.5-1 ms of BEAM work with
+no spawn and no realm lookup. Going below 1 ms needs the client not to be a new
+process per command (a resident client) and a smaller launcher than the shell
+script plus =dirname=/=readlink=; the irreducible part is one scheduling hop,
+one socket round trip and the print.
+
+* The warm floor, 34 ms removed
+The two content-fixed client costs — the engine inventory (22.8 ms, 976 files
+verified by stat stamp) and the project generation (~11 ms) — were recomputed on
+every command. A per-tree resident now answers them. It is started by the first
+client that misses it (`drop-launcher --generation-service ROOT`, detached) and
+is optional: `BL_CHECKOUT_GENERATION_SERVICE=0` disables it, and every failure is
+a fallback to the same local computation.
+
+The resident is the authority for "did the tree change", backed by the kernel.
+It watches the engine tree, the project tree and the extra roots with inotify;
+an `L` file's parent and every `D` directory the realm's manifest recorded are
+watched too, so a new candidate or an edited loaded file is an event. Every
+answer drains the queue immediately before replying; any event invalidates the
+affected scope, and the scope is recomputed — never guessed. Watches are
+installed before a computation, so an event during it turns the answer into a
+fallback. `IN_Q_OVERFLOW`, a failed watch, a replaced root (dev+ino change) and
+a non-local filesystem (the `statfs` magic is checked) all yield `fallback`.
+The tokens are produced by the same `checkout_generations()` the client uses, so
+a cached and a local answer are byte-identical (unit test). The realm stays the
+authority for retirement: it holds the token it was opened against and retires
+when the client's differs.
+
+Measured with the branch's launcher on the `/tmp/u9root` harness, load average
+6.6 on 16 cores, 20 runs: baseline (service off) median 43.1 ms; warm service
+median 16.9 ms — 26.2 ms removed. The phase marks show the mechanism: a service
+query is 340 µs, the local computation it replaces is 26.2 ms. An edit to a file
+the realm recorded retires it (stored generation and env ref change; the next
+run prints the new value); an edit to an unrelated file keeps every token; a
+new file appearing in a recorded search directory changes the project token.
+`cargo test` passes everything it passes on main (the two `builder_tests`
+native-publication failures need store custody this sandbox lacks). The gate:
+the ten realm/seed/JS files 10/10 forward, reversed and forward again,
+`loader_sources_test` 43 and `loader_sources_realm_test` 4, `seed_runtime_abi`
+11/11 warm twice, `warm_request_env` 3, and the helper-edit scenario.
+Evidence: =research/checked-tiles/evidence/warm-floor-u10.json=.
+
+The first cut of the resident failed in a real checkout, and the reasons are
+worth keeping. It watched the WHOLE checkout root recursively, so a real tree
+(research/, .git, generated trees) put the first answer seconds past every
+client timeout; a manifest `D` line was watched through its PARENT, so a
+recorded search root under /tmp made /tmp watched and unrelated temp traffic —
+including the resident's own debug log, which it had put in /tmp — invalidated
+the project pin on every answer; and there was no single-instance lock, so two
+clients could each start a resident. The fixed plan watches the engine policy's
+roots recursively, the checkout root and project root non-recursively, the
+declared/extra roots and `overrides/` recursively, and manifest entries (a `D`
+directory itself, an `L` file's parent), capped at 20,000 watches. Recorded
+inputs that no longer exist are not watched through a shared ancestor; they are
+stat'd once per answer, so their reappearance invalidates without /tmp noise.
+One resident per root is held by an `flock` on `<socket>.lock`, and the winner
+unlinks a stale socket instead of serving it. On a scratch copy of main
+(engine and project trees only, load 6.9): warm `run` 55.7 ms with the service
+off, 18.7 ms with it on (−37 ms); a warm direct probe to the socket answers in
+0.27 ms; two simultaneous starts leave exactly one resident; the ten files pass
+in three orders on that copy, seed_runtime_abi passes warm twice, and the
+helper-edit scenario is green.
+
+What remains for 1 ms is the VM side: the handler is still 13.6 ms, of which
+about 10 ms is per-request process spawning, the re-opened realm and custody for
+unchanged modules, and the rest is re-evaluating the user file. The next two
+removals are the VM's one-request-one-process path and a compact keep-alive
+request.
+
 * Text and tuple leaves on Chez
 The profiler now also charges anonymous frames to the nearest named frame and records leaf ← caller pairs. 56% of leaf samples had been anonymous closures. With that attribution, the hot leaves are host primitives:
 | Leaf ← caller | Samples (of ~8,100) |
@@ -292,3 +437,84 @@ Measured end to end on the build station: a compiler-key rotation built the whol
 
 * Images that outlive their ancestors
 Candidate and derived images linked each unchanged file to the previous image's path, so a chain of scratch images held every later image up; removing old scratch broke the current one. Links now name the resolved file, and the image matching =main= lives in =research/native-seed/out/chez-main= (21 MB of its own files beside the root image).
+
+* Where a cold start goes
+
+Card U5, measurement only; no runtime code changed. The installed =bl= (the 2026-10 build =f5ee4ce9=, erts-17.0.1) was run as =bl --cold run y.bl= from a scratch directory, where =y.bl= prints =erlang/statistics :wall_clock= and =erlang/system_time= in its first form and then =(println 1)=. The checkout =bin/bl= was not run, because main moves and it would have started preparing an SDK. Raw data and the method are in =research/checked-tiles/evidence/cold-start-phases.json=.
+
+Total wall time of nine cold runs, with =uptime= load, was 3.77–4.25 s in seven of them (median 3.86 s, load 3.2–4.8). The two slow runs, 11.7 s and 14.5 s (load 3.2 and 5.3), were the first command of their batch after other work had used the machine. The 7.6 s that was reported earlier falls between the two regimes. Client to VM start is 25 ms, the first user form is reached 3.72–4.12 s after VM start, and the VM is gone 25 ms after it.
+
+Phase split, from three repeats of a =strace -f --seccomp-bpf -e trace=openat,execve= run (the filter keeps tracing cost small: 4.27 s traced against 3.77–4.12 s untraced), with the =init_debug= run for the boot mark. Machine load was about 10 for these three (=uptime=: 10.4, 9.6, 9.6), so they are slower than the table of totals above; the lower-load reference run is in the JSON.
+
+#+begin_rosetta
+Phase (ends at a file-open landmark, not a function) | Median of 3 | Reference, load 3.9
+1. client chain to =beam.smp= exec | 50 ms | 42 ms
+2. erts boot to =init_debug= =started= (kernel, stdlib, elixir) | 168 ms | 129 ms
+3. eval compile of =start_app!= and ~40 dependency apps | 233 ms | 130 ms
+4. =:beam_lisp= app start (Env, Loader, language init, owner registry) | 2,102 ms | 1,306 ms
+5. post-start: =vm.native= load and =build-all! | 2,184 ms | 1,498 ms
+6. loading the namespaces =bl.cli= needs (Release to Substrate) | 794 ms | 667 ms
+7. =bl.cli= to the user file | 595 ms | 531 ms
+8. user form, =println=, exit (exit ≈25 ms in the timed runs) | 19 ms | 10 ms
+Total | 6,077 ms (r1 23.2 s, r2 5.3 s, r3 6.1 s) | 4,271 ms
+#+end_rosetta
+
+What this says:
+
+- Phases 1–3, the client, erts and the dependency applications (ssh, ssl, inets, bandit, req and the rest), are 0.3–0.45 s together, under 8%. Starting those apps lazily, or putting the erts boot into a release boot script, can win at most that.
+- Phases 4 and 5 are 65–70% of every run. The 40 dependency apps are loaded and started before phase 4 begins; phase 4 is =BeamLisp.init/0= and its seed-tier loading, with the Erlang compiler (=compile=, =beam_ssa*=, =beam_asm=) being loaded at about +1.2 s into the VM, so something compiles during start.
+- Across 4–7 the VM reads the whole SDK =priv= tree again and again: about 2,800 =.bl= files plus the native =.so=, =precompiled.term= (opened 8 times), =codegen.sources= and =libz3=. Each run has 12–17 bursts of more than 20 files, 2–4 of which read 1,100–2,800 files in 216–358 ms. All bursts together are 1.5–1.7 s per run, about 35% of the run. From the source (=aot.bl= =sdk_runtime_inventory_uncached!=, =env.bl= =retain_sdk_runtime!= and =prepare_sdk_class!=) these are the SDK inventory and source-digest walks. That link is read from code, not traced.
+
+Not measured: time per function inside phases 4 and 5. That needs an SDK edit or a profiler inside the VM. =perf= is not installed, and Elixir's Logger removes the OTP default handler when it starts, so two attempts at =application_controller= progress reports after =elixir= returned nothing.
+
+** Proposal for the largest phase
+
+Phases 4 and 5 with the repeated priv sweeps are the target; nothing smaller is worth doing first.
+
+1. Walk the SDK inventory once per VM. For an image under =/nix/store= or a drop directory, whose bytes are immutable by identity, take the digest and receipts from the sealed manifest and skip re-reading source files; keep the full walk for mutable checkouts. Expected effect: the 1.5–1.7 s of sweeps shrinks to one 80–100 ms read (the first sweep, which reads 666 files), so a cold run drops from about 4.3 s to about 2.9 s at load 4, and from 6.1 s to about 4.5 s at load 10. This is an estimate from the sweep durations measured above, not a result.
+2. Then measure phases 4–5 inside the VM (=eprof=/=fprof= started by a =-s= module through =ERL_AFLAGS=, or =+JPperf true= with =perf=) before choosing between seeding the language from a stored term and pre-compiling what is compiled at start. Do not decide that from this table.
+3. A pre-started VM per SDK would hide the whole 4 s from the first request, but the persistent VM already does that for the second request, and it costs 150–400 MB resident per SDK. A boot script, a release or lazy dependency starts cannot pay for themselves: phases 1–3 total 0.3–0.45 s.
+
+* U6: the SDK inventory, verified once
+
+The U6 card carried out the U5 proposal. Counting calls first changed its size. A cold =bl run= retains the SDK runtime three times on the current store SDK (four on the older drop), and each retention walks the sealed inventory: =retain_sdk_runtime!=, =runtime_sdk_entries!= and =sdk_runtime_inventory_uncached!= each ran 3 times. =precompiled.term= is opened once per restored unit (2–3 times), not once per walk. The U5 claim that repeated reads were 1.5–1.7 s was too large: a repeated walk of an unchanged image costs about 100 ms warm, and of that, hashing files is about 3.5% and disassembling the two kernel modules (=Rt=, =Body.Rt=) about 17% by eprof. The first walk is the expensive one, because it decodes each artifact.
+
+What changed, in =env.bl=, =aot.bl= and =package_authority.bl=:
+
+- =Env/sdk_file_digest!= hashes an SDK image file once per VM. For a path under =/nix/store/= (content-addressed, read-only) the first complete hash stands for the VM. For any other image it stands only while the file's size, mtime, ctime, inode and device are unchanged and were already 3 s old when hashed, so a rewrite in the same clock second is never trusted. The caller still compares the digest with the sealed row, as it compared its own hash before. No caller supplies a digest.
+- =Env/sdk_image_metadata_at!= returns an artifact's decoded metadata without re-reading it when its file digest equals the sealed row's and it was already decoded in this VM. =image_sdk_entry!=, =sdk_source_current?=, =sdk_declaration_evidence!= and the source check in the inventory cache use these.
+- =kernel_factory_origins!= memoizes the disassembly of the two kernel adapter modules by module, MD5, digest of the bytes and the MD5 of the decoding modules. The object code is still read and MD5-checked on every walk.
+- =sdk_kernel_primitive_routes!= builds the preloaded-module set once instead of once per row.
+
+Loaded code is still compared by MD5 with the sealed row on every retention, so executable authority is as before. The sealed manifest is the same authority the walk had: a file counts only when sha256 of its actual bytes (or loadable Source text) was computed in this VM and matched the row.
+
+Measured in the checker on the store SDK image, three repeats per side at load 4–8: a warm =sdk_runtime_inventory!= takes a median of 118 ms before and 98 ms after (−17%); under eprof the same walk is 188 ms before and 118 ms after. On a real cold start the same sampler that produced the U5 split gave, over three runs of the unchanged store SDK (3.5–3.65 s), =crypto:hash_update= 8.8% of running samples, file reads 5.9%, stats 4.6%, directory listings 4.0%, =code_server:call= 10.2% and =gen:do_call= 11.2%. Most hashing is attributed to =image_sdk_entry!= and =sdk_image_metadata!=, so repeated walks 2 and 3 should save roughly a third to a half of the hashing and reads: an estimate of 0.2–0.3 s of 3.5 s, not a measurement. The cold-start result after the change needs an SDK build of this branch; =scripts/coldstart-probe/run= is the measurement.
+
+Left as it was, with its share of running samples: =Emit.collect_execution_entries= 9.6% (ANF execution entries per namespace), =seed_artifact_metadata!= 6.7% (first-time decode of 95 seeds), =Loader.find_file= 5.2%, =compile_sdk_source!= 3.5%. These, not the repeated walks, are where the remaining cold start goes. Evidence: =research/checked-tiles/evidence/cold-start-u6.json=.
+
+* U7: the hot spots U6's sampler found
+
+Stack samples of two cold runs of the unchanged store SDK (2,242 running samples) gave these inclusive shares: =collect_execution_entries= 7.4%, =seed_artifact_metadata!= 5.2%, =compile_sdk_source!= 3.1%, =find_file= 2.3%. Each was run down.
+
+- =Emit.collect_execution_entries= ran for every published definition (1,438 in a cold start) and walks its ANF to build a receipt that only publication inspection reads. =emitted_definition= now stores =(:deferred true :namespace :name)= and =emitted_definition_data=, the row's single decoder, derives the receipt through the same function from the same entries and body hashes. =system.publication= already recomputed the receipt and used it only when the row's entries equalled the live ones, so the derivation is as authoritative as before. A full republication of 157 definitions (bl.cli, build, vm.native, bl.util) takes 69–71 ms before and 15–16 ms after, three repeats each, checker on the store SDK image. A cold start publishes 1,438 definitions, so the saving is about 0.25–0.5 s of 3.5 s; that is an estimate until a built SDK is measured. 37 test files (2,137 assertions) pass with the same three environmental errors as the unchanged tree.
+- =compile_sdk_source!= compiles nothing on an unchanged SDK. It stages and admits library Sources. The only =compile:forms= work is seven native host stubs, 14 =compile_descriptor= calls and about 0.5% of samples; their bytes embed the physical =.so= path, so the producer cannot seal them. The 782 ms "native bootstrap" seen in the checker is an artifact of edited hosts changing the compiler key (primed declarations miss); on the real SDK it is 1.2%.
+- Batch loading does not pay. A =-s= module that batch-loaded the 369 modules of a recorded cold run with =code:ensure_modules_loaded= took 116–183 ms and left the cold run unchanged (3,283 / 3,547 / 3,360 ms against 3,313 / 3,479 / 3,340 ms). Loading is about 4% of a cold start; most of the 21% =code_server:call= and =gen:do_call= own time is a process parked in =receive= that =process_info= reports as running. The sampler's own-time column should not be read for waiting frames.
+- =find_file= (2.3%) could only be memoized with a stat of every earlier search directory, so about 1% at best. The sealed seed-metadata table (5.2%) needs a producer change and an immutable-root reader, and cannot be measured in the checker; it is recorded as deferred in the roster.
+
+Evidence: =research/checked-tiles/evidence/cold-start-u7.json=. The cold-namespace-load test in the checker varied 376–866 ms with machine load 4–13 and could not resolve a change this size; the isolated republication test did.
+
+* U8: the producer seals the seed proofs
+
+Decoding a seed is pure work over sealed bytes: read them, sha256, BEAM MD5, chunks for imports and role, ctor and lambda origins, and for shims a disassembly of the forwarding routes. A cold start did that for the seeds it loads (5.2% of running samples in U7's sampler). The bytes cannot change under an immutable image, so the producer now derives the same rows once in =do-prime= and writes =priv/seed-metadata.term= (105 rows, 716 KB, deterministic).
+
+The reader checks three things and then uses the row: the table and seed directory are both under =/nix/store= (a checkout or writable drop decodes as before); the table names this compiler key and the MD5 of the AOT module that derived the rows; and each row's digest equals the manifest's digest for that seed, which is the same string the decode compares with the file's sha256, plus the proof's own =:sha256=. Every row's proof is its own term, so reading the table (8.3 ms) does not decode proofs for seeds a VM never loads. What the reader stops doing is re-demonstrating that the proof is a function of the bytes; in a sealed image that demonstration is the publisher's, and the executable checks are unmoved: =seed_artifact_proof= still compares the proof's MD5 with the live module, and forwarder rows still pass =Env/sdk_forwarder_current?= against published native routes.
+
+Measured in the checker on the store image (load 10-22): deriving all 105 proofs 231-311 ms; reading the table 8-9 ms; taking all 105 rows 53-73 ms. That is about 2.4 ms to derive a seed against about 0.5 ms to take its row, so a cold start that loads ~95 saves roughly 175 ms of 3.4 s. The end-to-end figure needs a built SDK: run =scripts/coldstart-probe/run= before and after, and the =seed_metadata_table_test= (447 assertions: every sealed row equals the in-VM decode term for term) with the seed/publication/env tests on the built image.
+
+Evidence: =research/checked-tiles/evidence/cold-start-u8.json=.
+
+** Built-SDK check: the floor is compiled, the table is read
+
+The first built-SDK gate reported =seed_metadata_table= undefined and a keyword-call error. The undefined half is explained by the floor: a compiler generation's =seed/produce-artifacts= compiles every =priv/host/*.bl= from current source into the produced floor, and =nix/bl-drop= installs that seed, so a new AOT function reaches a built SDK without regenerating the committed =priv/bootstrap/seed= (which still carries the old AOT). The two SDKs built from batch-12 sources, =6vsqnc…= and =wf7s1q…=, have =seed_metadata_table=, =prime_seed_metadata!= and the reader in =image/ebin=, and a 139-row =priv/seed-metadata.term= whose =:decoder= equals the image AOT MD5. On =6vsqnc…= the seed tests pass: =seed_metadata_table_test= 588 (including a new case that asserts a built image reads the sealed table, decoder and Core row), =perf/seed_metadata_cost_test= 2, =seed_publication_test= 227. No manual regeneration is needed; doing it would rotate the compiler key for every cache. The keyword-call error was not reproduced in any configuration tried (new SDK, old SDK with the checker's host overlay, the batch-12 integration tree with the batch-12 SDK, the whole seed suite in one VM); the stack was requested.
+
+Paired cold runs at load 23–27, alternating, four pairs: the previous SDK (zzblkn) 3,902 / 4,242 / 3,280 / 3,203 ms, median 3,541; the U8 SDK (6vsqnc) 2,770 / 2,561 / 2,648 / 2,583 ms, median 2,616, about 26%. That pair spans U6, U7, U8 and batch 11/12, so U8's own share is the seed rows only (about 0.2 s from 2.4 ms to 0.5 ms per seed).
