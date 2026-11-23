@@ -1,0 +1,79 @@
+; Card N2b: the constructor kernel's custody, as data, for the native front end.
+;
+;   bl --cold run research/native-seed/front-end/kernel.bl -- OUT/kernel.etf [NAMESPACE ...]
+;   bl run research/native-seed/front-end/kernel.bl -- OUT/kernel.etf --augment EARLIER.etf
+;
+; On the BEAM, AOT/prepare_unit installs a private constructor kernel from
+; seed beams (manifest, core seed rows, phase libraries for core and sugar)
+; before it stages a unit. None of that is computable on Chez: it reads beam
+; chunks and loaded-code proofs. Preparing one unit here with call tracing on
+; host.aot's constructor_context_put!/2 records what the kernel installs into
+; the context. The kernel values (BEAM funs) travel as their names only; the
+; native image answers them from its own core. Writes one term_to_binary map.
+(ns native-front.kernel)
+
+(def kernel-keys #{:kernel-manifest :kernel-phase-identity :kernel-phase-providers :kernel-phase-state
+                   :core-rows :cpp-rows :kernel-values :kernel-core-forwarder})
+
+(defn- collect [acc]
+ (receive
+  [:trace _ :call [_ _ args]]
+   (let [key (first args) value (second args)]
+    (recur (if (and (contains? kernel-keys key) (not (Map/has_key? acc key))) (Map/put acc key value) acc)))
+  [:nf-done from] (erlang/send from (tuple :nf-kernel acc))))
+
+(defn- fun-paths
+ "Paths of every fun inside x (the native side cannot decode them)."
+ [x path]
+ (cond (erlang/is_function x) [path]
+       (erlang/is_map x) (mapcat (fn [p] (fun-paths (elem p 1) (conj path (elem p 0)))) (Map/to_list x))
+       (erlang/is_list x) (mapcat (fn [p] (fun-paths (second p) (conj path (first p)))) (map-indexed (fn [i v] [i v]) x))
+       (erlang/is_tuple x) (fun-paths (Tuple/to_list x) path)
+       :else []))
+
+(defn- prepare [namespace]
+ (let [root (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
+       index (Jason/decode! (File/read! (Path/join (System/fetch_env! "BL_UNIT_STORE") "unit-index.json")))
+       file (Path/join root (get-in index ["units" namespace "file"]))
+       workspace (BeamLisp.AOT/open_workspace
+                  {:version 2 :phase-imports (list 'core 'sugar) :roots (list root)
+                   :sources (list {:namespace (symbol namespace) :file file})} {})]
+  (try (BeamLisp.AOT/prepare_unit workspace (symbol namespace))
+   (finally (BeamLisp.AOT/close_workspace! workspace)))))
+
+(defn- with-cpp-rows [kernel]
+ ;; Core's seed C++ alias rows, read from the seed exactly as the constructor
+ ;; does when no context is open (host.aot's privates are exported).
+ (if (:cpp-rows kernel) kernel (assoc kernel :cpp-rows (BeamLisp.AOT/constructor_kernel_alias_rows!))))
+
+(defn run [[out & namespaces]]
+ (if (= "--augment" (first namespaces))
+  ;; Add what a newer stage.bl reads to an earlier capture, without tracing.
+  (let [kernel (with-cpp-rows (erlang/binary_to_term (File/read! (second namespaces))))]
+   (File/write! out (erlang/term_to_binary kernel))
+   (println (str "KERNEL augmented -> " out " keys " (pr-str (sort (keys kernel))))))
+  (run-traced out namespaces)))
+
+(defn- run-traced [out namespaces]
+ (let [tracer (erlang/spawn (fn [] (collect {})))
+       mfa (tuple :Elixir.BeamLisp.AOT :"constructor_context_put!" 2)]
+  (erlang/trace_pattern mfa true (list :local))
+  (erlang/trace (erlang/self) true (list :call (tuple :tracer tracer)))
+  ;; clojure.walk installs the kernel; formal.identity also reads Core's
+  ;; seed C++ alias rows (cpp/…).
+  (try (doseq [namespace (or (seq namespaces) ["clojure.walk" "formal.identity"])] (prepare namespace))
+   (finally
+    (erlang/trace (erlang/self) false (list :call))
+    (erlang/trace_pattern mfa false (list :local))))
+  (erlang/send tracer (tuple :nf-done (erlang/self)))
+  (let [kernel (receive [:nf-kernel k] k)
+        values (Map/get kernel :kernel-values {})
+        kernel (with-cpp-rows (assoc kernel :kernel-values (sort (Map/keys values))))]
+   (doseq [p (sort-by #(elem % 0) (Map/to_list kernel))]
+    (let [k (elem p 0) v (elem p 1)]
+    (println (str "KERNEL " k " bytes " (erlang/byte_size (erlang/term_to_binary v))
+                  " funs " (pr-str (take 5 (fun-paths v [])))))))
+   (File/write! out (erlang/term_to_binary kernel))
+   (println (str "KERNEL -> " out)))))
+
+(run (vec (BeamLisp/argv)))

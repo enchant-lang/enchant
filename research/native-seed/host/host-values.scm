@@ -133,8 +133,19 @@
      (if (= order 0) (loop (+ index 1)) order)))))))
 ;; Same-kind cases first, in observed frequency order; each returns exactly
 ;; what the ranked comparison returns for that pair. Everything else ranks.
+;; A non-text binary is a host byte value #(bytes BYTEVECTOR) (ETF leaves,
+;; crypto digests): equal and ordered by its bytes, as BEAM binaries are.
+(define (native-byte-value? x) (and (vector? x) (fx= (vector-length x) 2) (eq? (vector-ref x 0) 'bytes) (bytevector? (vector-ref x 1))))
+(define (native-compare-byte-values a b)
+ (let* ((x (vector-ref a 1)) (y (vector-ref b 1)) (n (bytevector-length x)) (m (bytevector-length y)))
+  (let loop ((i 0))
+   (cond ((and (fx= i n) (fx= i m)) 0) ((fx= i n) -1) ((fx= i m) 1)
+    ((fx< (bytevector-u8-ref x i) (bytevector-u8-ref y i)) -1)
+    ((fx> (bytevector-u8-ref x i) (bytevector-u8-ref y i)) 1)
+    (else (loop (fx+ i 1)))))))
 (define (bl-key-compare a b)
  (cond ((eq? a b) 0)
+  ((and (native-byte-value? a) (native-byte-value? b)) (native-compare-byte-values a b))
   ((symbol? a)
    ;; Two keywords: one name fetch and one first-character test per side, in
    ;; place (the same order as before: names compared after the shared colon).
@@ -875,6 +886,7 @@
          (let loop ((i 0))
           (if (fx= i k) (fx= n m)
            (and (bl-equal? (vector-ref a i) (vector-ref b i)) (loop (fx+ i 1)))))))
+       ((and (native-byte-value? a) (native-byte-value? b)) (bytevector=? (vector-ref a 1) (vector-ref b 1)))
        (else #f)))
 
 ;; $blfn is compiler data: {:$blfn {arity -> closure} {minimum closure}|nil}.
