@@ -95,6 +95,14 @@ whose absence is acceptable with
 old path; the file's first use of `assert_native_framework_execution!` is the
 precedent.
 
+**`BeamLisp.Compiler` is the host facade, not the boot compiler.** The
+public module is `priv/host/compiler.bl` (`host.compiler`, ~25 exports), and
+each function forwards to `BeamLisp.Ns.Compiler` (`priv/boot/compiler.bl`). A
+new boot compiler function is invisible to `BeamLisp.Compiler/...` callers and to
+`function_exported` checks until the facade forwards it (batch 17: U12a's guard
+was always false, so every run compiled; only an SDK-built check showed it).
+Add the forward in the same change.
+
 **A failed SDK preparation's message shows the error chain, not its leaf.** U3
 reports the first three `error:` lines, which for a Nix dependency failure are
 all `Cannot build '<drv>'.` The cause is higher in the same events file, e.g.
@@ -338,6 +346,25 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - The listed units are under 5% and each reason is one of a short enumerated set.
   - Evidence goes in `research/checked-tiles/evidence/native-beam-backend.json`.
 - **SDK build.** Only for the BEAM-side function.
+
+#### N2b 🔨 The front half: source → staged unit → Core on Chez · branch `lane/native-front` (worktree `lane-cerl`)
+- **State (2026-11-23).** The agent stopped on an API balance error (402).
+  Its work is committed as WIP `5897c6e58`:
+  - `research/native-seed/front-end/{stage,hook,custody,compare,trace-unit}.bl`;
+  - 355 lines of data BIFs in `host/native-data-bifs.scm`.
+  The harness evaluates the real `priv/host/aot.bl` staging (`stage-sdk-unit!`,
+  `describe_module`) on Chez, with the BEAM supplying only custody data.
+- **Where it stood.**
+  - Run `e` reached all 118 units, and every one failed with
+    `SDK declaration staging refused` (`:unsupported-sdk-stage-action-macro`).
+  - Runs `f` and `g` crash earlier, in native eval, with a raised map
+    (`.qualify-out/nf-native-g.txt`).
+- **Next.**
+  1. Find why staging sees an action macro on Chez but not on the BEAM. The
+     hooked macro table in `front-end/hook.bl` is the first suspect.
+  2. Then compare descriptors and Core per unit with `compare.bl`.
+- **Done when.** Same as N2's front half: per-unit Core `=` the BEAM's, or a
+  named reason, for under 5% of SDK units.
 
 #### N3 🔒 The native compile service, in shadow mode · S+ (after N2)
 - **Why.** Nothing in `bl` calls the native compiler.
