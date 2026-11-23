@@ -40,10 +40,10 @@ build pipeline. The native compiler comes after a go/no-go measurement (N0).
 
 | Order | Card | Done when |
 |---|---|---|
-| 1 | **F1** One exec to the client | Warm `./bin/bl run` median ≤ 12 ms over 15 runs, load recorded |
-| 1 | **F2** One request, one process | VM handler ≤ 3 ms; client total ≤ 6 ms; ten files and `checkout_transport.py` pass |
-| 2 | **U15** std/lib edits reload in the warm VM | A `priv/lib` edit is seen by the next `bl test` in < 10 s with no SDK |
-| 2 | **K1** Sealed boot state | Cold `$SDK/bin/bl --cold run` ≤ 1.2 s median |
+| ✅ | **F1** One exec to the client (batch 21: 19.4 → 11.5 ms; gate 12 ms at load 21) | Warm `./bin/bl run` median ≤ 12 ms over 15 runs, load recorded |
+| 🔨 | **F2** One request, one process (items 1–3 landed batch 21; item 4 open) | VM handler ≤ 3 ms; client total ≤ 6 ms; ten files and `checkout_transport.py` pass |
+| ✅ | **U15** std/lib edits reload in the warm VM (batch 21: edit seen in 1.0 s, revert 0.86 s) | A `priv/lib` edit is seen by the next `bl test` in < 10 s with no SDK |
+| ✅/🔨 | **K1** Sealed boot state (batch 21: −27%, 3.4 → 2.6 s paired; ≤ 1.2 s needs K1b) | Cold `$SDK/bin/bl --cold run` ≤ 1.2 s median |
 | 3 | **F3** Keep-alive client, compact request | Warm unchanged request ≤ 2 ms on a quiet machine |
 | 3 | **K2** The checkout's cold path | `./bin/bl --cold` adds ≤ 100 ms over `$SDK/bin/bl --cold` |
 | 3 | **M1** A real edit benchmark | Enchant edit-to-result, cold and warm, recorded |
@@ -93,7 +93,7 @@ per batch, and runs the gate tests.** A card is ✅ only after that gate.
 - **Stop VMs you start.** Use `$MAIN/bin/bl realm stop` from the directory
   that started one.
 
-- **Retained worktrees (2026-11-23).** These two are owned by the integrator. `git worktree list` also shows `.claude/worktrees/sdk-lock-wait` (locked) and four `~/projects/enchant-*` worktrees, which are other sessions'; leave them.
+- **Retained worktrees (2026-11-24).** These two are owned by the integrator; the batch-21 lanes are merged and removed. `git worktree list` also shows `.claude/worktrees/sdk-lock-wait` (locked) and four `~/projects/enchant-*` worktrees, which are other sessions'; leave them.
   - `.claude/worktrees/integration`: the gate tree for each batch.
   - `.claude/worktrees/lane-cerl`: branch `lane/native-front`, merged. Its untracked `.qualify-out/` (4.4 GB) holds N2b's runs and `kernel-2.etf`, which N3 reuses. Retire it when N3 has its own kernel capture on the current SDK.
 
@@ -109,7 +109,8 @@ per batch, and runs the gate tests.** A card is ✅ only after that gate.
 | `priv/host/*.bl` (runtime host: aot, env, loader, reader …) | `cd $WT && work run --memory 4G --timeout 1800 -- python3 scripts/check-runtime-hosts --sdk-image "$(readlink -f $MAIN/.bl/sdks/current-sdk)/image" --work-dir /tmp/hc-$USER-NAME test/bl/ONE_test.bl ...`. It builds `.#erlang .#elixir` itself (cached), compiles only the edited host files with the SDK's compiler, and runs the tests in a capped VM on those beams. It checks host behaviour; it is not a compiler-floor or SDK qualification, and `priv/lib` edits are not seen (the image's library stays the SDK's). **It does not run the pinned-host emitter**, so a host module it accepts can still be refused by an SDK build — see the rule below. | `js_local_shadow_test.bl`: 40 s with hosts unchanged (14 s in the VM); 192 s after editing `env.bl` (compiling it takes ~2.5 min), and the break was caught: 3 of 5 assertions failed, exit 1. A `work run` may first wait in the queue |
 | client speed or behaviour | run the binary cargo built, the way `bin/bl` does: `$WT/.cargo-target/release/drop-launcher --checkout $MAIN -- run /tmp/x.bl`, with `BL_CHECKOUT_PLATFORM`, `BL_BIN` and the rest exported as in `$MAIN/bin/bl` | ms |
 | a BL file the coordinator or a script runs directly (`nix/*.bl`, `scripts/*.bl`, `research/**.bl`) | `$MAIN/bin/bl run FILE ...` or a test file next to it, on the main SDK | seconds |
-| `priv/` code (runtime, library, compiler) | **No hot path:** reload refuses SDK namespaces (`sdk_forwarder_route_changed`), and `:shadow` only reaches callers inside the project, not library-to-library calls. Check the logic by copying the changed function into a scratch namespace under your own project dir and calling it from a test there (`$MAIN/bin/bl test`). Then hand the branch over with the exact gate test files listed. | seconds; the real check is the integration gate |
+| `priv/lib` and most `priv/std` code | **Hot path (U15, batch 21):** in a checkout, `./bin/bl` compiles a changed library file inside the warm VM under the SDK's module names; the next request sees it in about 1 s. Held back, still needing an SDK: the 7 compiler-key `priv/std` files, `priv/std/vm/**`, `bl/daemon.bl`, `bl/cli.bl`, `bl/dev-overlay.bl` (list: `nix/dev-reload.json`). A new or deleted library file, a macro already expanded elsewhere and a captured `def` value need an SDK. `BL_CHECKOUT_DEV_OVERLAY=0` turns it off. | about 1 s |
+| `priv/boot`, `priv/host` | **No hot path:** check host logic with `scripts/check-runtime-hosts`; the real check is the integration gate | the gate |
 | measurement only | `work run` the probe with 3+ runs; report median and spread and the machine load (`uptime`) | — |
 
 `scripts/check-runtime-hosts` is meant for host checks without an SDK, but it
@@ -199,12 +200,12 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
 ### F — the request floor (2026-11-23 review)
 
-#### F1 ⏳ One exec to the client · S · `bin/bl`, `scripts/prepare-checkout-platform`, `tooling/drop`
+#### F1 ✅ One exec to the client · landed batch 21 (`fe11a7cbc`) · S · `bin/bl`, `scripts/prepare-checkout-platform`, `tooling/drop`
 - **Why.** About 10 ms of the 25 ms warm floor is shell, before the Rust client runs. `bin/bl` is `/bin/sh` with `resolve_dir` subshells. Line 18 runs `scripts/prepare-checkout-platform` (bash plus a `find` over `nix/ tooling/drop native/`) on every request; measured 7.3–10.2 ms per call at load 22.
 - **Change.** The warm path does one `exec` of the client. The client (or the generation service it already talks to) answers the platform fingerprint from its stat cache, falling back to the script only when the cache misses. Cold and sandbox paths (`BL_CHECKOUT_PLATFORM` preset, `--cold`) keep working.
 - **Done when.** Warm `./bin/bl run` of `(println 1)` median ≤ 12 ms over 15 runs, load recorded. Editing a file under `nix/` or `tooling/drop/` still changes the platform. `test/scripts/checkout_transport.py` and `scripts/tests/test_engine_ci_inputs.py` pass.
 
-#### F2 ⏳ One request, one process · S+ · `priv/std/vm/` request handler
+#### F2 🔨 One request, one process · items 1–3 landed batch 21 (`fe11a7cbc`) · S+ · `priv/std/vm/` request handler
 - **Why.** The VM handler was 13.6 ms before U11 (`research/checked-tiles/evidence/warm-floor-u9.json`): 9 spawns, `realm/open`, proxy and heartbeat, custody registration. U11 removed about 3 ms of it. Nothing has measured it since.
 - **Change.** First re-run the U9 probes (`research/substrate-ab/floor/u9/`) on the current SDK. Then follow the plan in `research/checked-tiles/journal/06-chez-substrate-and-user-path.bl.org` lines 182–203: run the command in the connection process, with a realm handle opened once per generation. Write to the socket directly, start the heartbeat only past a threshold, and skip custody registration for an unchanged module set.
 - **Done when.** VM handler ≤ 3 ms and client total ≤ 6 ms, both measured. The ten files, `realm_shared`, `session` and `checkout_transport.py` pass.
@@ -213,9 +214,22 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - Persistent connection, so no connect or hello per request. Send argv, cwd and an environment generation instead of 91 variables.
 - **Done when.** Warm unchanged request ≤ 2 ms median on a quiet machine.
 
+#### F2 status after batch 21
+- Landed: replay modules kept loaded (bounded at 64, `priv/boot/lower.bl`); `realm/open` reused per (root, generation, caller scope); library store paths registered once per VM. Micro-benchmarks: replay one form 2,813 → 0.71 µs, `register-store-paths!` 624 → 77 µs, same-generation `realm/open` 529 → 33 µs.
+- Not yet shown end to end: the gate's warm median (12 ms at load 21) is within noise of F1 alone (11.5 ms at load ~14). Measure the VM handler again on a quiet machine with `research/substrate-ab/floor/f1/start_wall_min.bl`.
+- Open: item 4, running the command in the connection process. It changes cancellation, so it needs a SIGTERM/SIGKILL cancel check alongside the session and `realm_shared` tests.
+
+#### K1b ⏳ Cold start below 1.2 s · S+ · `priv/host/env.bl`, owner registry
+- After K1, the remaining app start (~1.3 s) is code running, not values recomputed: namespace loads and initializers (~1/3 of samples), the owner registry leasing the whole SDK runtime closure (~15%), native stub compiles (~3%). See the journal section "K1: sealed boot state, and what a seal cannot reach" and `research/checked-tiles/evidence/cold-start-k1.json`.
+- **Change.** Start the owner registry and the SDK lease lazily, so the first actor pays and a plain `bl run` does not. Load `bl.cli`'s namespaces on demand (~300 ms).
+- **Done when.** Cold `$SDK/bin/bl --cold run` of `(println 1)` ≤ 1.2 s median, paired with the batch-21 SDK.
+
+#### T3 ⏳ `codegen_provenance_test` writes into the store SDK · H
+- Two tests error with `erofs` writing `.../lib/beam_lisp-0.1.0/priv/codegen.sources` on any store SDK (same on main's `2nvkh1n5` and batch 21's `0nzlyz01`). Point them at a scratch copy.
+
 ### K — cold start
 
-#### K1 🧪 Sealed boot state · S+ · `priv/host` (aot, aot_cache, env), `priv/build/selfbuild.bl` · branch `lane/sealed-boot`
+#### K1 ✅ Sealed boot state · landed batch 21 (`fe11a7cbc`), short of 1.2 s; the rest is K1b · S+ · `priv/host` (aot, aot_cache, env), `priv/build/selfbuild.bl` · branch `lane/sealed-boot`
 - **Why.** Cold `bl run` on a store SDK is 2.56–2.77 s after U8. 65–70% is the `:beam_lisp` start plus `vm.native` `build-all!` (U5, `research/checked-tiles/evidence/cold-start-phases.json`). That work re-derives and re-checks SDK publication state on every start: environment tables, 1,438 published definitions, forwarder disassembly, MD5 leases. U6–U8 trimmed 5–26% each; that curve does not reach 1 s.
 - **Change.** The SDK build writes the post-start runtime state as one sealed artifact (U8's `priv/seed-metadata.term` is the precedent). An immutable `/nix/store` SDK loads it in one step, trusted by store-path identity. MD5 checks remain only for modules actually loaded. A writable checkout image keeps today's path.
 - **Done when.** Cold `$SDK/bin/bl --cold run` of `(println 1)` ≤ 1.2 s median over 4 pairs against the old SDK, load recorded. The ten files pass on the sealed SDK.
@@ -440,7 +454,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - Cold passes 53 / 111 / 43.
 - **Left.** `contextual_session_retirement_test` still assumes it is the VM's only session. It passes cold, but run warm it takes the realm down, so keep it out of warm runs.
 
-#### U15 ⏳ A `priv/std` or `priv/lib` edit runs in the warm realm without an SDK · S+ · BL runtime + loader
+#### U15 ✅ A `priv/std` or `priv/lib` edit runs in the warm realm without an SDK · S+ · BL runtime + loader
 - **Why.** The SDK is the only route today. A one-file std edit costs 440 s (N4's measurement), and under 10% of that is compiling. Project code already reloads in place. SDK namespaces refuse with `sdk_forwarder_route_changed`, and `:shadow` reaches only callers inside the project.
 - **Change.** In a checkout, a changed SDK namespace under `priv/std` or `priv/lib` is compiled in the realm, from the checkout, and routed for every caller, library to library included. The realm then retires as it does for a project edit.
   - Keep `priv/boot` and `priv/host` on the SDK path: they are the compiler and the floor.
