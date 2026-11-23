@@ -681,7 +681,7 @@
 (nf-leaf! "Elixir.BeamLisp.Env/add_search_path/1" (lambda (p) (set! native-env-search-paths (cons p native-env-search-paths)) (bl-key "ok")))
 (nf-leaf! "Elixir.BeamLisp.Env/local_var?/2"
  (lambda (ns name) (not (eq? (native-env-value (native-row (bl-key "ns_defs") ns)) native-missing))))
-(nf-leaf! "Elixir.BeamLisp.Env/ns_definition/2" (lambda (ns name) (native-raw-map-get (nf-ns-defs ns) name nil)))
+(nf-leaf! "Elixir.BeamLisp.Env/ns_definition/2" (lambda (ns name) (native-raw-map-get (nf-ns-defs ns) name bl-nil)))
 (nf-leaf! "Elixir.BeamLisp.Env/candidates/2" (lambda (ns name) (native-candidates ns name)))
 (nf-leaf! "Elixir.BeamLisp.Env/put_link/3" (lambda (ns name link) (native-env-put! (native-row (bl-key "link") ns name) link) (bl-key "ok")))
 (nf-leaf! "Elixir.BeamLisp.Env/match/1" (lambda (pattern) (native-match-rows pattern)))
@@ -1040,3 +1040,14 @@
 (define (nf-flatten x tail)
  (cond ((null? x) tail) ((pair? x) (nf-flatten (car x) (nf-flatten (cdr x) tail))) (else (cons x tail))))
 (nf-set-leaf! "Elixir.List/flatten/1" (lambda (xs) (nf-flatten xs '())))
+;; host/nf-memo-recount!/0: the native lazy-memo table drops dead cells only
+;; through the weak table, and its retained-bytes counter never sees them go,
+;; so a long run of units creeps over the cache budget (lazy_memo.bl then
+;; waits in Process/sleep). Collect, then recount the live cells.
+(nf-leaf! "host/nf-memo-recount!/0"
+ (lambda ()
+  (collect (collect-maximum-generation))
+  (let ((live 0) (bytes 0))
+   (table-for-each (lambda (k cell) (set! live (+ live 1)) (set! bytes (+ bytes (vector-ref cell 3)))) native-memo-cells)
+   (set! native-memo-live live) (set! native-memo-retained bytes)
+   bytes)))
