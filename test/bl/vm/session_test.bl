@@ -6,7 +6,8 @@
 ; after — no Elixir daemon code on the path.
 
 (ns vm.session-test
-  (:require [vm.session :as session] [vm.paths :as paths] [vm.net :as net] [vm.gateway :as gw]))
+  (:require [vm.session :as session] [vm.paths :as paths] [vm.net :as net] [vm.gateway :as gw]
+            [vm.realm :as realm] [vm.idle :as idle]))
 
 ;; A session that claims a name asks for a gateway (lazy start). A test run must never
 ;; leave a background process behind, so the starter is a no-op for this file.
@@ -174,6 +175,43 @@
       (is (not (File/exists? (:sock ep))))
       (is (not (File/exists? (:token ep))))
       (is (not (File/exists? (:meta ep)))))))
+
+;; ── a session inside another (U14) ──────────────────────────────────────────
+;;
+;; The warm checkout VM is itself a session, and the tests it runs start more. A
+;; session's stop used to drain the VM: it counted the outer session's requests as
+;; its own (so it never finished, and left its socket behind), set a draining flag
+;; every later outer request was refused by, and closed the outer session's realms.
+
+(defn- wait-until [pred ms]
+  (loop [left ms]
+    (cond (pred) true
+          (<= left 0) false
+          :else (do (erlang/apply :timer :sleep (list 50)) (recur (- left 50))))))
+
+(deftest stopping-an-inner-session-leaves-the-outer-one-serving
+  (testing "an inner stop waits only for its own requests and closes only its own realms"
+    (let [outer-root (setup-tree) inner-root (setup-tree)
+          outer (:ok (session/start outer-root))
+          parent (erlang/self)]
+      (try
+        (let [inner (:ok (session/start inner-root))
+              inner-ep (:ok (paths/endpoints inner-root))
+              base (idle/running)]
+          (erlang/apply :timer :sleep (list 150))
+          (is (= 0 (:code (client-run inner-root (list "eval" "1")))) "the inner session serves")
+          (spawn (fn [] (erlang/send parent [:outer (client-run outer-root (list "eval" "(do (erlang/apply :timer :sleep (list 1500)) (println :outer))"))])))
+          (is (wait-until (fn [] (> (idle/running) base)) 5000) "an outer request is in flight")
+          (is (= :ok (session/stop inner)) "the outer request is not the inner session's to wait for")
+          (is (not (File/exists? (:sock inner-ep))) "so the inner socket is gone")
+          (is (not (some (fn [r] (= r inner-root)) (realm/roots))) "and its realm is closed")
+          (is (some (fn [r] (= r outer-root)) (realm/roots)) "the outer realm is still open")
+          (let [slow (receive [:outer r] r (after 10000 {:outs [] :code :timeout}))]
+            (is (= 0 (:code slow)) "the outer request finished")
+            (is (some (fn [o] (clojure.string/includes? o "outer")) (:outs slow))))
+          (is (= 0 (:code (client-run outer-root (list "eval" "(println :again)"))))
+              "and the outer session still admits requests"))
+        (finally (session/stop outer))))))
 
 (deftest a-requests-output-is-byte-for-byte-what-a-cold-run-prints
   ;; The first test only asks that "42" be INCLUDED, which is how a daemon that
