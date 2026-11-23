@@ -167,9 +167,21 @@
         (is (= 0 (:code (request a ["eval" "(+ 1 2)"] {}))) "A reopens on its next command")))))
 
 
+(defn- with-schedules-on
+  "Run `f` in a VM that runs declared schedules. The warm checkout VM this file may
+   run in is commands-only (`vm.manager/start-schedules!` skips schedules there by
+   design), and that flag is the VM's, not the session's this test starts."
+  [f]
+  (let [flag (tuple :vm_session :commands-only)
+        prev (erlang/apply :persistent_term :get (list flag nil))]
+    (erlang/apply :persistent_term :erase (list flag))
+    (try (f)
+      (finally (when (some? prev) (erlang/apply :persistent_term :put (list flag prev)))))))
+
 (deftest a-realms-declared-schedules-arm-when-it-opens
   (with-shared-vm
     (fn []
+      (with-schedules-on (fn []
       (let [root (project "scheduled")
             _ (File/write! (str root "/env.bl")
                 (str "{:name \"scheduled\" :vm \"shared\""
@@ -180,7 +192,7 @@
         (is (some (fn [p] (= p (sched/armed-pid (:id vm)))) (owner/procs (:id vm)))
             "which is a member of the realm, so closing the realm ends it")
         (realm/close root)
-        (is (not (sched/armed? (:id vm))) "closing the realm stops its wheel")))))
+        (is (not (sched/armed? (:id vm))) "closing the realm stops its wheel")))))))
 
 
 (deftest closing-a-realm-while-it-serves-never-wedges-or-crosses-realms
