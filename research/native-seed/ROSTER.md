@@ -502,6 +502,19 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - A compiler edit that changes no output finishes an SDK in under 2 minutes.
   - An edit that changes one unit's output rebuilds one unit.
   - Both are measured end to end.
+- **Measured (batch 20 preparation, 2026-11-23: 2848 s; `priv/std/vm` and `tooling/drop` changed).**
+  - **Where the numbers come from.** The foundry events file is capped at 64 KB and was cut at 1199 s, so read the full logs on the build station: `ssh beam-build-station "nix log /nix/store/<drv>.drv"`. Every line in those logs appears twice, so de-duplicate before summing.
+  - **Compiler bootstrap, 1510 s, about 53%.** Generations P, B and C took 592, 453 and 465 s. Each one recompiles all 91 boot and host units (`COMPILER-UNIT-RESULT {"modules":139,"compiled":91,"cached":0}`). The biggest units per generation:
+    - `host.aot` 104–115 s;
+    - `host.env` 59–83 s;
+    - `compiler` 31–56 s;
+    - `rt` 27–35 s.
+  - **Library producer, 729 s wall, about 26%.** Four children, run in parallel, each `compile` about 170 SDK units in 416–461 s. A fifth child takes 40 s. Everything else in the library (setup, floor, boot, staging, assembly) adds up to about 60 s.
+  - **Everything else, about 600 s.** Copying to and from nixbuild.net, VM starts, and image packing (`sdk-image` 135 MB gz).
+- **Where the leverage is, in order.**
+  1. **Generation C.** It exists only to show that B is a fixpoint (C = B). Today it is a third full compile, 465 s. When B's unit bytes equal P's, C is redundant and can be skipped. Otherwise, check the fixpoint per unit, with each unit keyed by its own source and the compiler's emitted bytes.
+  2. **Per-unit early cutoff inside P/B/C and the library.** Key each unit on (source, the bytes of the compiler units it actually loads), not on the compiler key. A compiler edit that leaves `host.aot`'s output unchanged then stops recompiling the other 90.
+  3. **Native front end.** Compile with Chez on Work's 16 cores, outside QEMU. N2b's 663/667 identical Core makes this possible; the 4 differing units fall back to the BEAM.
 - **Pitfall.** Two consecutive layered SDKs must both prepare. On 2026-11-22
   the first layered SDK broke the next preparation (`d2cd91781`). Every
   SDK-layout change is qualified by preparing twice in a row, across a
