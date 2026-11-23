@@ -246,7 +246,9 @@ class EngineCIInputTests(unittest.TestCase):
         self.assertEqual(str(output), first.stdout.strip(), first.stderr)
         self.assertFalse(recorded.exists(), 'inputs written within the racy window are not recorded')
         self.assertNotEqual(0, select(no_content).returncode)
-        time.sleep(2.2)
+        # The script truncates its listing time to whole seconds, so its 2 s
+        # racy window can reach 3 s.
+        time.sleep(3.2)
         self.assertEqual(str(output), select(env).stdout.strip())
         self.assertTrue(recorded.exists())
         settled = select(no_content)
