@@ -35,7 +35,7 @@ VM that stays up grows from there, because it keeps its eval modules, its var
 table and its caches.
 
 So memory is `number of bl processes × ~150 MB`, not the size of any one job.
-This host has 47 GB of RAM and is routinely deep in swap. Four agents each
+This host has 15.7 GB of RAM (measured 2026-11-23) and 39 GB of swap, routinely half used. Four agents each
 running a test loop is enough to push it there.
 
 ### Before you launch bl processes

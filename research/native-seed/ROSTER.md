@@ -14,8 +14,8 @@ holds the reasoning; `research/checked-tiles/evidence/` the measurements.
 | What a user waits for | Now | Target |
 |---|---|---|
 | Warm `./bin/bl run` in this checkout | 25 ms median (was ~82 ms on 2026-11-22) | ~1–5 ms |
-| Warm installed `bl run` of `(println 1)` | 80 ms | ~1–5 ms |
-| Cold `bl run` | 7.6 s | ≤ 1 s |
+| Warm installed `bl run` of `(println 1)` | unmeasured; the installed drop is still October's `f5ee4ce9` (`/nix/store/jqb3a1d6…-bl`) | ~1–5 ms, after R1 |
+| Cold `bl run` (store SDK, after U8) | 2.56–2.77 s (`research/checked-tiles/evidence/cold-start-u8.json`); the checkout's own cold path is unmeasured | ≤ 1 s |
 | Compile the reader file (read + compile + emit) | native ~117 ms median, warm BEAM 158 ms | only matters on edits |
 | Try a one-file `priv/std` edit | 440 s (a full SDK; compiling is <10%) | seconds (U15) |
 | SDK after a compiler edit / a Rust edit | 862 s+ (P/B/C ~1500 s more) / 82 s | ~1 min / ~1 min |
@@ -23,6 +23,41 @@ holds the reasoning; `research/checked-tiles/evidence/` the measurements.
 
 The one rule behind every card: a cost should scale with what changed, not
 with the size of the tree, the SDK or the compiler.
+
+## The plan after the fresh review (2026-11-23)
+
+An independent review read this roster against the code. Its main finding: **the native
+compiler is not on any path a user waits on.** An unchanged request replays forms it already
+compiled (U12a). A changed project file compiles in ~2 ms in the warm VM. A one-file std edit
+is 440 s, under 10% of it compiling. The 158 ms "warm BEAM" baseline was the BEAM running the
+native *emitter* on one file (BL → Scheme), which the product never runs. And the native front
+end isn't measured faster on real units yet: 745 s for 666 units on Chez against 549 s for 662
+on the BEAM (`research/checked-tiles/evidence/native-beam-backend.json`
+`step3_corpus.timing_ms.beam_dump_662_units`), with different harnesses.
+
+So the order is now: the request floor, the std/lib hot path, cold start, shipping, then the
+build pipeline. The native compiler comes after a go/no-go measurement (N0).
+
+| Order | Card | Done when |
+|---|---|---|
+| 1 | **F1** One exec to the client | Warm `./bin/bl run` median ≤ 12 ms over 15 runs, load recorded |
+| 1 | **F2** One request, one process | VM handler ≤ 3 ms; client total ≤ 6 ms; ten files and `checkout_transport.py` pass |
+| 2 | **U15** std/lib edits reload in the warm VM | A `priv/lib` edit is seen by the next `bl test` in < 10 s with no SDK |
+| 2 | **K1** Sealed boot state | Cold `$SDK/bin/bl --cold run` ≤ 1.2 s median |
+| 3 | **F3** Keep-alive client, compact request | Warm unchanged request ≤ 2 ms on a quiet machine |
+| 3 | **K2** The checkout's cold path | `./bin/bl --cold` adds ≤ 100 ms over `$SDK/bin/bl --cold` |
+| 3 | **M1** A real edit benchmark | Enchant edit-to-result, cold and warm, recorded |
+| 4 | **R1** Ship it | Installed `bl` rebuilt from main through the release gate, remeasured |
+| 5 | **N4a** Restored units by reference | Std-edit SDK unit work 40 s → < 8 s |
+| 5 | **N4b** Compiler-edit bootstrap | P boots the previous qualified compiler; C skipped when B = P; a `priv/host` edit's SDK ≤ 15 min |
+| 5 | **N4d** Dev SDK outside QEMU | Beams path-normalized so they match the store; a `priv/host` edit runnable in ≤ 3 min |
+| 6 | **N0** Native go/no-go | Per-unit native vs BEAM front-end time, `aot.bl` compiled into the image; N3, N4c, N5 and C3 go ahead only at ≥ 2× |
+| — | W4 | As written below |
+| — | C2 | Dropped: its prototype measured 0.4%, within noise |
+
+N3 (shadow mode) is replaced by N0, then N5 (the native image as a Nix-built SDK input,
+failing the build on `priv/boot` drift) if N0 passes. Shadow mode would double compile work
+to produce equality data N2b already has.
 
 ## How a card gets done: work, check inside, one integration gate
 
@@ -58,7 +93,7 @@ per batch, and runs the gate tests.** A card is ✅ only after that gate.
 - **Stop VMs you start.** Use `$MAIN/bin/bl realm stop` from the directory
   that started one.
 
-- **Retained worktrees (2026-11-23).** Both are owned by the integrator.
+- **Retained worktrees (2026-11-23).** These two are owned by the integrator. `git worktree list` also shows `.claude/worktrees/sdk-lock-wait` (locked) and four `~/projects/enchant-*` worktrees, which are other sessions'; leave them.
   - `.claude/worktrees/integration`: the gate tree for each batch.
   - `.claude/worktrees/lane-cerl`: branch `lane/native-front`, merged. Its untracked `.qualify-out/` (4.4 GB) holds N2b's runs and `kernel-2.etf`, which N3 reuses. Retire it when N3 has its own kernel capture on the current SDK.
 
@@ -161,6 +196,41 @@ If a gate fails, the card goes back to 🔨 with the failure.
 
 Suggested model per card: **H** = Haiku can do it from this text; **S** =
 Sonnet; **S+** = Sonnet with a long budget, or Opus.
+
+### F — the request floor (2026-11-23 review)
+
+#### F1 ⏳ One exec to the client · S · `bin/bl`, `scripts/prepare-checkout-platform`, `tooling/drop`
+- **Why.** About 10 ms of the 25 ms warm floor is shell, before the Rust client runs. `bin/bl` is `/bin/sh` with `resolve_dir` subshells. Line 18 runs `scripts/prepare-checkout-platform` (bash plus a `find` over `nix/ tooling/drop native/`) on every request; measured 7.3–10.2 ms per call at load 22.
+- **Change.** The warm path does one `exec` of the client. The client (or the generation service it already talks to) answers the platform fingerprint from its stat cache, falling back to the script only when the cache misses. Cold and sandbox paths (`BL_CHECKOUT_PLATFORM` preset, `--cold`) keep working.
+- **Done when.** Warm `./bin/bl run` of `(println 1)` median ≤ 12 ms over 15 runs, load recorded. Editing a file under `nix/` or `tooling/drop/` still changes the platform. `test/scripts/checkout_transport.py` and `scripts/tests/test_engine_ci_inputs.py` pass.
+
+#### F2 ⏳ One request, one process · S+ · `priv/std/vm/` request handler
+- **Why.** The VM handler was 13.6 ms before U11 (`research/checked-tiles/evidence/warm-floor-u9.json`): 9 spawns, `realm/open`, proxy and heartbeat, custody registration. U11 removed about 3 ms of it. Nothing has measured it since.
+- **Change.** First re-run the U9 probes (`research/substrate-ab/floor/u9/`) on the current SDK. Then follow the plan in `research/checked-tiles/journal/06-chez-substrate-and-user-path.bl.org` lines 182–203: run the command in the connection process, with a realm handle opened once per generation. Write to the socket directly, start the heartbeat only past a threshold, and skip custody registration for an unchanged module set.
+- **Done when.** VM handler ≤ 3 ms and client total ≤ 6 ms, both measured. The ten files, `realm_shared`, `session` and `checkout_transport.py` pass.
+
+#### F3 ⏳ Keep-alive client, compact request · S · Rust + VM · after F1, F2
+- Persistent connection, so no connect or hello per request. Send argv, cwd and an environment generation instead of 91 variables.
+- **Done when.** Warm unchanged request ≤ 2 ms median on a quiet machine.
+
+### K — cold start
+
+#### K1 ⏳ Sealed boot state · S+ · `priv/std/vm/native.bl`, `priv/host` (env, aot), `priv/build/selfbuild.bl`
+- **Why.** Cold `bl run` on a store SDK is 2.56–2.77 s after U8. 65–70% is the `:beam_lisp` start plus `vm.native` `build-all!` (U5, `research/checked-tiles/evidence/cold-start-phases.json`). That work re-derives and re-checks SDK publication state on every start: environment tables, 1,438 published definitions, forwarder disassembly, MD5 leases. U6–U8 trimmed 5–26% each; that curve does not reach 1 s.
+- **Change.** The SDK build writes the post-start runtime state as one sealed artifact (U8's `priv/seed-metadata.term` is the precedent). An immutable `/nix/store` SDK loads it in one step, trusted by store-path identity. MD5 checks remain only for modules actually loaded. A writable checkout image keeps today's path.
+- **Done when.** Cold `$SDK/bin/bl --cold run` of `(println 1)` ≤ 1.2 s median over 4 pairs against the old SDK, load recorded. The ten files pass on the sealed SDK.
+
+#### K2 ⏳ The checkout's cold path · S · `bin/bl`, `scripts/prepare-checkout-sdk`
+- Before `elixir` starts, `./bin/bl --cold` runs `scripts/prepare-checkout-sdk --selection` (Python `scripts/sdk-inputs`: 184 ms warm, 1.5 s with a cold file cache), a second Python check and `exec elixir -e`.
+- **Done when.** `./bin/bl --cold` adds ≤ 100 ms over `$SDK/bin/bl --cold` on a settled tree.
+
+### R and M — shipping and measuring what users see
+
+#### R1 ⏳ Ship it · release
+- The installed `bl` is October's drop. Rebuild it from main through the release gate, with the `AUTO_RELEASE_ENABLED` rehearsal (AGENTS.md); root deploys. Remeasure installed warm and cold.
+
+#### M1 ⏳ A real edit benchmark · measurement
+- Edit one Enchant namespace (`/home/othman/projects/enchant`), once a body and once a macro provider. Time it until the result shows, cold and warm, and record that as the user-path baseline.
 
 ### U — the request path (what every user pays)
 
@@ -374,8 +444,10 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - **Change.** In a checkout, a changed SDK namespace under `priv/std` or `priv/lib` is compiled in the realm, from the checkout, and routed for every caller, library to library included. The realm then retires as it does for a project edit.
   - Keep `priv/boot` and `priv/host` on the SDK path: they are the compiler and the floor.
   - A released SDK never does this.
+- **Simplest form (review, 2026-11-23).** A checkout VM has one tree and one user, so a "dev-tainted" VM may replace SDK modules VM-wide with `code:load_binary`. That already reaches library-to-library callers, with no per-realm routing. The refusal to lift is two strict equality checks, on the SDK runtime lease and on forwarder routes (around `priv/host/env.bl:5462` and `priv/host/aot.bl:2305`; verify the lines).
+- **Refuse compiler inputs.** Several `priv/std` files feed the compiler key (`nix/producer-sources.nix:13–22`: `vm/native.bl`, `multi.bl`, `bl/*.bl` among them). An edit to one says so and points to the SDK path, instead of looking fresh while it isn't.
 - **Done when.**
-  - Editing `priv/std/vm/session.bl` and then running `bl test test/bl/vm/session_test.bl` uses the edit in seconds, with no SDK preparation.
+  - Editing a `priv/lib` namespace, including one function another library namespace calls, and then running a `bl test` that exercises both uses the edit in under 10 s, with no SDK preparation. Don't use `vm/session.bl`: it serves the request itself.
   - Reverting the edit restores the SDK's code.
   - The ten files pass afterwards.
   - Preparing the SDK for the same tree gives the same results.
@@ -485,7 +557,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - **Done when.** Same as N2's front half: per-unit Core `=` the BEAM's, or a
   named reason, for under 5% of SDK units.
 
-#### N3 ⏳ The native compile service, in shadow mode · S+ (N2 done)
+#### N3 🅿️ The native compile service, in shadow mode · replaced by N0 then N5 (see the plan)
 - **Why.** Nothing in `bl` calls the native compiler.
 - **Change.**
   - One Chez process per realm, started by the VM (0.86 s launch), speaking
@@ -504,7 +576,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - The refusal rate is reported per reason.
   - Flipping to "on" passes the same suites.
 
-#### N4 ⏳ The SDK rebuilds only what changed · S+ (N2 done)
+#### N4 ⏳ The SDK rebuilds only what changed · split into N4a, N4b, N4d (plan table); N4c waits on N0 · S+ (N2 done)
 - **Why.** A compiler edit rotates every unit's key, so all 662 units
   recompile in a 4-CPU QEMU VM (862 s on 2026-11-22). The native compiler
   compiles its own 1.8 MB bundle in 6.4 s.
@@ -555,7 +627,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - `pair` (256 runs: `--reps 8 --rounds 8`) shows the same bytes; report both
     medians. If it isn't faster, record that and don't merge.
 
-#### C2 🅿️ Interned names on the native host · S · native-only
+#### C2 ❌ dropped (prototype 0.4%, noise) — Interned names on the native host · S · native-only
 - **Why.** `string-hash`/`equal-hash` take ~4–5% of the reader job. Names are
   strings, so every lookup and every memo pays a hash.
 - **Change.** The reader interns symbol and keyword names (one Chez symbol or
