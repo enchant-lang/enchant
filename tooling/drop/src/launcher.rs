@@ -16,6 +16,7 @@ include!("hooks.rs");
 include!("checkout.rs");
 include!("generation.rs");
 mod engine_inputs;
+mod checkout_platform;
 mod command_domain;
 
 const EXIT_LAUNCHER_FAILURE: i32 = 126;

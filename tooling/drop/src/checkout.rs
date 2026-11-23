@@ -117,6 +117,12 @@ fn checkout_main(args: &[String]) -> ! {
         fail("usage: drop-launcher --checkout ROOT -- ARGV...");
     }
     timer.mark("root");
+    // `bin/bl`'s one-exec path passes the root as it was invoked; the
+    // environment names the canonical one, as `bin/bl` always exported it.
+    std::env::set_var("BL_CHECKOUT_ROOT", &root);
+    #[cfg(unix)]
+    select_checkout_platform(&root);
+    timer.mark("platform");
     let argv = &args[2..];
     let cwd = std::env::current_dir().unwrap_or_else(|e| fail(&e.to_string()));
     let project = root_override(argv)
@@ -147,6 +153,96 @@ fn checkout_main(args: &[String]) -> ! {
     std::env::set_var("BL_CHECKOUT_SOURCE_GENERATION", generations.project);
     timer.total();
     exec_payload(&root, "src", argv)
+}
+
+/// Set by a client that selected the platform for the client it execs, so that
+/// one may name itself in `.bl/checkout-platform`. Never reaches the VM.
+const PLATFORM_SELECTED: &str = "BL_CHECKOUT_PLATFORM_SELECTED";
+
+/// F1: `bin/bl` execs the client `.bl/checkout-platform` names with no
+/// `BL_CHECKOUT_PLATFORM`. This client then selects the platform itself, the
+/// way `bin/bl` did: the script's recorded stat listing, re-stated here, or
+/// else the script. When the selected platform's client is another binary it
+/// execs that one, with the platform set, exactly as `bin/bl` would have. A
+/// preset `BL_CHECKOUT_PLATFORM` (build sandboxes, the cold re-entry through
+/// `bin/bl`, `bin/bl` without a pointer yet, or a selecting client) is used as
+/// given; `BL_CHECKOUT_PLATFORM_SELECTED` equal to it says it was selected for
+/// this tree, so its own client may record itself as the pointer. Only a
+/// client of this protocol ever writes the pointer, and only naming itself, so
+/// `bin/bl` never execs an older client without a platform.
+#[cfg(unix)]
+fn select_checkout_platform(root: &Path) {
+    use std::os::unix::process::CommandExt;
+    let selected = std::env::var_os(PLATFORM_SELECTED);
+    std::env::remove_var(PLATFORM_SELECTED);
+    if let Some(preset) = std::env::var_os("BL_CHECKOUT_PLATFORM").filter(|v| !v.is_empty()) {
+        if selected.is_some_and(|s| s == preset) && runs_client_of(Path::new(&preset)) {
+            checkout_platform::record_pointer(root, Path::new(&preset));
+        }
+        return;
+    }
+    let platform = checkout_platform::settled_fingerprint(root)
+        .and_then(|fingerprint| checkout_platform::retained(root, &fingerprint))
+        .unwrap_or_else(|| prepare_checkout_platform(root));
+    let text = platform.to_str().unwrap_or("");
+    if !nix_artifact::store_object(text) {
+        eprintln!("bl: checkout platform must be an immutable Nix product");
+        std::process::exit(69);
+    }
+    let client = platform.join("bin/drop-launcher");
+    if !platform.join("platform.json").is_file() || !is_executable(&client) {
+        eprintln!("bl: checkout platform is incomplete");
+        std::process::exit(69);
+    }
+    let natives = std::fs::canonicalize(platform.join("native-products"))
+        .unwrap_or_else(|_| platform.join("native-products"));
+    let mut path = std::ffi::OsString::from(format!("{text}/bin:"));
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    std::env::set_var("BL_CHECKOUT_PLATFORM", &platform);
+    std::env::set_var("BL_ARTIFACT_PLATFORM", platform.join("artifact-platform"));
+    std::env::set_var("BL_PREPARED_NATIVES", natives);
+    std::env::set_var("BL_BIN", &client);
+    std::env::set_var("PATH", path);
+    if runs_client_of(&platform) {
+        checkout_platform::record_pointer(root, &platform);
+        return;
+    }
+    let error = Command::new(&client)
+        .args(std::env::args_os().skip(1))
+        .env(PLATFORM_SELECTED, &platform)
+        .exec();
+    fail(&format!("cannot run {}: {error}", client.display()));
+}
+
+/// Whether this process is the platform's own client binary.
+#[cfg(unix)]
+fn runs_client_of(platform: &Path) -> bool {
+    let mine = std::env::current_exe().ok().and_then(|exe| std::fs::canonicalize(exe).ok());
+    mine.is_some() && mine == std::fs::canonicalize(platform.join("bin/drop-launcher")).ok()
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// The script's own answer: it re-lists, re-hashes on a miss, records a
+/// settled listing and realizes the platform. Its stderr is the user's.
+#[cfg(unix)]
+fn prepare_checkout_platform(root: &Path) -> PathBuf {
+    let script = root.join("scripts/prepare-checkout-platform");
+    let output = Command::new(&script)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .unwrap_or_else(|e| fail(&format!("cannot run {}: {e}", script.display())));
+    if !output.status.success() {
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let printed = printed.trim_end_matches('\n');
+    std::fs::canonicalize(printed).unwrap_or_else(|_| PathBuf::from(printed))
 }
 
 fn invocation_tree(cwd: &Path, argv: &[String]) -> Option<PathBuf> {
