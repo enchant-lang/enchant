@@ -63,6 +63,11 @@
 ;; Declaration-query certificates guard against concurrent publication; the
 ;; native image publishes nothing while it stages, so one constant answers.
 (defn- sdk_declaration_query_certificate [ns pass context] (tuple pass context :native-front))
+(defn sdk_declaration_kind [ns binding]
+ (let [descriptor (sdk_checked_declaration_table ns)]
+  (cond (= :unavailable descriptor) :unavailable
+        descriptor (Map/get (elem descriptor 2) binding)
+        :else nil)))
 
 ;; Custody resolved the priv root physically (no symlink inside the SDK
 ;; image); prim_file's lstat has no native counterpart.
@@ -120,6 +125,33 @@
    (mapcat nf-core-free (drop 2 (Tuple/to_list t))))))
 (defn- nf-free-variables [tree] (sort (distinct (nf-core-free tree))))
 
+;; Diagnosis for a refused class scaffold: which part of the descriptor the
+;; record producer does not recognise.
+(defn- nf-traced-declaration-kind [descriptor ns name]
+ (let [answer (host.record/declaration_kind descriptor ns name)]
+  (when-not answer
+   (let [metadata (some (fn [entry] (let [parts (if (erlang/is_tuple entry) (Tuple/to_list entry) (vec entry))]
+                                     (when (= :bl_generated_class (first parts)) (second parts))))
+                        (Map/get descriptor :attrs (list)))
+         canonical (when (erlang/is_tuple metadata)
+                    (host.record/declaration_descriptor ns name (elem metadata 3) (elem metadata 4) (Map/get descriptor :name)))]
+    (println (str "NF-CLASS " ns "/" name " metadata " (pr-str (when metadata (elem metadata 0)))
+                  " same-body " (= (Map/drop descriptor (list :attrs :ann)) (Map/drop (or canonical {}) (list :attrs :ann)))
+                  " attrs " (count (Map/get descriptor :attrs)) "/" (count (Map/get (or canonical {}) :attrs))))
+    (when canonical
+     (doseq [k (sort (keys (Map/drop descriptor (list :attrs :ann))))]
+      (when-not (= (Map/get descriptor k) (Map/get canonical k))
+       (println (str "NF-CLASS-KEY " k " " (subs (pr-str (Map/get descriptor k)) 0 (min 400 (count (pr-str (Map/get descriptor k)))))))
+       (println (str "NF-CLASS-KEY " k " " (subs (pr-str (Map/get canonical k)) 0 (min 400 (count (pr-str (Map/get canonical k)))))))
+       (when (and (sequential? (Map/get descriptor k)) (sequential? (Map/get canonical k)))
+        (doseq [[x y] (map vector (Map/get descriptor k) (Map/get canonical k))]
+         (when-not (= x y)
+          (println (str "NF-CLASS-ITEM " (subs (pr-str x) 0 (min 600 (count (pr-str x))))))
+          (println (str "NF-CLASS-ITEM " (subs (pr-str y) 0 (min 600 (count (pr-str y)))))))))))
+     (doseq [[a b] (map vector (Map/get descriptor :attrs) (Map/get canonical :attrs))]
+      (when-not (= a b) (println (str "NF-CLASS-ATTR " (subs (pr-str a) 0 (min 300 (count (pr-str a)))) " vs " (subs (pr-str b) 0 (min 300 (count (pr-str b)))))))))))
+  answer))
+
 ;; The compiler reaches these through BeamLisp.AOT; here they are host.aot's.
 (defn- nf-route-aot! []
  (doseq [[name arity f] [["sdk_constructor_binding_reference" 2 sdk_constructor_binding_reference]
@@ -135,7 +167,8 @@
  ;; host.record is evaluated before host.aot (the native image lacks it).
  (host/nf-route! "Elixir.BeamLisp.Record/declaration_descriptor/4" host.record/declaration_descriptor)
  (host/nf-route! "Elixir.BeamLisp.Record/declaration_descriptor/5" host.record/declaration_descriptor)
- (host/nf-route! "Elixir.BeamLisp.Record/declaration_kind/3" host.record/declaration_kind)
+ (host/nf-route! "Elixir.BeamLisp.Record/declaration_kind/3"
+  (if (= true (erlang/get :nf_trace)) nf-traced-declaration-kind host.record/declaration_kind))
  (host/nf-route! "Elixir.BeamLisp.Loader/source_decls_from/3" nfl-source_decls_from)
  (host/nf-route! "Elixir.BeamLisp.Loader/read_source/1" nfl-read_source)
  (host/nf-route! "Elixir.BeamLisp.Loader/declared_ns/1" nfl-declared_ns)
@@ -187,21 +220,28 @@
                          file (:input-digest row) declarations (:source-hash row) (:stamp-key row)))
                        (sort (MapSet/to_list touched)))
            descriptors (vec (mapcat :descriptors plans))
-           generated (vec (native-front.hook/take-generated!))
-           _ (nf-step namespace "lower")]
-      (doseq [[i d] (map-indexed vector descriptors)]
-       (nf-write (str dir "/" i ".desc.etf") d)
-       (nf-write (str dir "/" i ".core.etf") (lower/module->core d)))
-      (doseq [[i d] (map-indexed vector generated)]
-       (nf-write (str dir "/G-" i ".desc.etf") d)
-       (nf-write (str dir "/G-" i ".core.etf") (lower/module->core d)))
-      [(count descriptors) (count generated)])))
+           generated (vec (native-front.hook/take-generated!))]
+      [descriptors generated])))
    (finally
     (erlang/put :bl_sdk_constructor_context nil)
     (erlang/put machine nil)
     (erlang/put :bl_loader_initialization_blocked nil)
     (BeamLisp.Env/destroy view)
     (BeamLisp.Env/bind previous)))))
+
+;; Lowering runs outside the unit's private view: a unit that stages `lower`
+;; itself (compile.world) masks lower's bindings inside it.
+(defn- nf-unit-core [row out]
+ (let [[descriptors generated] (nf-unit row out)
+       dir (str out "/u/" (:namespace row))]
+  (nf-step (:namespace row) "lower")
+  (doseq [[i d] (map-indexed vector descriptors)]
+   (nf-write (str dir "/" i ".desc.etf") d)
+   (nf-write (str dir "/" i ".core.etf") (lower/module->core d)))
+  (doseq [[i d] (map-indexed vector generated)]
+   (nf-write (str dir "/G-" i ".desc.etf") d)
+   (nf-write (str dir "/G-" i ".core.etf") (lower/module->core d)))
+  [(count descriptors) (count generated)]))
 
 (defn- nf-install-world! [doc]
  (let [rows (:units doc)
@@ -227,7 +267,7 @@
   (doseq [row rows]
    (println (str "UNIT start " (:namespace row)))
    (try
-    (let [[n g] (nf-unit row out)]
+    (let [[n g] (nf-unit-core row out)]
      (println (str "UNIT ok " (:namespace row) " descriptors " n " generated " g)))
     (catch e
      (println (str "UNIT fail " (:namespace row) " " (pr-str e)))
