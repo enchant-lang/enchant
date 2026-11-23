@@ -9,16 +9,17 @@ Status: ✅ done (passed the integration gate) · 🧪 branch ready, waiting for
 The journal (`research/checked-tiles/journal/06-chez-substrate-and-user-path.bl.org`)
 holds the reasoning; `research/checked-tiles/evidence/` the measurements.
 
-## Where it stands (measured 2026-11-22)
+## Where it stands (measured 2026-11-23)
 
 | What a user waits for | Now | Target |
 |---|---|---|
-| Warm `./bin/bl run` in this checkout | 550 ms before the scratch cleanup; remeasure (card U1) | ~1–5 ms |
+| Warm `./bin/bl run` in this checkout | 25 ms median (was ~82 ms on 2026-11-22) | ~1–5 ms |
 | Warm installed `bl run` of `(println 1)` | 80 ms | ~1–5 ms |
 | Cold `bl run` | 7.6 s | ≤ 1 s |
 | Compile the reader file (read + compile + emit) | native ~117 ms median, warm BEAM 158 ms | only matters on edits |
-| SDK after a compiler edit / a Rust edit | 862 s / 82 s | ~1 min / ~1 min |
-| Native compiler on the user path | **not at all**: it emits Scheme only | the default compiler, BEAM kept as fallback |
+| Try a one-file `priv/std` edit | 440 s (a full SDK; compiling is <10%) | seconds (U15) |
+| SDK after a compiler edit / a Rust edit | 862 s+ (P/B/C ~1500 s more) / 82 s | ~1 min / ~1 min |
+| Native compiler on the user path | **not yet**: 663/667 SDK units byte-identical on Chez, nothing calls it (N3) | the default compiler, BEAM kept as fallback |
 
 The one rule behind every card: a cost should scale with what changed, not
 with the size of the tree, the SDK or the compiler.
@@ -304,7 +305,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - **Change.** For each: why it runs on an unchanged immutable SDK; remove it or seal the answer at
   SDK build time; keep authentication; measure. Drop what doesn't pay.
 
-#### T2 ⏳ Three test files fail on main (predate U7) · S
+#### T2 ✅ Three test files fail on main (predate U7) · S · landed batch 11
 - `test/bl/emit_test.bl` ("the live module's bytes ARE the committed seed's bytes"), `test/bl/seed_publication_test.bl` (its `/tmp/bl-seed-test-host-out` manifest is missing) and `test/bl/perf/cold_namespace_load_test.bl` fail the same way on the batch-7 and batch-8 SDKs. Find whether it is the seeded floor (a `bl seed --check` question) or the tests' environment.
 - **Done when.** Each passes on a fresh integration SDK, or its premise is corrected and the reason recorded.
 
@@ -587,7 +588,7 @@ census to start from.
 
 ### W — the test runner
 
-#### J4 ⏳ Two small JS disagreements · H · `priv/lib/js`
+#### J4 ✅ Two small JS disagreements · H · `priv/lib/js` · landed batch 9
 - `(- 0.0)` prints `0.0` on JS, `-0.0` on the BEAM; `erlang/-/1` has no JS leaf.
 - **Done when.** Both answer as on the BEAM; a js_diff case for each.
 
