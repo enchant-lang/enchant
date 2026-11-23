@@ -704,13 +704,18 @@
    (else (bl-key-compare a b)))))
 (define (native-erlang-order-needed? keys)
  (let loop ((ks keys)) (and (pair? ks) (or (bl-tag? (car ks) 'tuple) (pair? (car ks)) (loop (cdr ks))))))
+;; Native key order ranks keys by kind first (native-key-rank), tuples (3) and
+;; lists (8) after numbers and atoms: a map whose last key ranks below 3 holds
+;; neither, the common case, decided without a scan.
+(define (native-flatmap-reorder? pairs)
+ (and (pair? pairs)
+  (fx>= (native-key-rank (vector-ref (vector-ref (car (last-pair pairs)) 1) 0)) 3)
+  (let loop ((ps pairs))
+   (and (pair? ps)
+    (let ((k (vector-ref (vector-ref (car ps) 1) 0))) (or (bl-tag? k 'tuple) (pair? k) (loop (cdr ps))))))))
 (define (native-flatmap-pairs m)
  (let ((pairs (native-map-pairs-sorted m)))
-  (if (let loop ((ps pairs) (ints #f) (floats #f))
-       (if (null? ps) #f
-        (let ((k (vector-ref (vector-ref (car ps) 1) 0)))
-         (cond ((or (bl-tag? k 'tuple) (pair? k)) #t)
-               (else (loop (cdr ps) ints floats))))))
+  (if (native-flatmap-reorder? pairs)
    (native-sort (lambda (x y) (fx<= (native-erlang-compare (vector-ref (vector-ref x 1) 0) (vector-ref (vector-ref y 1) 0)) 0)) pairs)
    pairs)))
 (define (native-map-pairs m)
@@ -723,7 +728,8 @@
   (cond (order (let loop ((i (fx- (vector-length order) 1)) (out '())) (if (fx< i 0) out (loop (fx- i 1) (cons (vector-ref (vector-ref (vector-ref order i) 1) 0) out)))))
         ((fx<= (native-map-count m) native-hamt-limit)
          (let ((keys (native-map-keys-sorted m)))
-          (if (native-erlang-order-needed? keys) (map (lambda (p) (vector-ref (vector-ref p 1) 0)) (native-flatmap-pairs m)) keys)))
+          (if (and (pair? keys) (fx>= (native-key-rank (car (last-pair keys))) 3) (native-erlang-order-needed? keys))
+           (map (lambda (p) (vector-ref (vector-ref p 1) 0)) (native-flatmap-pairs m)) keys)))
         (else (native-map-keys-sorted m)))))
 ;; (pred key value) over entries in iteration order, stopping at the first #f.
 (define (native-map-every? pred m)
