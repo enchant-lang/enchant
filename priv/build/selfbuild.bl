@@ -228,7 +228,7 @@
       (let [src (Path/join running entry)]
         (cond
           (contains? tiers entry) (File/cp_r! src (Path/join priv entry))
-          (contains? #{"sdk-code.term" ".claim" "parts"} entry) :ok
+          (contains? #{"sdk-code.term" "image-metadata.term" ".claim" "parts"} entry) :ok
           :else (copy-entry! src (Path/join priv entry)))))
     (doseq [entry (to-list (File/ls! running-ebin))]
       (when (or (String/ends_with? entry ".beam") (= entry "beam_lisp.app"))
@@ -536,9 +536,16 @@
           ;; The seed proofs a VM would otherwise derive from bytes it already
           ;; shipped. Sealed beside them; an immutable image reuses the rows and
           ;; a checkout or writable drop keeps decoding (AOT/seed_metadata_table).
-          seeds (timed "prime-seed-metadata" (fn [] (BeamLisp.AOT/prime_seed_metadata! priv)))]
+          seeds (timed "prime-seed-metadata" (fn [] (BeamLisp.AOT/prime_seed_metadata! priv)))
+          ;; K1: the image units' decoded metadata, sealed the same way (rows
+          ;; for `sdk-code.term`). Guarded: a floor without the producer
+          ;; function seals nothing and every reader decodes as before.
+          images (timed "prime-image-metadata"
+                   (fn [] (when (erlang/function_exported :Elixir.BeamLisp.AOT :prime_image_metadata! 1)
+                            (when (File/regular? (Path/join priv "sdk-code.term"))
+                              (BeamLisp.AOT/prime_image_metadata! priv)))))]
       (assoc acc :stages (assoc (:stages acc) :primed n :primed-native-declarations native
-                                     :primed-seed-metadata seeds)))))
+                                     :primed-seed-metadata seeds :primed-image-metadata images)))))
 
 (defn source-provenance
   "Where the sources this build stages came from. A checkout run through

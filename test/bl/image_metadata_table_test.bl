@@ -1,0 +1,94 @@
+(ns image.metadata-table-test)
+
+;; K1: the producer seals one decoded metadata row per image unit in
+;; `priv/image-metadata.term` (beside `sdk-code.term`), and an immutable image
+;; takes those rows instead of reading, hashing and decoding each artifact.
+;; The rows are only interchangeable if the sealed decode and the in-VM decode
+;; agree term for term; these tests pin that, the row checks, and the refusal
+;; of any table this VM's code did not write. On a checkout (no sealed table)
+;; the built-image cases only assert that nothing is read.
+
+(def ^:private root (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root)))
+
+(def ^:private table-path (BeamLisp.AOT/image_metadata_table_path root))
+
+(def ^:private built?
+  (and (String/starts_with? table-path "/nix/store/") (File/regular? table-path)))
+
+(defn- inventory []
+  (BeamLisp.AOT/decode_sdk_inventory! (File/read! (Path/join root "sdk-code.term"))))
+
+(defn- artifact [identity]
+  (Path/join (Path/dirname root) (str "ebin/" identity ".beam")))
+
+(defn- sample [rows n]
+  ;; A deterministic spread across the inventory, forwarders included.
+  (let [names (vec (sort (keys rows))) step (max 1 (quot (count names) n))]
+   (map (fn [i] (nth names (* i step))) (range (min n (quot (count names) step))))))
+
+(deftest a-sealed-row-is-the-decode-of-its-bytes
+ (let [inv (inventory)
+       table (if built?
+               (BeamLisp.AOT/sealed_image_table_at table-path)
+               ;; No shipped table: derive one for a sample, as the producer does.
+               (BeamLisp.AOT/image_metadata_table (BeamLisp.Tiers/priv_root)))
+       rows (:rows table)]
+  (is (BeamLisp.AOT/valid_image_table? table))
+  (is (> (count rows) 100))
+  (doseq [identity (sample rows 160)]
+   (let [row (get inv identity)
+         entry (get rows identity)
+         bytes (File/read! (artifact identity))
+         live (BeamLisp.AOT/decode_sdk_image_metadata! identity row bytes)]
+    (is (= (:sha256 row) (:sha256 entry)) identity)
+    (is (= (crypto/hash :sha256 bytes) (:sha256 entry)) identity)
+    (is (= live (erlang/binary_to_term (:decoded entry))) identity)))
+  ;; At least one forwarder (the disassembly-derived routes) is in the sample set.
+  (is (some (fn [identity] (= :mutable-forwarder (:role (get inv identity)))) (keys rows)))))
+
+(deftest a-row-that-is-not-the-sealed-row-is-not-used
+ (let [inv (inventory)
+       identity (first (filter (fn [identity] (= :mutable-forwarder (:role (get inv identity))))
+                               (sort (keys inv))))
+       row (get inv identity)]
+  (if built?
+   (do
+    (is (= (BeamLisp.AOT/decode_sdk_image_metadata! identity row (File/read! (artifact identity)))
+           (BeamLisp.AOT/sealed_image_metadata identity row)))
+    ;; Another row (same bytes digest, other content) or other bytes: nil.
+    (is (nil? (BeamLisp.AOT/sealed_image_metadata identity (assoc row :md5 (crypto/hash :md5 "x")))))
+    (is (nil? (BeamLisp.AOT/sealed_image_metadata identity (assoc row :sha256 (crypto/hash :sha256 "x")))))
+    (is (nil? (BeamLisp.AOT/sealed_image_metadata "Elixir.BeamLisp.Absent" row))))
+   ;; A writable image has no immutable table, so nothing is ever sealed.
+   (is (nil? (BeamLisp.AOT/sealed_image_metadata identity row))))))
+
+(deftest a-table-written-by-other-code-is-refused
+ (let [table {:version 1 :compiler-key (BeamLisp.AOTCache/compiler_key)
+              :decoder (erlang/apply :Elixir.BeamLisp.AOT :module_info (list :md5)) :rows {}}]
+  (is (BeamLisp.AOT/valid_image_table? table))
+  (is (not (BeamLisp.AOT/valid_image_table? (assoc table :version 2))))
+  (is (not (BeamLisp.AOT/valid_image_table? (assoc table :compiler-key "stale"))))
+  (is (not (BeamLisp.AOT/valid_image_table? (assoc table :decoder (crypto/hash :md5 "other")))))
+  (is (not (BeamLisp.AOT/valid_image_table? (assoc table :rows (list)))))
+  (is (not (BeamLisp.AOT/valid_image_table? :not-a-table)))))
+
+(deftest a-writable-path-is-never-read
+ (let [dir (Path/join (System/tmp_dir!) (str "bl-image-metadata-" (erlang/unique_integer (list :positive))))
+       path (Path/join dir "image-metadata.term")]
+  (try
+   (File/mkdir_p! dir)
+   (File/write! path (erlang/term_to_binary {:version 1 :compiler-key (BeamLisp.AOTCache/compiler_key)
+                                            :decoder (erlang/apply :Elixir.BeamLisp.AOT :module_info (list :md5))
+                                            :rows {}}))
+   (is (nil? (BeamLisp.AOT/sealed_image_table_at path)))
+   (finally (File/rm_rf! dir)))))
+
+(deftest the-env-reader-answers-the-decode-on-either-path
+ ;; Through Env (the callers' door) the answer equals the decode of the bytes,
+ ;; whether it came from the sealed table (built image) or a live decode.
+ (let [inv (inventory)]
+  (doseq [identity (take 12 (sample inv 12))]
+   (let [row (get inv identity)
+         path (artifact identity)]
+    (is (= (BeamLisp.AOT/decode_sdk_image_metadata! identity row (File/read! path))
+           (BeamLisp.Env/sdk_image_metadata_at! identity row path)) identity)))))

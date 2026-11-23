@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Paired cold starts of `bl run` (println 1) on store SDK images, alternating:
+#   scripts/sealed-boot/measure SDK_SELECTION ROUNDS LABEL=STORE_ROOT ...
+# STORE_ROOT is a directory holding image/ (the SDK selection itself, or a
+# build-image result). Each round runs every image once through the SDK's own
+# boot path (`boot-at.exs` = its boot.exs with the image chosen), then once
+# more with the stage probe. Prints `cold LABEL ms` and `phases LABEL ...`.
+set -uo pipefail
+sdk=$(readlink -f "$1"); rounds=$2; shift 2
+here=$(cd "$(dirname "$0")" && pwd)
+eval "$(grep '^export' "$sdk/bin/bl-cold")"
+unset BL_INTERNAL_PRODUCER
+platform=$(dirname "$(dirname "$(command -v drop-launcher)")")
+out=${OUT:-/tmp/k1-$USER/measure}; mkdir -p "$out"; cd "$out"
+echo '(println 1)' > probe.bl
+uptime
+for r in $(seq 1 "$rounds"); do
+  for pair in "$@"; do
+    label=${pair%%=*}; root=${pair#*=}
+    export K1_LIB=$root/lib K1_IMAGE=$root/image BL_ROOT=$root/image BL_EBIN=$root/image/ebin
+    t0=$(date +%s%6N); "$platform/bin/elixir" "$here/boot-at.exs" run probe.bl > o.txt 2> e.txt; rc=$?; t1=$(date +%s%6N)
+    echo "cold $label round=$r rc=$rc out=$(tr -d '\n' < o.txt) ms=$(( (t1-t0)/1000 ))"
+    [ $rc = 0 ] || tail -5 e.txt
+  done
+  for pair in "$@"; do
+    label=${pair%%=*}; root=${pair#*=}
+    export K1_LIB=$root/lib K1_IMAGE=$root/image BL_ROOT=$root/image BL_EBIN=$root/image/ebin
+    t0=$(date +%s%6N); "$platform/bin/elixir" "$here/boot-at.exs" --script "$here/phases.exs" run probe.bl > o.txt 2> e.txt; rc=$?; t1=$(date +%s%6N)
+    echo "phases $label round=$r rc=$rc ms=$(( (t1-t0)/1000 )) $(grep '^k1' e.txt | tr '\n' ' ')"
+  done
+done
+uptime
