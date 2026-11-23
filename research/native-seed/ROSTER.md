@@ -340,21 +340,29 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - with the generation service off: 73 ms;
   - with the platform cache off: 41 ms.
 
-#### U13 ⏳ A caller can steer which VM owns its request with `BL_CHECKOUT_SDK_INPUTS` · S · client · since batch 17
-- **Symptom.** `test/scripts/checkout_transport.py` fails at `caller-cannot-supply-engine-pin`: with `BL_CHECKOUT_SDK_INPUTS` set to 64 zeros, the owner differs from `first`.
-  - It passes on main before batch 17 (`7e4b5823a`).
-  - It fails on batch 18 and batch 19.
-  - The suspect is U10's generation service (`tooling/drop/src/generation.rs`, `checkout.rs:144`, `launcher.rs:631`). The client should drop or override a caller's value, never key a VM by it.
-- **Done when.** `checkout_transport.py` passes end to end on the SDK, and the generation service stays on (warm median within 2 ms of 26 ms).
+#### U13 ✅ The checkout, not the caller, supplies the engine pin · landed batch 20 (`6b4a4074f`)
+- **Cause.** U10 moved `set_var("BL_CHECKOUT_SDK_INPUTS")` after `checkout_generations`, so the runtime token folded the caller's value or nothing. That had two effects:
+  - a caller could choose its VM;
+  - editing `nix/` or `tooling/drop` stopped retiring the VM.
+- **Fix (`c95703e54`).**
+  - The captured fingerprint is passed in explicitly, and the token is byte-identical to the pre-17 one.
+  - The variable is dropped from the service's token environment.
+  - The resident socket name includes the client executable (protocol v2).
+- **Second fix (`bb8069980`).** A file the realm records after an answer was missed, because the re-walk served cached project tokens. `watch_inputs` now clears them.
+- **Gate 20.** `checkout_transport.py` exits 0.
+- **Cleanup.** Old-client residents never exit. Kill them once with `for p in $(pgrep -f -- "--generation-servic[e]"); do kill $p; done`. The bracket keeps the pattern from matching your own shell.
 
-#### U14 ⏳ `realm_shared_test` and `session_test`'s daemon case fail on main · S · BL runtime · old
-- **Symptom.** `test/bl/vm/realm_shared_test.bl` gives 53 passed, 53 failed and 6 errored. `session_test` fails `a-daemon-records-its-build-and-cleans-up-on-stop` (3).
-  - The failures are identical before batch 17 (`7e4b5823a`), on batch 18, and on batch 19.
-  - Errors include `FunctionClauseError :inet.tcp_close/1` and `String.contains?/2`, and a test's `ran` marker is missing.
-  - After this file runs, the realm is unusable, so later requests in a gate print nothing. Run it last.
-- **Done when.** Both files pass in a warm realm, and the ten files still pass after them.
-
-### N — the native compiler on the default path
+#### U14 ✅ Sessions inside a VM keep their own records · landed batch 20 (`85f9d8ddb`, `a7063f090`)
+- **Cause.** These were VM-wide in `priv/std/vm/session.bl`, not per session:
+  - the draining flag;
+  - the in-flight count;
+  - the realm list.
+- **Effect.** An inner session's stop waited on the outer `bl test` request and set the VM's draining flag, which killed the warm realm. That caused all 53 + 6 `realm_shared` failures and the 3 `session_test` failures.
+- **One stale test.** The schedule test relied on the inner session clearing commands-only.
+- **Gate 20.**
+  - Both files pass warm, twice, then the ten files pass in the same realm.
+  - Cold passes 53 / 111 / 43.
+- **Left.** `contextual_session_retirement_test` still assumes it is the VM's only session. It passes cold, but run warm it takes the realm down, so keep it out of warm runs.
 
 #### N1 ✅ `cerl` as data on the native host · S+ · native-only
 - **Why.** The native image already carries `lower` and `lower-core`
