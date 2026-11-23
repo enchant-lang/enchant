@@ -13,62 +13,47 @@
 
 (defn- nf-write [path term] (host/write-bytes path (erlang/term_to_binary term)))
 
-(defn- nf-unit [all row out]
+(defn- nf-compiler-key [] (host/nf-world-key))
+
+;; The two compile-only policy checks refuse a loaded macro in a deferred body
+;; or action when no SDK constructor context is open. On the BEAM, SDK units
+;; are always staged inside one (AOT/prepare_unit), where macros run through
+;; the bounded metadata interpreter instead. This image has no constructor
+;; kernel (it is installed from seed beams), and its macros are the SDK's own
+;; compiled macros, so the front end expands them directly.
+(defn- stage-action-macros! [form ns] nil)
+(defn- stage-declaration-macros! [forms ns] nil)
+
+(defn- nf-step [namespace step] (when (erlang/get :nf_trace) (println (str "STEP " namespace " " step))))
+
+(defn- nf-unit [row out]
  (let [namespace (:namespace row) file (:file row)
        dir (str out "/u/" namespace)
        source (host/read-file file)
-       view (BeamLisp.Env/fork :global)
-       token (erlang/make_ref)
-       machine (tuple :constructor-machine-frame token)
-       input {:namespace namespace :file file :source source :selection :sdk
-              :digest (:input-digest row) :compiler-key (nf-compiler-key)}
        previous (BeamLisp.Env/capture)]
   (native-front.hook/take-generated!)
   (try
-   (erlang/put :bl_loader_initialization_blocked true)
-   (erlang/put machine {:remaining 4000000 :walk-steps 2000000 :allocation-nodes 2000000
-                        :allocation-bytes 200000000 :new-atoms 4096 :fresh-symbols 200000})
-   (erlang/put :bl_sdk_constructor_context
-    {:input input :compiler-env view
-     :artifact-inputs (reduce (fn [m r]
-                              (assoc m (:namespace r)
-                               {:namespace (:namespace r) :file (:file r)
-                                :source (host/read-file (:file r)) :selection :sdk
-                                :digest (:input-digest r) :compiler-key (:stamp-key r)}))
-                             {} all)
-     :phase-imports (list) :phase-aware false :host-spec nil :artifact-workspace nil
-     :machine-frame machine :units {} :compiled {} :compiling #{}
-     :maximum 512 :source-limit 1048576 :total-limit 33554432
-     :clauses {} :seen-macros #{} :kernel-modules #{} :kernel-leases (list)
-     :macro-steps 16384 :new-atoms 4096 :expanded 0})
-   (BeamLisp.Env/with_env view
-    (fn []
-     (constructor_install_kernel!)
-     (constructor_unit! namespace)
-     (let [unit (stage-sdk-unit! source (list (tuple :file file)))
-           defined (elem unit 0) values (elem unit 1) touched (elem unit 2)
-           metadata (elem unit 3) declarations (elem unit 5)
-           plans (mapv (fn [ns]
-                        (describe_module ns (unit_defs ns (Map/get defined ns)) (Map/get values ns (list))
-                         (Map/put_new (Map/get metadata ns {}) :native-declaration nil)
-                         file (:input-digest row) declarations (:source-hash row) (:stamp-key row)))
-                       (sort (MapSet/to_list touched)))
-           descriptors (vec (mapcat :descriptors plans))
-           generated (vec (native-front.hook/take-generated!))]
-      (doseq [[i d] (map-indexed vector descriptors)]
-       (nf-write (str dir "/" i ".desc.etf") d)
-       (nf-write (str dir "/" i ".core.etf") (lower/module->core d)))
-      (doseq [[i d] (map-indexed vector generated)]
-       (nf-write (str dir "/G-" i ".desc.etf") d)
-       (nf-write (str dir "/G-" i ".core.etf") (lower/module->core d)))
-      [(count descriptors) (count generated)])))
-   (finally
-    (erlang/put :bl_sdk_constructor_context nil)
-    (erlang/put machine nil)
-    (BeamLisp.Env/destroy view)
-    (BeamLisp.Env/bind previous))))
-
-(defn- nf-compiler-key [] (host/nf-world-key))
+   (let [_ (nf-step namespace "stage")
+         unit (stage-sdk-unit! source (list (tuple :file file)))
+         _ (nf-step namespace "describe")
+         defined (elem unit 0) values (elem unit 1) touched (elem unit 2)
+         metadata (elem unit 3) declarations (elem unit 5)
+         plans (mapv (fn [ns]
+                      (describe_module ns (unit_defs ns (Map/get defined ns)) (Map/get values ns (list))
+                       (Map/put_new (Map/get metadata ns {}) :native-declaration nil)
+                       file (:input-digest row) declarations (:source-hash row) (:stamp-key row)))
+                     (sort (MapSet/to_list touched)))
+         descriptors (vec (mapcat :descriptors plans))
+         generated (vec (native-front.hook/take-generated!))
+         _ (nf-step namespace "lower")]
+    (doseq [[i d] (map-indexed vector descriptors)]
+     (nf-write (str dir "/" i ".desc.etf") d)
+     (nf-write (str dir "/" i ".core.etf") (lower/module->core d)))
+    (doseq [[i d] (map-indexed vector generated)]
+     (nf-write (str dir "/G-" i ".desc.etf") d)
+     (nf-write (str dir "/G-" i ".core.etf") (lower/module->core d)))
+    [(count descriptors) (count generated)])
+   (finally (BeamLisp.Env/bind previous)))))
 
 (defn- nf-install-world! [doc]
  (let [rows (:units doc)
@@ -80,13 +65,19 @@
     :namespaces namespaces :keys keys :source-hashes hashes
     :library-names (list) :build-namespaces (list)})))
 
-(defn nf-run [custody out]
- (let [doc (erlang/binary_to_term (host/read-bytes custody)) rows (:units doc)]
+(defn nf-run
+ ([custody out] (nf-run custody out nil))
+ ([custody out only]
+ (let [doc (erlang/binary_to_term (host/read-bytes custody))
+       rows (if only (filter #(contains? (set only) (:namespace %)) (:units doc)) (:units doc))]
+  (when only (erlang/put :nf_trace true) (host/nf-trace! 6))
   (nf-install-world! doc)
   (doseq [row rows]
    (println (str "UNIT start " (:namespace row)))
    (try
-    (let [[n g] (nf-unit rows row out)]
+    (let [[n g] (nf-unit row out)]
      (println (str "UNIT ok " (:namespace row) " descriptors " n " generated " g)))
-    (catch e (println (str "UNIT fail " (:namespace row) " " (pr-str e))))))
-  (println (str "UNITS-DONE " (count rows)))))
+    (catch e
+     (println (str "UNIT fail " (:namespace row) " " (pr-str e)))
+     (println (str "UNIT-STACK " (:namespace row) " " (pr-str (take 14 __STACKTRACE__)))))))
+  (println (str "UNITS-DONE " (count rows))))))

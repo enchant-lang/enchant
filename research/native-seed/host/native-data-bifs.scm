@@ -630,7 +630,14 @@
      (native-pdict (cadddr (car rest))) (nf-world (car (cddddr (car rest))))
      (set! nf-env-stack (cdr rest)) (native-link-changed!) (bl-key "ok"))
     (else (scan (cdr rest)))))))
-(nf-leaf! "Elixir.BeamLisp.Env/with_env/2" (lambda (token thunk) (nf-call thunk)))
+;; with_env binds the env id the thunk sees (env_id/0), as the BEAM's
+;; process dictionary does; the rows themselves are the one native table.
+(define nf-env-current #f)
+(define (nf-set-leaf! key proc) (if (native-map-has? native-leaf-registry key) (native-replace-leaf! key proc) (native-add-leaf! key proc)))
+(nf-leaf! "Elixir.BeamLisp.Env/with_env/2"
+ (lambda (token thunk)
+  (let ((saved nf-env-current))
+   (dynamic-wind (lambda () (set! nf-env-current token)) (lambda () (nf-call thunk)) (lambda () (set! nf-env-current saved))))))
 (nf-leaf! "Elixir.BeamLisp.Env/with_namespace_lock/2" (lambda (ns thunk) (nf-call thunk)))
 (nf-leaf! "Elixir.BeamLisp.Env/with_publication/2" (lambda (ns thunk) (nf-call thunk)))
 (nf-leaf! "Elixir.BeamLisp.Env/with_module_locks/2" (lambda (mods thunk) (nf-call thunk)))
@@ -777,5 +784,49 @@
 (nf-leaf! "Elixir.BeamLisp.PackageAuthority/sdk_unit_compiled?/1"
  (lambda (ns) (not (eq? (nf-ns-entry ns) native-missing))))
 
-(nf-leaf! "Elixir.BeamLisp.Env/env_id/0" (lambda () "global"))
+(nf-set-leaf! "Elixir.BeamLisp.Env/env_id/0" (lambda () (if nf-env-current nf-env-current (list (bl-key "global")))))
 (nf-leaf! "Elixir.BeamLisp.Env/current_ns/0" (lambda () native-env-current))
+
+;; ── Front-end diagnosis: host/nf-trace!/1 makes the next few host (Scheme)
+;; conditions print the Scheme frames live at the raise, to stdout. Off by
+;; default; front-end/stage.bl turns it on for a named-unit run.
+(define nf-trace-left 0)
+(define nf-trace-seen '())
+(define (nf-trace-frames)
+ (call/cc (lambda (here)
+  (let loop ((o (inspect/object here)) (i 0) (out '()))
+   (if (or (>= i 60) (not (eq? (o 'type) 'continuation))) (reverse out)
+    (let* ((code (o 'code)) (name (and code (code 'name))))
+     (loop (o 'link) (+ i 1) (if name (cons name out) out))))))))
+(define nf-plain-catcher with-exception-catcher)
+(set! with-exception-catcher
+ (lambda (handler thunk)
+  (if (<= nf-trace-left 0) (nf-plain-catcher handler thunk)
+   ((call/cc (lambda (k)
+     (with-exception-handler
+      (lambda (e)
+       (if (and (> nf-trace-left 0) (not (native-raised? e)) (not (memq e nf-trace-seen)))
+        (let ((text (with-output-to-string "" (lambda () (display-exception e (current-output-port))))))
+         (set! nf-trace-seen (cons e nf-trace-seen))
+         (set! nf-trace-left (- nf-trace-left 1))
+         (display "NF-TRACE ") (write text) (display " ") (write (nf-trace-frames)) (newline)))
+       (k (lambda () (handler e))))
+      (lambda () (call-with-values thunk (lambda vs (lambda () (apply values vs))))))))))))
+(nf-leaf! "host/nf-trace!/1" (lambda (n) (set! nf-trace-left n) (bl-key "ok")))
+
+;; ── Front end: Elixir Map over BL vectors and sets ──────────────────────────
+;; On the BEAM a vector is %BeamLisp.Vector{items, meta} and a set is
+;; %BeamLisp.Set{members}: plain maps to every Map function. Staging walks
+;; compiler data with Map/to_list and rebuilds it with Map/new, so the native
+;; Map leaves read a vector or set through its struct fields, and a map built
+;; with a Vector or Set :__struct__ becomes that value again.
+(define (nf-view m) (if (or (bl-tag? m 'vec) (bl-tag? m 'set) (native-opaque-struct? m)) (native-struct-fields m) m))
+(define (nf-rebuild m)
+ (let ((mod (if (bl-tag? m 'map) (native-raw-map-get m native-struct-key bl-nil) bl-nil)))
+  (if (or (eq? mod native-vector-module-key) (eq? mod native-set-module-key))
+   (bl-struct mod (native-raw-remove m native-struct-key)) m)))
+(nf-set-leaf! "Elixir.Map/get/2" (lambda (m k) (native-raw-get (nf-view m) k)))
+(nf-set-leaf! "Elixir.Map/get/3" (lambda (m k d) (native-raw-get (nf-view m) k d)))
+(nf-set-leaf! "Elixir.Map/to_list/1" (lambda (m) (native-map-pairs (native-assert-map m))))
+(nf-set-leaf! "Elixir.Map/has_key?/2" (lambda (m k) (native-raw-map-has? (nf-view m) k)))
+(nf-set-leaf! "Elixir.Map/new/1" (lambda (xs) (nf-rebuild (h-bmap (native-finite-items xs)))))
