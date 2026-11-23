@@ -653,6 +653,12 @@
           (try (File/rm! manifest) (catch _ nil))
           :error)))))
 
+(defn- sources_scratch?
+  "Is `abs` under the system temp dir while the project `root` is not?"
+  [root abs]
+  (let [tmp (erlang/iolist_to_binary (list (Path/expand (System/tmp_dir!)) "/"))]
+    (and (String/starts_with? abs tmp) (erlang/not (String/starts_with? root tmp)))))
+
 (defn source_record_candidate
   "Record one candidate `find_file` examined in `manifest` (for the realm rooted
    at `root`): `raw` is the file's bytes, or nil when there is no such file."
@@ -665,8 +671,11 @@
       (when (and (erlang/not (ets/member table (tuple manifest abs)))
                  (erlang/not (ets/member table (tuple :full manifest))))
         (ets/insert table (tuple (tuple manifest abs) true))
-        (when (erlang/not (Enum/any? (BeamLisp.Tiers/dirs)
+        (when (and (erlang/not (Enum/any? (BeamLisp.Tiers/dirs)
                             (fn [d] (String/starts_with? abs (erlang/iolist_to_binary (list (Path/expand d) "/"))))))
+                   ;; a miss in a scratch directory (a test's temporary project)
+                   ;; is not part of the project's own search path
+                   (erlang/not (and (nil? raw) (sources_scratch? root abs))))
           (let [at (if (nil? raw) (source_highest_missing abs) abs)]
             (when (erlang/not (ets/member table (tuple :listed manifest at)))
               (ets/insert table (tuple (tuple :listed manifest at) true))
@@ -706,6 +715,28 @@
   [target path raw]
   (when (erlang/is_map target)
     (source_record_candidate (maps/get :manifest target) (maps/get :root target) path raw)))
+
+(defn- collect_absent
+  "Remember an absent candidate of the lookup in progress. Whether it matters is
+   known only once the lookup has an answer (`note_absent`)."
+  [target path]
+  (when (erlang/is_map target)
+    (Process/put :bl_sources_absent (cons path (Process/get :bl_sources_absent (list))))))
+
+(defn- note_absent
+  "End of a lookup. The absent candidates before the answer matter only when the
+   answer is a PROJECT file: a file appearing earlier in the search order would
+   take its place while the realm still holds the old one. A namespace the image
+   owns cannot be replaced from the project (a realm refuses such a file), and a
+   lookup that found nothing left nothing loaded, so neither records its misses."
+  [target result]
+  (let [absent (Process/get :bl_sources_absent (list))]
+    (Process/delete :bl_sources_absent)
+    (when (and (erlang/is_map target) (ok-result? result)
+               (erlang/not (Enum/any? (BeamLisp.Tiers/dirs)
+                             (fn [d] (String/starts_with? (Path/expand (erlang/element 2 result))
+                                       (erlang/iolist_to_binary (list (Path/expand d) "/")))))))
+      (Enum/each absent (fn [p] (note_source target p nil))))))
 
 (defn- env_row
   "The value of a chain-walking env row, or nil."
@@ -1207,7 +1238,9 @@
   ([ns dirs]
   (when-not (erlang/== dirs (list))
    (let [relatives (source_relatives ns)
-         row (sources_target)]
+         row (sources_target)
+         _ (Process/delete :bl_sources_absent)
+         result
     (Enum/reduce dirs nil
       (fn [dir acc]
         (if (ok-result? acc)
@@ -1226,7 +1259,9 @@
                         (if (nil? acc2)
                           (tuple :wrong_ns path (declared_ns content))
                           acc2)))
-                    (do (note_source row path nil) acc2)))))))))))))
+                    (do (collect_absent row path) acc2)))))))))]
+     (note_absent row result)
+     result))))
 
 ; ── reading source: plain / literate / shebang ──────────────────────────────
 

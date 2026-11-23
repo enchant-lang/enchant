@@ -175,3 +175,32 @@
       (is (not= first-header (first (lines manifest))) "a new token: the client sees a new epoch")
       (is (= 2 (count (lines manifest))) "what the live VM had recorded is recorded again"))
     (File/rm_rf! root)))
+
+(deftest misses-matter-only-before-a-project-file
+  (let [root (scratch)
+        manifest (str root "/.bl/realm-sources.v1")
+        e (realm-at root "misses-realm")
+        dirs (list (str root "/first"))]
+    (testing "a namespace the image owns: no project file can replace it, nothing recorded"
+      (is (some? (resolve-in e dirs "bl.cli")))
+      (is (not (some (fn [l] (String/starts_with? l "A\t")) (if (File/exists? manifest) (lines manifest) [])))))
+    (testing "a namespace nobody serves: nothing was loaded, nothing recorded"
+      (is (nil? (resolve-in e dirs "no.such.namespace-anywhere")))
+      (is (not (some (fn [l] (String/starts_with? l "A\t")) (if (File/exists? manifest) (lines manifest) [])))))
+    (testing "a project file: what stood before it is recorded"
+      (File/mkdir_p! (str root "/second"))
+      (File/write! (str root "/second/mine.bl") "(ns mine)\n")
+      (is (some? (resolve-in e (list (str root "/first") (str root "/second")) "mine")))
+      (is (some (fn [l] (= l (str "A\t" root "/first"))) (lines manifest))))
+    (File/rm_rf! root)))
+
+(deftest a-miss-in-a-scratch-directory-is-not-the-projects
+  (let [root (scratch)
+        manifest (str root "/.bl/realm-sources.v1")
+        record (fn [path raw] (BeamLisp.Loader/source_record_candidate manifest "/var/project" path raw))]
+    (record "/tmp/some-test-project/src/a.bl" nil)
+    (record "/tmp/some-test-project/src/b.bl" "abc")
+    (let [ls (lines manifest)]
+      (is (not (some (fn [l] (String/ends_with? l "/a.bl")) ls)))
+      (is (some (fn [l] (String/ends_with? l "/b.bl")) ls)))
+    (File/rm_rf! root)))
