@@ -198,10 +198,15 @@
    (BeamLisp.Loader/with_load_path (Path/dirname path)
     (fn []
       (let [source (BeamLisp.Loader/read_source path)
-            hash (source-hash source)
+            ;; This module runs the SDK producers, on the floor that was already
+            ;; installed when they started. A floor older than this source has no
+            ;; eval_string_forms/3, so the cache is used only where the compiler
+            ;; can support it and the file compiles exactly as before elsewhere.
+            replay? (erlang/function_exported :Elixir.BeamLisp.Compiler :eval_string_forms 3)
+            hash (when replay? (source-hash source))
             ;; the check happens BEFORE this request's own global intern: the
             ;; recorded context includes the intern of the run that recorded it
-            entry (run-cache-get hash)]
+            entry (when replay? (run-cache-get hash))]
         ;; `*command-line-args*` is a LIBRARY binding, not the caller's state:
         ;; it is interned into core at :global (the env every chain ends in) so
         ;; the script still sees it, and a command that serves a project REALM
@@ -211,13 +216,17 @@
         ;; Read it from `BeamLisp/argv` too — this is the compat var, set per run.
         (BeamLisp.Env/with_env :global
           (fn [] (BeamLisp.Env/intern "core" "*command-line-args*" (argv))))
-        (if (some? entry)
+        (cond
+          (some? entry)
           (let [value (BeamLisp.Compiler/run_eval_forms (:forms entry))]
             (run-cache-put hash (:forms entry) (run-context))
             value)
+          replay?
           (let [r (BeamLisp.Compiler/eval_string_forms source (BeamLisp.Compiler/new_env) path)]
             (run-cache-put hash (:forms r) (run-context))
-            (:value r))))))))
+            (:value r))
+          :else
+          (BeamLisp.Compiler/eval_string source (BeamLisp.Compiler/new_env) path)))))))
 
 (defn repl []
   (init)
