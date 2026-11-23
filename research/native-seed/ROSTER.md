@@ -89,7 +89,10 @@ Numbers in "Done" rows are measured, never estimated.
 ### The integration gate (integrator only)
 For each batch:
 1. Merge the branches into `main`.
-2. Run `work run --memory 4G --timeout 3000 -- scripts/prepare-checkout-sdk`.
+2. Run `work run --memory 4G --timeout 3000 -- scripts/prepare-checkout-sdk`, then
+   **`./bin/bl realm stop`** on that tree before the gates. A warm realm started before the rebuild
+   keeps the old SDK modules, and a gate on it reports errors (undefined functions, a keyword
+   called with six arguments) that do not exist on the rebuilt image.
    Only when `priv/`, `nix/`, `scripts/`, `bin/`, `native/` or `tooling/drop/`
    changed. The two most recent runs took 862 s and 1301 s.
 3. Run every gate test the cards named, in one `./bin/bl test a.bl b.bl ...`.
