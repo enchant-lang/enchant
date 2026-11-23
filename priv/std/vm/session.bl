@@ -173,10 +173,10 @@
         (when (not= :cancelled result) (conn-send (wire/exit (elem frame 1) result)))))))))
 
 (defn start-heartbeat
-  "While a request runs, send `id`'s client a heartbeat every `interval-ms`, from a
-   process of its own so a command that blocks (a long test, a compile) cannot
-   starve it. Returns the pid; `stop-heartbeat` ends it. The client reads this as
-   proof the VM is alive and the command merely quiet."
+  "Send `id`'s client a heartbeat every `interval-ms` from a process of its own,
+   for a caller that has no waiting process to beat from (a request's command
+   beats from `await-command`). Returns the pid; `stop-heartbeat` ends it. The
+   client reads this as proof the VM is alive and the command merely quiet."
   [conn-send id interval-ms]
   (spawn (fn []
            (loop []
@@ -189,12 +189,34 @@
   (erlang/send pid :stop)
   :ok)
 
+(defn await-command
+  "Wait in THIS process for `child`, the command of request `id`: its exit code,
+   `:cancelled` when the client left first (the child is ended), or 1 when the
+   child died without answering. While it waits, `id`'s client gets a heartbeat
+   every `interval-ms`. The beat comes from this waiting process, not one of its
+   own: the command runs in `child`, so nothing it does can starve this receive,
+   and a request no longer pays a process start for its liveness frames."
+  [child conn-send id interval-ms]
+  (let [mref (erlang/apply :erlang :monitor (list :process child))]
+    (loop []
+      (receive
+        [:command-done code] (do (erlang/apply :erlang :demonitor (list mref (list :flush))) code)
+        :client_gone (do (erlang/apply :erlang :demonitor (list mref (list :flush)))
+                         (erlang/exit child :client_gone)
+                         :cancelled)
+        ; the command's process ended without answering (an exit the try did not see)
+        [:DOWN _r :process _p reason]
+        (do (conn-send (wire/stderr id 999999 (str "bl: the command ended abnormally: " (pr-str reason) "\n")))
+            1)
+        (after interval-ms
+          (do (conn-send (wire/heartbeat id)) (recur)))))))
+
 (defn- run-command
   "Run the command of request `id` in a CHILD of this connection's process and wait
    for it. Returns the exit code, or `:cancelled` when the client left first.
 
    The child is what a cancel ends, so this process stays alive to run the request's
-   cleanup (the in-flight count, the heartbeat, the group leader): a process killed
+   cleanup (the in-flight count, the group leader): a process killed
    from outside skips its `finally`. A cancel ends the command's OWN process, and with
    it whatever it was blocked in. Processes the command started that outlive it are
    not touched: a `serve` or a schedule is a realm member on purpose, and ending a
@@ -212,16 +234,7 @@
                             (catch e
                               (do (conn-send (wire/stderr id 999999 (str "bl: " (ex-message e) "\n"))) 1)))]
                     (erlang/send parent [:command-done r]))))]
-    (let [mref (erlang/apply :erlang :monitor (list :process child))]
-      (receive
-        [:command-done code] (do (erlang/apply :erlang :demonitor (list mref (list :flush))) code)
-        :client_gone (do (erlang/apply :erlang :demonitor (list mref (list :flush)))
-                         (erlang/exit child :client_gone)
-                         :cancelled)
-        ; the command's process ended without answering (an exit the try did not see)
-        [:DOWN _r :process _p reason]
-        (do (conn-send (wire/stderr id 999999 (str "bl: the command ended abnormally: " (pr-str reason) "\n")))
-            1)))))
+    (await-command child conn-send id wire/HEARTBEAT-MS)))
 
 (defn- dispatch-command [frame conn-send]
   ;; frame = {:request id %{argv cwd env …}}
@@ -233,13 +246,11 @@
     ;; the command's stdout becomes :stdout frames on conn, through a group leader
     (let [worker (erlang/self)
           proxy (io/start-with-send conn-send id)
-          beat (start-heartbeat conn-send id wire/HEARTBEAT-MS)
           prev-gl (erlang/group_leader)]
       (erlang/group_leader proxy worker)
       (let [code (try
                    (run-command argv cwd env conn-send id)
                    (finally
-                     (stop-heartbeat beat)
                      (erlang/group_leader prev-gl worker)))]
         (io/finish proxy)
         code))))

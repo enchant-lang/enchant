@@ -185,14 +185,7 @@ fn query_at(
     let mut line = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     line.push(b'\n');
     stream.write_all(&line).map_err(|e| e.to_string())?;
-    let mut answer = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        let n = stream.read(&mut byte).map_err(|e| e.to_string())?;
-        if n == 0 || byte[0] == b'\n' { break; }
-        answer.push(byte[0]);
-        if answer.len() > 64 * 1024 { return Err("answer too large".into()); }
-    }
+    let answer = read_line(&mut stream, 64 * 1024).map_err(|e| if e.is_empty() { "answer too large".into() } else { e })?;
     let value: serde_json::Value = serde_json::from_slice(&answer).map_err(|e| e.to_string())?;
     let ok = value.get("ok").ok_or_else(|| value.get("fallback").and_then(|v| v.as_str()).unwrap_or("service declined").to_string())?;
     let field = |name: &str| ok.get(name).and_then(|v| v.as_str()).map(str::to_string).ok_or_else(|| format!("answer lacks {name}"));
@@ -275,15 +268,28 @@ impl Unavailable {
 #[cfg(target_os = "linux")]
 fn read_request(stream: &mut UnixStream) -> Result<serde_json::Value, String> {
     stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).ok();
-    let mut line = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        let n = stream.read(&mut byte).map_err(|e| e.to_string())?;
-        if n == 0 || byte[0] == b'\n' { break; }
-        line.push(byte[0]);
-        if line.len() > 256 * 1024 { return Err("request too large".into()); }
-    }
+    let line = read_line(stream, 256 * 1024).map_err(|e| if e.is_empty() { "request too large".into() } else { e })?;
     serde_json::from_slice(&line).map_err(|e| e.to_string())
+}
+
+/// One newline-terminated message, without its newline. A connection carries
+/// one request and one answer, so whatever follows the newline is not read for
+/// anyone; reading in blocks instead of a byte per `read` saves one system call
+/// per byte (a 224-byte answer was 224 reads). An oversized line is `Err("")`.
+#[cfg(target_os = "linux")]
+fn read_line(stream: &mut UnixStream, limit: usize) -> Result<Vec<u8>, String> {
+    let mut line = Vec::new();
+    let mut block = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut block).map_err(|e| e.to_string())?;
+        if n == 0 { return Ok(line); }
+        if let Some(end) = block[..n].iter().position(|&b| b == b'\n') {
+            line.extend_from_slice(&block[..end]);
+            return if line.len() > limit { Err(String::new()) } else { Ok(line) };
+        }
+        line.extend_from_slice(&block[..n]);
+        if line.len() > limit { return Err(String::new()); }
+    }
 }
 
 #[cfg(target_os = "linux")]

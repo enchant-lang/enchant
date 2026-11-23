@@ -222,6 +222,41 @@
       (is (>= (:beats r) 4) "the client sees life while the command is quiet")
       (is (= 0 (:after-stop r)) "a finished command leaves no beat behind"))))
 
+;; The command's wait beats from the waiting process itself (U11: one process
+;; start fewer per request), so the same contract is checked on that path.
+(defn- await-quiet-child
+  "Start a child that is silent for `ms` and then answers `code` the way
+   run-command's child does, and wait for it with `session/await-command` at a
+   `interval-ms` beat. Answers the result and the beats seen before and after."
+  [ms code interval-ms]
+  (let [parent (erlang/self)
+        sent (atom 0)
+        send (fn [_bytes] (swap! sent inc) nil)
+        child (spawn (fn [] (erlang/apply :timer :sleep (list ms)) (erlang/send parent [:command-done code])))
+        result (session/await-command child send (erlang/apply :crypto :strong_rand_bytes (list 16)) interval-ms)
+        n @sent]
+    (erlang/apply :timer :sleep (list (* 3 interval-ms)))
+    {:result result :beats n :after (- @sent n)}))
+
+(deftest a-waiting-command-beats-from-its-waiter-and-stops-with-it
+  (testing "a 600 ms silence at a 100 ms beat: several beats, the child's code, nothing after"
+    (let [r (await-quiet-child 600 7 100)]
+      (is (= 7 (:result r)))
+      (is (>= (:beats r) 4) "the client sees life while the command is quiet")
+      (is (= 0 (:after r)) "a finished command leaves no beat behind")))
+  (testing "a client that leaves cancels the command and ends its process"
+    (let [child (spawn (fn [] (erlang/apply :timer :sleep (list 60000))))
+          me (erlang/self)]
+      (erlang/send_after 50 me :client_gone)
+      (is (= :cancelled (session/await-command child (fn [_] nil) (erlang/list_to_binary (list 65)) 1000)))
+      (erlang/apply :timer :sleep (list 50))
+      (is (not (erlang/is_process_alive child)))))
+  (testing "a command whose process dies without answering is exit 1, with a reason on stderr"
+    (let [errs (atom [])
+          child (spawn (fn [] (erlang/exit :boom)))]
+      (is (= 1 (session/await-command child (fn [bytes] (swap! errs conj bytes)) (erlang/list_to_binary (list 65)) 1000)))
+      (is (= 1 (count @errs))))))
+
 (deftest the-beat-is-well-inside-what-a-client-will-wait
   (testing "the interval the VM beats at is far below the 60 s stall timeout the launcher uses"
     (is (< vm.wire/HEARTBEAT-MS 10000))

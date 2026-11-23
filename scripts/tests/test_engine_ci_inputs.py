@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -214,6 +215,55 @@ class EngineCIInputTests(unittest.TestCase):
                                       self.root / 'nix/engine-inputs.json', script), start=2):
             path.write_bytes(path.read_bytes() + b'\n# changed producer input\n')
             self.assertEqual(count, len(select()))
+
+    def test_platform_selection_reuses_a_settled_stat_listing_and_rereads_any_change(self):
+        script = self.root / 'scripts/prepare-checkout-platform'
+        shutil.copy2(ROOT / 'scripts/prepare-checkout-platform', script)
+        tools, poisoned, output, calls = (self.base / 'tools', self.base / 'poisoned',
+                                          self.base / 'platform', self.base / 'calls')
+        tools.mkdir(); poisoned.mkdir(); output.mkdir()
+        (output / 'platform.json').write_text('{}')
+        (tools / 'systemd-run').write_text('#!/usr/bin/env python3\nimport os,sys\ni=sys.argv.index("nix-build")\nos.execvp(sys.argv[i],sys.argv[i:])\n')
+        (tools / 'nix-build').write_text('#!/usr/bin/env python3\nimport os,sys\nfrom pathlib import Path\n'
+            'link=Path(sys.argv[sys.argv.index("--out-link")+1])\n'
+            'link.symlink_to(os.environ["PLATFORM_FIXTURE_OUTPUT"])\n'
+            'with open(os.environ["PLATFORM_FIXTURE_CALLS"],"a") as f:f.write(link.name+"\\n")\n')
+        # A selection that reads any file's bytes fails: the reuse must not hash.
+        (poisoned / 'sha256sum').write_text('#!/bin/sh\necho "content was read" >&2\nexit 9\n')
+        for tool in (*tools.iterdir(), *poisoned.iterdir()):
+            tool.chmod(0o755)
+        env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'],
+                   PLATFORM_FIXTURE_OUTPUT=str(output), PLATFORM_FIXTURE_CALLS=str(calls))
+        env.pop('BL_CHECKOUT_DIGEST_CACHE', None)
+        no_content = dict(env, PATH=str(poisoned) + os.pathsep + env['PATH'])
+
+        def select(environment):
+            return subprocess.run([str(script)], cwd=self.base, env=environment, text=True,
+                                  capture_output=True)
+
+        recorded = self.root / '.bl/platform-stat.v1'
+        first = select(env)
+        self.assertEqual(str(output), first.stdout.strip(), first.stderr)
+        self.assertFalse(recorded.exists(), 'inputs written within the racy window are not recorded')
+        self.assertNotEqual(0, select(no_content).returncode)
+        # The script truncates its listing time to whole seconds, so its 2 s
+        # racy window can reach 3 s.
+        time.sleep(3.2)
+        self.assertEqual(str(output), select(env).stdout.strip())
+        self.assertTrue(recorded.exists())
+        settled = select(no_content)
+        self.assertEqual((0, str(output)), (settled.returncode, settled.stdout.strip()), settled.stderr)
+        self.assertNotEqual(0, select(dict(no_content, BL_CHECKOUT_DIGEST_CACHE='0')).returncode)
+        # Same length, mtime put back: ctime still moves, so the bytes are read
+        # again and name a new platform.
+        source = self.root / 'native/lazy_memo/src/lib.rs'
+        before = source.stat()
+        source.write_text(source.read_text().upper())
+        os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(before.st_size, source.stat().st_size)
+        self.assertNotEqual(0, select(no_content).returncode)
+        self.assertEqual(str(output), select(env).stdout.strip())
+        self.assertEqual(2, len(calls.read_text().splitlines()))
 
     def test_exact_predecessor_keeps_its_captured_fingerprint(self):
         expected = CACHE.source_fingerprint(self.engine, self.previous)
