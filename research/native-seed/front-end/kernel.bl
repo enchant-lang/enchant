@@ -1,6 +1,6 @@
 ; Card N2b: the constructor kernel's custody, as data, for the native front end.
 ;
-;   bl --cold run research/native-seed/front-end/kernel.bl -- OUT/kernel.etf [NAMESPACE]
+;   bl --cold run research/native-seed/front-end/kernel.bl -- OUT/kernel.etf [NAMESPACE ...]
 ;
 ; On the BEAM, AOT/prepare_unit installs a private constructor kernel from
 ; seed beams (manifest, core seed rows, phase libraries for core and sugar)
@@ -12,7 +12,7 @@
 (ns native-front.kernel)
 
 (def kernel-keys #{:kernel-manifest :kernel-phase-identity :kernel-phase-providers :kernel-phase-state
-                   :core-rows :kernel-values :kernel-core-forwarder})
+                   :core-rows :cpp-rows :kernel-values :kernel-core-forwarder})
 
 (defn- collect [acc]
  (receive
@@ -40,12 +40,14 @@
   (try (BeamLisp.AOT/prepare_unit workspace (symbol namespace))
    (finally (BeamLisp.AOT/close_workspace! workspace)))))
 
-(defn run [[out namespace]]
+(defn run [[out & namespaces]]
  (let [tracer (erlang/spawn (fn [] (collect {})))
        mfa (tuple :Elixir.BeamLisp.AOT :"constructor_context_put!" 2)]
   (erlang/trace_pattern mfa true (list :local))
   (erlang/trace (erlang/self) true (list :call (tuple :tracer tracer)))
-  (try (prepare (or namespace "clojure.walk"))
+  ;; clojure.walk installs the kernel; formal.identity also reads Core's
+  ;; seed C++ alias rows (cpp/…).
+  (try (doseq [namespace (or (seq namespaces) ["clojure.walk" "formal.identity"])] (prepare namespace))
    (finally
     (erlang/trace (erlang/self) false (list :call))
     (erlang/trace_pattern mfa false (list :local))))
