@@ -228,13 +228,17 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - **Done when.** The sweeps happen once (counted with a probe), the cold total drops (measured on
   the integration SDK), and the inventory and custody tests pass.
 
-#### U7 🔨 Cold-start hot spots · S · BL runtime · branch `lane/cold-start`
+#### U7 ✅ Cold-start hot spots · S · BL runtime · branch `lane/cold-start`
 - **Why.** U6's sampler over 3 cold runs of an unchanged store SDK (3.5–3.65 s) ranks
   `Emit.collect_execution_entries` 9.6%, `seed_artifact_metadata!` 6.7% (first decode of 95 seeds),
   `Loader.find_file` 5.2%, `compile_sdk_source!` 3.5% (a compile on an unchanged SDK), and
   `code_server:call`/`gen:do_call` ~21% (serialized loads).
 - **Change.** For each: why it runs on an unchanged immutable SDK; remove it or seal the answer at
   SDK build time; keep authentication; measure. Drop what doesn't pay.
+
+#### T2 ⏳ Three test files fail on main (predate U7) · S
+- `test/bl/emit_test.bl` ("the live module's bytes ARE the committed seed's bytes"), `test/bl/seed_publication_test.bl` (its `/tmp/bl-seed-test-host-out` manifest is missing) and `test/bl/perf/cold_namespace_load_test.bl` fail the same way on the batch-7 and batch-8 SDKs. Find whether it is the seeded floor (a `bl seed --check` question) or the tests' environment.
+- **Done when.** Each passes on a fresh integration SDK, or its premise is corrected and the reason recorded.
 
 ### N — the native compiler on the default path
 
@@ -446,6 +450,7 @@ Cards in one lane conflict; lanes run at the same time.
 |---|---|---|---|
 | ✅ | U1: the client digests what the realm loaded | The loader records each resolved source and absent candidate in `.bl/realm-sources.v1` (epoch token, self-healing); the client digests declared roots plus exactly those. An edited test helper is seen; warm run 152 → 87–96 ms, `--version` 77–80 ms. Next (U1c): 2,506 absent lines and ~35k statx per request | `2d71662e7` |
 | ✅ | `Loader/ns_home` answers in JavaScript | A page has no realms (`:global`); all 23 js_* files pass | `2d71662e7` |
+| ✅ | U7: execution receipts derived on first use | `Env/mark_emitted` stored a computed receipt (an ANF walk) for all 1,438 definitions a cold start publishes; it now stores `{:deferred …}` and the row's decoder derives it. Republication of 158 definitions 70 → 17.7 ms; cold start median 3,375 → 3,247 ms (4 pairs). Batch preload, `find_file` memo and "something compiles" measured and dropped | `0c9a9cf3d` |
 | ✅ | U6: SDK files hashed once per VM | Store files hashed once; artifact metadata and kernel disassembly reused; a warm inventory walk 118 → 98 ms; cold run paired with the previous SDK 3,594 → 3,483 ms median (load ~10). U5's "1.5 s of repeated walks" was too high: a repeat walk is ~100 ms | `c8a408a94` |
 | ✅ | J3: `js_compiled_core` passes | Fixed by W1's realm-local link fix: 11/11 | `c8a408a94` |
 | ✅ | Portable JS leaves, literate JS namespaces, `system.inputs` (from another session, lane/rich-edit) | `js_portable_leaves` 77/77, `system_inputs` 12/12, `js_boot_order` 3/3 | `c8a408a94` |
