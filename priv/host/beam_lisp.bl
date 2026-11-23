@@ -139,6 +139,54 @@
       (BeamLisp.Env/mark_runtime_initialized! owner))))))
  (BeamLisp.Loader/run_runtime_artifact_unit directory args))
 
+;; ── the compiled-form cache ─────────────────────────────────────────────────
+;;
+;; `run FILE` used to read, compile and run the whole file on every request:
+;; 4–5 ms of a warm command for a file nobody changed. The realm keeps the
+;; compiled forms of the files it ran, keyed by the file's SOURCE HASH, and
+;; replays them: no read, no compile, no macro expansion — every form still
+;; executes, so the file's effects (output, writes, definitions) happen again.
+;;
+;; Validity is the environment the file last ran in, not a clock: an entry is
+;; used only while `BeamLisp.Env/definition_context` equals the context recorded
+;; immediately after that file's previous run. `definition_context` covers ANY
+;; namespace definition and native code publication in the chain, so any other
+;; command that changed the realm — a new macro, a redefined function, a
+;; reloaded namespace — makes the comparison fail and the file is recompiled.
+;; Changes the file itself made are expected: they are part of the recorded
+;; context, refreshed after every run (compiled or replayed).
+;;
+;; The cache lives in the CALLING env (the realm), so retirement destroys it
+;; with the env. Compile-time-only effects (a macro that writes at expansion)
+;; are not repeated on a hit; that is what skipping compilation means, and the
+;; invalidation above is what keeps the compiled code faithful to its inputs.
+(def ^:private run-cache-key (tuple :run_file_cache))
+(def ^:private run-cache-limit 8)
+
+(defn- run-context []
+  (BeamLisp.Env/definition_context))
+
+(defn- run-cache-table []
+  (let [r (BeamLisp.Env/lookup run-cache-key)]
+    (if (and (erlang/is_tuple r) (erlang/== :ok (elem r 0))) (elem r 1) {})))
+
+(defn- run-cache-get [hash]
+  (let [entry (get (run-cache-table) hash)
+        context (run-context)]
+    (when (and (some? entry) (some? context) (= context (:after entry))) entry)))
+
+(defn- run-cache-put [hash forms context]
+  (when (some? context)
+    (let [table (run-cache-table)
+          kept (if (>= (count table) run-cache-limit)
+                 (dissoc table (first (keys table)))
+                 table)]
+      (BeamLisp.Env/put_key run-cache-key
+        (assoc kept hash {:forms forms :after context})))))
+
+(defn- source-hash [source]
+  (Base/encode16 (crypto/hash :sha256 source) (list (tuple :case :lower))))
+
 (defn run_file [path]
   (when (erlang/function_exported :Elixir.BeamLisp.Env :assert_native_framework_execution! 0)
     (BeamLisp.Env/assert_native_framework_execution!))
@@ -147,7 +195,11 @@
    (BeamLisp.Loader/run_artifact_unit path (argv))
    (BeamLisp.Loader/with_load_path (Path/dirname path)
     (fn []
-      (let [source (BeamLisp.Loader/read_source path)]
+      (let [source (BeamLisp.Loader/read_source path)
+            hash (source-hash source)
+            ;; the check happens BEFORE this request's own global intern: the
+            ;; recorded context includes the intern of the run that recorded it
+            entry (run-cache-get hash)]
         ;; `*command-line-args*` is a LIBRARY binding, not the caller's state:
         ;; it is interned into core at :global (the env every chain ends in) so
         ;; the script still sees it, and a command that serves a project REALM
@@ -157,7 +209,13 @@
         ;; Read it from `BeamLisp/argv` too — this is the compat var, set per run.
         (BeamLisp.Env/with_env :global
           (fn [] (BeamLisp.Env/intern "core" "*command-line-args*" (argv))))
-        (BeamLisp.Compiler/eval_string source (BeamLisp.Compiler/new_env) path))))))
+        (if (some? entry)
+          (let [value (BeamLisp.Compiler/run_eval_forms (:forms entry))]
+            (run-cache-put hash (:forms entry) (run-context))
+            value)
+          (let [r (BeamLisp.Compiler/eval_string_forms source (BeamLisp.Compiler/new_env) path)]
+            (run-cache-put hash (:forms r) (run-context))
+            (:value r))))))))
 
 (defn repl []
   (init)

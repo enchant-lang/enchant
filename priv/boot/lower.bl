@@ -577,6 +577,53 @@
   fence. Closure-producing modules and code with other live users stay loaded."
  [m] (BeamLisp.Env/release_eval_module! m))
 
+(defn eval-anf-record
+  "`eval-anf`, and also hand back the compiled beam bytes: `{:value v :beam b}`.
+   The retention rule is eval-anf's own (a closure-producing module stays
+   loaded; everything else is released when run/0 returns). A caller that
+   caches the bytes can replay the form without compiling it, through
+   `run-eval-beam`."
+  [mname node]
+  (let [desc (anf/module mname
+               (list {:op :defn-clause :fname :run :params (list) :guard nil :body node :ann {}})
+               (list [:run 0])
+               (list))
+        pair (descriptor->beam desc)
+        expected (elem pair 0)
+        beam (elem pair 1)
+        filename (erlang/binary_to_list (str expected ".beam"))
+        result (code/load_binary expected filename beam)]
+    (when (not= result (tuple :module expected))
+      (throw (ex-info "lower/eval-anf: load failed" {:module expected :result result})))
+    (let [v (erlang/apply expected :run (list))]
+      (release-eval-module! expected)
+      {:value v :beam beam})))
+
+(defn- installed-beam?
+  "Whether `mname` is loaded with exactly these bytes. A retained module (a
+   closure-producing form) is still loaded when a cached form is replayed, and
+   loading identical bytes would churn the code server for nothing."
+  [mname beam]
+  (and (erlang/module_loaded mname)
+       (let [parsed (beam_lib/md5 beam)]
+         (and (erlang/is_tuple parsed) (erlang/== :ok (elem parsed 0))
+              (erlang/== (elem (elem parsed 1) 1)
+                         (erlang/apply mname :module_info (list :md5)))))))
+
+(defn run-eval-beam
+  "Run a form from its compiled bytes, without compiling: load (unless the
+   identical module is already loaded), run/0, then apply eval-anf's retention
+   rule. Returns run/0's value."
+  [mname beam]
+  (when-not (installed-beam? mname beam)
+    (let [filename (erlang/binary_to_list (str mname ".beam"))
+          result (code/load_binary mname filename beam)]
+      (when (not= result (tuple :module mname))
+        (throw (ex-info "lower/run-eval-beam: load failed" {:module mname :result result})))))
+  (let [v (erlang/apply mname :run (list))]
+    (release-eval-module! mname)
+    v))
+
 (defn eval-anf
   "Evaluate a bl-ANF node by wrapping it as the body of run/0 in a canonical
    module descriptor, compiling via descriptor->beam, loading, and running.
@@ -592,17 +639,4 @@
    Raises if {:module expected} is not the load result — a mismatched module
    name indicates a compiler or descriptor construction bug."
   [mname node]
-  (let [desc (anf/module mname
-               (list {:op :defn-clause :fname :run :params (list) :guard nil :body node :ann {}})
-               (list [:run 0])
-               (list))
-        pair (descriptor->beam desc)
-        expected (elem pair 0)
-        beam (elem pair 1)
-        filename (erlang/binary_to_list (str expected ".beam"))
-        result (code/load_binary expected filename beam)]
-    (when (not= result (tuple :module expected))
-      (throw (ex-info "lower/eval-anf: load failed" {:module expected :result result})))
-    (let [v (erlang/apply expected :run (list))]
-      (release-eval-module! expected)
-      v)))
+  (:value (eval-anf-record mname node)))
