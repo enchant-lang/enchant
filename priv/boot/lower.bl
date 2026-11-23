@@ -610,19 +610,59 @@
               (erlang/== (elem (elem parsed 1) 1)
                          (erlang/apply mname :module_info (list :md5)))))))
 
+(defn replay-retained-limit
+  "How many replayed eval modules stay loaded at once, VM-wide."
+  []
+  64)
+
+(defn replay-retained
+  "The replayed eval modules this VM keeps loaded: `{:order (oldest … newest)
+   :beams #{module → beam}}`. A persistent_term, read without copying on every
+   replay and written only when a new module joins."
+  []
+  (persistent_term/get :bl_replay_retained {:order (list) :beams {}}))
+
+(defn- retain-replay-module!
+  "Keep `mname` (loaded from `beam`) loaded for later replays. Past
+   `replay-retained-limit` the oldest leaves the table and goes through
+   eval-anf's own retirement, so the code a replay keeps is bounded however
+   many files a VM has run. Serialized: two first replays must not drop each
+   other's entry, which would leave a module loaded that nothing releases."
+  [mname beam]
+  (erlang/apply :global :trans
+    (list (tuple :bl_replay_retained (erlang/self))
+          (fn []
+            (let [table (replay-retained)
+                  beams (:beams table)]
+              (when-not (maps/is_key mname beams)
+                (let [order (erlang/++ (:order table) (list mname))
+                      excess (erlang/- (erlang/length order) (replay-retained-limit))
+                      gone (if (erlang/> excess 0) (lists/sublist order excess) (list))
+                      kept (if (erlang/> excess 0) (lists/nthtail excess order) order)]
+                  (persistent_term/put :bl_replay_retained
+                    {:order kept :beams (maps/put mname beam (maps/without gone beams))})
+                  (lists/foreach (fn [m] (release-eval-module! m)) gone))))))))
+
 (defn run-eval-beam
   "Run a form from its compiled bytes, without compiling: load (unless the
-   identical module is already loaded), run/0, then apply eval-anf's retention
-   rule. Returns run/0's value."
+   identical module is already loaded), then run/0. Returns run/0's value.
+
+   A replayed module STAYS loaded (F2): a run cache replays the same modules
+   request after request, and loading and retiring one per form per request
+   was the largest part of an unchanged `bl run` in a warm VM (3.8 ms of the
+   VM handler, research/checked-tiles/evidence/warm-floor-f1.json). Its
+   lifetime is `retain-replay-module!`'s table, bounded VM-wide; a module that
+   left it, or that something else retired, is loaded again here."
   [mname beam]
-  (when-not (installed-beam? mname beam)
-    (let [filename (erlang/binary_to_list (str mname ".beam"))
-          result (code/load_binary mname filename beam)]
-      (when (not= result (tuple :module mname))
-        (throw (ex-info "lower/run-eval-beam: load failed" {:module mname :result result})))))
-  (let [v (erlang/apply mname :run (list))]
-    (release-eval-module! mname)
-    v))
+  (let [known (maps/get mname (:beams (replay-retained)) nil)]
+    (when-not (and (erlang/=:= known beam) (erlang/module_loaded mname))
+      (when-not (installed-beam? mname beam)
+        (let [filename (erlang/binary_to_list (str mname ".beam"))
+              result (code/load_binary mname filename beam)]
+          (when (not= result (tuple :module mname))
+            (throw (ex-info "lower/run-eval-beam: load failed" {:module mname :result result})))))
+      (retain-replay-module! mname beam)))
+  (erlang/apply mname :run (list)))
 
 (defn eval-anf
   "Evaluate a bl-ANF node by wrapping it as the body of run/0 in a canonical
