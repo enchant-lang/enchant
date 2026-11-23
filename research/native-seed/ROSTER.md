@@ -393,7 +393,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   names come from the process dictionary (`erlang/put :bl_core_fresh_seq`), so
   check the native host's `erlang/put` and `get` (`host-values.scm`).
 
-#### N2 🔒 Core Erlang from Chez to a loaded `.beam` · S+ (after N1)
+#### N2 ✅ Core Erlang from Chez to a loaded `.beam` · backend `f4e4cec5c` (2438/2438 descriptors byte-identical), front half N2b
 - **Why.** Turning Core into `.beam` (`compile:forms(M, [from_core, binary])`,
   `lower.bl:474` and `:518`) must stay on the BEAM. The Core term therefore has
   to cross over.
@@ -412,7 +412,8 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - Evidence goes in `research/checked-tiles/evidence/native-beam-backend.json`.
 - **SDK build.** Only for the BEAM-side function.
 
-#### N2b 🔨 The front half: source → staged unit → Core on Chez · branch `lane/native-front` (worktree `lane-cerl`)
+#### N2b ✅ The front half: source → staged unit → Core on Chez · landed `b8d7345ad`: 663/667 units identical, 4 named reasons
+- **Re-deriving.** `chez-main`'s host files are still the `f4e4cec5c` ones, so derive with `--base f4e4cec5c`. The default `HEAD` finds no edits.
 - **What runs.** `front-end/run.sh TAG simple|all` evaluates the SDK's own
   `host/record.bl`, `host/aot.bl` (hooked) and `boot/lower*.bl` on the derived
   Chez image and stages every unit inside a real constructor context, exactly
@@ -466,7 +467,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - **Done when.** Same as N2's front half: per-unit Core `=` the BEAM's, or a
   named reason, for under 5% of SDK units.
 
-#### N3 🔒 The native compile service, in shadow mode · S+ (after N2)
+#### N3 ⏳ The native compile service, in shadow mode · S+ (N2 done)
 - **Why.** Nothing in `bl` calls the native compiler.
 - **Change.**
   - One Chez process per realm, started by the VM (0.86 s launch), speaking
