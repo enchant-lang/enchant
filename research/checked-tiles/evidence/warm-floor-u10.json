@@ -1,0 +1,129 @@
+{
+ "card": "U10",
+ "title": "Remove the 34 ms of per-request generation recomputation",
+ "date": "2026-11-23",
+ "branch": "lane/warm-floor2",
+ "host": {
+  "nproc": 16,
+  "load_average": [
+   6.58,
+   8.17,
+   8.6
+  ]
+ },
+ "harness": "/tmp/u9root scratch checkout; the branch's own drop-launcher (cargo build --release) invoked directly with BL_CHECKOUT_PLATFORM and the preparation lock held so the client reuses the pinned SDK; warm realm; /tmp/u9/one.bl = (println 1).",
+ "sdk": "/nix/store/96dx8rrrgq86hc5sj9xi7pzws6nf8d0l-beam-lisp-sdk-selection (batch 15)",
+ "measurement": {
+  "baseline_service_off_us": {
+   "n": 20,
+   "median": 43069,
+   "min": 42237,
+   "max": 49414,
+   "runs": [
+    43662,
+    49414,
+    43569,
+    43055,
+    42843,
+    43103,
+    44146,
+    43565,
+    43084,
+    42674,
+    42831,
+    42369,
+    42237,
+    45966,
+    45383,
+    43195,
+    42494,
+    43003,
+    42670,
+    42373
+   ]
+  },
+  "service_warm_us": {
+   "n": 20,
+   "median": 16914,
+   "min": 16260,
+   "max": 43313,
+   "runs": [
+    43313,
+    16864,
+    17483,
+    16769,
+    17701,
+    16696,
+    17076,
+    16885,
+    16586,
+    17007,
+    16340,
+    18043,
+    16387,
+    16937,
+    17420,
+    16260,
+    16891,
+    17049,
+    16384,
+    17140
+   ]
+  },
+  "drop_ms": 26.16,
+  "note": "the first warm service run pays the resident's first full computation; the median is the steady state. Phase marks: service query 340 us, local computation 26.2 ms (BL_CHECKOUT_PHASE_TIMES=1)."
+ },
+ "design": {
+  "authority": "a per-tree resident (`drop-launcher --generation-service ROOT`) that holds all three tokens and watches the engine tree, the project tree and the extra roots with inotify",
+  "safety": [
+   "the tokens are computed by the same checkout_generations() the client uses, so a cached answer and a local one are byte-identical (unit test)",
+   "every answer drains the kernel event queue immediately before replying; any event invalidates the affected scope and it is RECOMPUTED, never guessed",
+   "watches are installed before a computation; an event during it makes the answer a fallback",
+   "IN_Q_OVERFLOW, a failed watch (ENOSPC), a replaced root (dev+ino change), or a non-local filesystem (statfs magic) all yield `fallback`, and the client computes locally",
+   "the realm remains the authority for retirement: it stores BL_CHECKOUT_SOURCE_GENERATION and retires when the token it receives differs"
+  ],
+  "scopes": "engine, runtime and project; a manifest append under .bl/ is project-only, everything else keeps the watch's mask (over-invalidation costs one recomputation, under-invalidation could serve a stale token)",
+  "escape_hatch": "BL_CHECKOUT_GENERATION_SERVICE=0 disables the resident"
+ },
+ "semantics_verified": {
+  "loaded_file_edit_retires": {
+   "before_stored_generation": "204c47eaed1ffdb7a4facf63a2bda863a01d90743db66cbcc45064051c04ab3e",
+   "after_stored_generation": "bdcf561ed98aedb520cfe8930ddc132ab56a45063a599998ec2bf94f3a4f3246",
+   "env_ref_changed": true,
+   "run_output": "2"
+  },
+  "unrelated_edit_does_not_retire": {
+   "stored_generation_unchanged": true,
+   "env_ref_unchanged": true
+  },
+  "new_candidate_in_recorded_directory_changes_project_token": "unit test",
+  "unrelated_file_does_not_change_project_token": "unit test",
+  "service_and_local_tokens_identical": {
+   "unit_test": true,
+   "real_tree_stored_generation": "bdcf561ed98aedb520cfe8930ddc132ab56a45063a599998ec2bf94f3a4f3246 (local == service)"
+  }
+ },
+ "tests": {
+  "cargo_test_branch": {
+   "passed": 128,
+   "failed": 2,
+   "ignored": 6,
+   "note": "the two failures are builder_tests::build_custody_reports_io_errors_and_releases_after_publication_failure and builder_tests::failed_metadata_prevents_real_native_publication_even_with_a_guessed_library, both also failing on main (124 passed, 2 failed) where native preparation needs store/artifact custody this sandbox lacks"
+  },
+  "new_tests": [
+   "generation_tests::a_loaded_file_changes_the_project_token_an_unrelated_one_does_not",
+   "generation_tests::a_new_candidate_in_a_recorded_directory_changes_the_project_token",
+   "generation_tests::the_service_answers_and_recomputes_only_what_changed"
+  ],
+  "gate": {
+   "loader_sources_test": "43 passed",
+   "loader_sources_realm_test": "4 passed",
+   "ten_files_forward": "10/10",
+   "ten_files_reversed": "10/10",
+   "ten_files_forward_again": "10/10",
+   "seed_runtime_abi_warm_twice": "11/11 both",
+   "warm_request_env_test": "3 passed",
+   "helper_edit_scenario": "old, then new function, then both: green"
+  }
+ }
+}

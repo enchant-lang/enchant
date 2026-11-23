@@ -14,6 +14,7 @@ mod nix_artifact;
 include!("builder.rs");
 include!("hooks.rs");
 include!("checkout.rs");
+include!("generation.rs");
 mod engine_inputs;
 mod command_domain;
 
@@ -603,6 +604,10 @@ fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if let Some(status) = command_domain::dispatch(&argv) {
         std::process::exit(status);
+    }
+    if argv.first().map(String::as_str) == Some("--generation-service") {
+        let root = argv.get(1).filter(|_| argv.len() == 2).unwrap_or_else(|| fail("usage: --generation-service ROOT"));
+        generation_serve(std::path::PathBuf::from(root));
     }
     if argv.first().map(String::as_str) == Some("--engine-inputs") {
         if argv.len() != 2 { fail("usage: --engine-inputs ROOT"); }

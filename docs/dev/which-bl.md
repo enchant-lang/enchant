@@ -34,6 +34,14 @@ Cold preparation uses the configured Nix build station with local builds
 disabled. Cargo runs inside native recipes. Each request supplies its directory,
 arguments and environment.
 
+A checkout command's three generation tokens (the engine inventory, the runtime
+pin and the project pin) are answered by a per-tree resident, started by the
+first client that misses it: `drop-launcher --generation-service ROOT` watches
+the tree with inotify and recomputes after any event, answering "fallback" (and
+the client computes locally) whenever it cannot prove the tree unchanged.
+`BL_CHECKOUT_GENERATION_SERVICE=0` disables it; `BL_CHECKOUT_PHASE_TIMES=1`
+prints the client phases to stderr.
+
 Current installed drops also run their first default command in the persistent
 VM. The first client waits for readiness and retains its command's initialized
 state for subsequent clients. `--cold` explicitly starts a fresh VM; an explicit
