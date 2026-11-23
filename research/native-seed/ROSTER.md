@@ -31,7 +31,9 @@ that fanned the cards out) merges finished branches in batches, builds one SDK
 per batch, and runs the gate tests.** A card is ✅ only after that gate.
 
 ### Where an agent works
-- **In its own git worktree** on its own branch, never the shared checkout.
+- **In its own git worktree** on its own branch, never the shared checkout, and **never
+  `git checkout` a branch in `$MAIN`**. On 2026-11-23 an agent checked its branch out there, and
+  six landed batches went onto that branch instead of `main` (recovered by fast-forwarding).
   Commit there freely, and finish with a clean, committed branch.
 - **Checks that don't change engine inputs:** prefix `$MAIN/bin/bl` with `BL_SDK_REUSE_CURRENT=1`, so they run on the current SDK instead of queueing behind a rebuild of a moving main.
 - **Never run the worktree's own `./bin/bl`.** It would prepare a whole SDK for
@@ -88,7 +90,8 @@ Numbers in "Done" rows are measured, never estimated.
 
 ### The integration gate (integrator only)
 For each batch:
-1. Merge the branches into `main`.
+1. Merge the branches into `main`. First `git -C $MAIN branch --show-current` must print `main`;
+   after, `git -C $MAIN log --oneline -1` must show the merge.
 2. Run `work run --memory 4G --timeout 3000 -- scripts/prepare-checkout-sdk`, then
    **`./bin/bl realm stop`** on that tree before the gates. A warm realm started before the rebuild
    keeps the old SDK modules, and a gate on it reports errors (undefined functions, a keyword
@@ -461,6 +464,8 @@ Cards in one lane conflict; lanes run at the same time.
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | J4: JS unary minus keeps the float sign | Floats negate their sign bit; `erlang/-/1` leaf; `js_diff` 547/547 | (batch 9) |
+| ✅ | T2: three tests corrected; seed floor helper finds the SDK ebin | emit_test 138, seed_publication 227, cold_namespace_load 2, realm_namespace 17 | (batch 11) |
 | ✅ | U1c: one manifest line per searched directory | Misses batched per directory with an entry digest; the client lists each once; declared roots only from top-level `:paths`. Manifest after ten files 1,348 → ~21 lines; project statx −73.6%; warm run 87–96 → 77–87 ms, 7,509 statx per request | (batch 10) |
 | ✅ | U1: the client digests what the realm loaded | The loader records each resolved source and absent candidate in `.bl/realm-sources.v1` (epoch token, self-healing); the client digests declared roots plus exactly those. An edited test helper is seen; warm run 152 → 87–96 ms, `--version` 77–80 ms. Next (U1c): 2,506 absent lines and ~35k statx per request | `2d71662e7` |
 | ✅ | `Loader/ns_home` answers in JavaScript | A page has no realms (`:global`); all 23 js_* files pass | `2d71662e7` |
