@@ -82,14 +82,28 @@
 ;; A failed job's own events hold the real cause (for example a cached remote
 ;; build failure) while its status carries only "exited with code 1".
 (def failure-cap 1500)
+;; A Nix dependency failure prints its leaf (the producer's own `** (…Error)`,
+;; its `:artifact-failed` unit, or a remote `error: build of …`) and then one
+;; `error: Cannot build '<drv>'.` per dependent. The links name no cause, so
+;; leaves come first and links only fill what is left of the three.
+(defn- cause-text [text]
+  (let [t (String/trim (String/replace text "progress machine: " ""))
+        t (Regex/replace #"^[A-Za-z0-9_.+-]+> " t "")
+        t (Regex/replace #"^> " t "")]
+    (String/trim t)))
+(defn- cause? [text]
+  (or (String/contains? text "error:") (String/starts_with? text "** (")
+      (String/contains? text ":artifact-failed")))
+(defn- link? [text] (String/starts_with? text "error: Cannot build "))
 (defn- failure-causes [body]
-  (let [lines (keep (fn [line]
-                      (try (let [text (get (Jason/decode! line) "text")]
-                             (when (and (string? text) (String/contains? text "error:"))
-                               (String/trim (String/replace text "progress machine: " ""))))
-                           (catch error nil)))
-                    (String/split body "\n"))]
-    (take 3 (distinct lines))))
+  (let [lines (distinct
+               (keep (fn [line]
+                       (try (let [text (get (Jason/decode! line) "text")]
+                              (when (string? text)
+                                (let [cause (cause-text text)] (when (cause? cause) cause))))
+                            (catch error nil)))
+                     (String/split body "\n")))]
+    (take 3 (concat (remove link? lines) (filter link? lines)))))
 (defn- failure-note [directory id]
   ;; Best effort: an unreadable ledger must never hide the refusal itself.
   (try
