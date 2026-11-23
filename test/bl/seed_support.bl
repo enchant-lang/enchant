@@ -13,8 +13,25 @@
 
 (defn has? [coll x] (> (count (filter (fn [y] (= y x)) coll)) 0))
 
+(defn- scratch-suffix
+  "A tag unique to ONE call, inside this VM and across VMs.
+
+   A warm realm serves N requests as N processes (`bl.daemon/handle-in-vm`), and
+   `/tmp` is shared even by SEPARATE realms (another lane's checkout runs its own
+   VM against the same filesystem). A fixed `/tmp/bl-seed-host-<name>` is
+   therefore shared state: one call's `File/rm_rf!` deletes another call's host
+   sources while `seed/run` compiles them. Measured both ways: a foreign
+   host-scratch of the same name in another realm wiped a victim call's sources,
+   and two concurrent `seed_runtime_abi_test` runs gave `3 passed, 8 failed` with
+   `/tmp/bl-seed-host-supervisor-src/anf_interpreter.bl: no such pinned host
+   source` (a different missing suffix on each run, from timing). The OS pid
+   keeps two VMs apart; the monotonic counter keeps two calls in one VM apart."
+  []
+  (str (erlang/list_to_binary (erlang/apply :os :getpid (list))) "-"
+       (erlang/unique_integer (list :positive :monotonic))))
+
 (defn scratch [name]
-  (let [d (Path/join (System/tmp_dir) (str "bl-seed-test-" name))]
+  (let [d (Path/join (System/tmp_dir) (str "bl-seed-test-" name "-" (scratch-suffix)))]
     (File/rm_rf! d)
     (File/mkdir_p! d)
     d))
@@ -43,7 +60,7 @@
    itself, so this fixture can never test a shape the seed does not look for."
   ([name extra] (host-scratch name extra {}))
   ([name extra real]
-   (let [d (Path/join (System/tmp_dir) (str "bl-seed-host-" name))]
+   (let [d (Path/join (System/tmp_dir) (str "bl-seed-host-" name "-" (scratch-suffix)))]
      (File/rm_rf! d)
      (File/mkdir_p! d)
      (doseq [e (seed/host-sources d)]

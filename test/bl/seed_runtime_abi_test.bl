@@ -6,6 +6,22 @@
 (ns test.seed-runtime-abi
   (:require [seed] [test.bl.seed-support :as s]))
 
+(deftest a-scratch-host-directory-belongs-to-one-call
+  ;; The warm realm serves concurrent requests as concurrent PROCESSES
+  ;; (`bl.daemon/handle-in-vm`), so a helper with a fixed `/tmp` name hands two
+  ;; callers the same directory: the second call's `File/rm_rf!` deletes the
+  ;; first's host sources while it compiles them. Measured: two concurrent runs
+  ;; of this file gave `3 passed, 8 failed` with "no such pinned host source"
+  ;; for a timing-dependent suffix of the mapping. One call, one directory.
+  (let [a (s/host-scratch "isolation" "")
+        b (s/host-scratch "isolation" "")
+        sources (map (fn [e] (:source e)) (seed/host-sources a))]
+    (is (not= a b) "two calls never share a scratch host directory")
+    (is (every? (fn [p] (File/exists? p)) sources)
+        "the first call's pinned host sources survive the second call")
+    (File/rm_rf! a)
+    (File/rm_rf! b)))
+
 (deftest the-supervisor-publishes-the-tree-builders-public-surface
   ;; `Elixir.BeamLisp.Supervisor` is the NAME the OTP application registers its
   ;; top supervisor under, and it is ALSO the module `rt.bl`'s `supervise`/
