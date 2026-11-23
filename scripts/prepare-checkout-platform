@@ -1,13 +1,41 @@
 #!/usr/bin/env bash
 # Prints one retained immutable platform path; preparation diagnostics use stderr.
 set -euo pipefail
-root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
+case "$0" in */*) here=${0%/*} ;; *) here=. ;; esac
+root=$(CDPATH='' cd "$here/.." && pwd -P)
 cd "$root"
 # These independent qualification recipes are absent from the platform and SDK
 # producers. Keep their complete inputs in the CI capture, not this cache key.
 ci_recipes=(nix/ci-check.nix nix/ci-release-runtime.nix nix/ci-sdk-gates.nix nix/datom-crash-check.nix)
 skipped=(-name target -o -name .git -o -name .bl -o -name __pycache__)
 for recipe in "${ci_recipes[@]}"; do skipped+=(-o -path "$recipe"); done
+# The content fingerprint reads every input file: about 20 ms of forks and
+# hashing on each checkout command, more than the warm VM's whole answer. A
+# stat listing of the same entries (device, inode, size, mtime and ctime in
+# nanoseconds) names the fingerprint it was last computed under. A listing is
+# recorded only when no entry changed within RACY_SECONDS of the moment it was
+# taken, the engine digest cache's rule (tooling/drop/src/engine_inputs.rs):
+# any later write moves ctime past that moment, and ctime cannot be set from
+# user space. BL_CHECKOUT_DIGEST_CACHE=0 recomputes, as it does there.
+inputs=(flake.lock flake.nix scripts/prepare-checkout-platform
+        scripts/sdk-inputs test/scripts/test_engine_snapshot.py nix tooling/drop native)
+stat_cache="$root/.bl/platform-stat.v1"
+listed_at=${EPOCHREALTIME%.*}
+stat_listing=$(
+  find "${inputs[@]}" \( "${skipped[@]}" \) -prune -o \
+    -type d -printf '%y %m %p\n' -o \
+    -printf '%y %m %p %l %D %i %s %T@ %C@\n'
+)
+fingerprint=
+if [ "${BL_CHECKOUT_DIGEST_CACHE:-1}" != 0 ] && [ -f "$stat_cache" ]; then
+  recorded=
+  IFS= read -r -d '' recorded < "$stat_cache" || true
+  if [ "${recorded#*$'\n'}" = "$stat_listing"$'\n' ]; then
+    candidate=${recorded%%$'\n'*}
+    [[ $candidate =~ ^[0-9a-f]{64}$ ]] && fingerprint=$candidate
+  fi
+fi
+if [ -z "$fingerprint" ]; then
 fingerprint=$(
   {
     sha256sum flake.lock flake.nix scripts/prepare-checkout-platform
@@ -20,6 +48,14 @@ fingerprint=$(
       -type f -exec sha256sum {} +
   } | LC_ALL=C sort | sha256sum | cut -d' ' -f1
 )
+  RACY_SECONDS=2
+  racy=$(find "${inputs[@]}" \( "${skipped[@]}" \) -prune -o \
+    \( -newermt "@$((listed_at - RACY_SECONDS))" -o -newerct "@$((listed_at - RACY_SECONDS))" \) \
+    ! -type d -print -quit)
+  if [ "${BL_CHECKOUT_DIGEST_CACHE:-1}" != 0 ] && [ -z "$racy" ] && mkdir -p "$root/.bl"; then
+    printf '%s\n%s\n' "$fingerprint" "$stat_listing" > "$stat_cache.$$" && mv -f "$stat_cache.$$" "$stat_cache" || true
+  fi
+fi
 retained="$root/.bl/platforms/$fingerprint"
 if [ ! -f "$retained/platform.json" ]; then
   command -v nix-build >/dev/null || { echo 'bl: Nix is required to prepare the checkout platform' >&2; exit 69; }
@@ -36,4 +72,4 @@ if [ ! -f "$retained/platform.json" ]; then
     nix-build "$root/nix/prepare-checkout.nix" --argstr root "$root" \
       --out-link "$retained" --option timeout 3300 >/dev/null
 fi
-readlink -f "$retained"
+cd -P "$retained" && pwd -P
