@@ -687,6 +687,13 @@ impl State {
     fn watch_inputs(&mut self, project: &Path, extra: &[PathBuf]) -> Result<(), String> {
         let key = watch_key(project, extra);
         if self.inputs_key.as_deref() == Some(key.as_str()) { return Ok(()); }
+        // The manifest (or the declared roots) changed without an event
+        // having cleared the project pins: the realm appended inputs it had
+        // just loaded, and the manifest's own directory need not be watched.
+        // Those inputs were unwatched until this walk, so an edit to one since
+        // it was loaded left no event either. A cached pin is stale; drop them
+        // and recompute from the bytes (checkout_transport's provider edit).
+        self.projects.clear();
         for path in std::iter::once(&self.root).chain(std::iter::once(&project.to_path_buf())).chain(extra.iter()) {
             if let Ok(meta) = std::fs::metadata(path) {
                 self.identities.insert(path.clone(), (meta.dev(), meta.ino()));
@@ -1008,6 +1015,33 @@ mod generation_tests {
         let after = ask_settled(&socket, &f);
         assert_ne!(after.project, first.project,
                    "a candidate appearing in a recorded directory moves the project token");
+    }
+
+    /// The realm records a newly loaded file in its manifest after the
+    /// answer that preceded the load. Neither that append nor a later edit to
+    /// the file (in a directory nobody watched yet) need raise an event the
+    /// service sees; its next answer must still equal a local computation.
+    #[test]
+    fn a_file_the_realm_records_after_an_answer_is_an_input_of_the_next() {
+        let _serial = serialized();
+        let f = fixture("recorded-later");
+        let provider_dir = f.project.join("transport");
+        std::fs::create_dir_all(&provider_dir).unwrap();
+        let provider = provider_dir.join("value.bl");
+        std::fs::write(&provider, "(ns transport.value) (defn value [] 1)\n").unwrap();
+        let Some(socket) = service(&f) else { return; };
+        let before = ask_settled(&socket, &f);
+        assert_eq!(before, tokens(&f));
+        // The realm loads the provider and appends it to its manifest.
+        let manifest = f.project.join(".bl/realm-sources.v1");
+        let mut text = std::fs::read_to_string(&manifest).unwrap();
+        text.push_str(&format!("L\t{}\t{}\n", sha_hex(&std::fs::read(&provider).unwrap()),
+                               std::fs::canonicalize(&provider).unwrap().display()));
+        std::fs::write(&manifest, text).unwrap();
+        std::fs::write(&provider, "(ns transport.value) (defn value [] 2)\n").unwrap();
+        let after = ask_settled(&socket, &f);
+        assert_eq!(after, tokens(&f), "the cached answer equals the local one");
+        assert_ne!(after.project, before.project, "the edited provider moves the project pin");
     }
 
     #[test]
