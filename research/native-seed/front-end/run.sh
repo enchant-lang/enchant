@@ -52,7 +52,10 @@ if [ -n "${NF_ONLY:-}" ]; then JOB="${JOB%)} [$(for n in $NF_ONLY; do printf '"%
   [ -f "${NF_EXTRA:-}" ] && cat $NF_EXTRA
   echo "(try $JOB (catch e (println (str \"NF-TOP \" (pr-str e)))))"; } > $Q/jobs.bl
 python3 $FE/loader-decls.py $PRIV/host/loader.bl $Q/loader-decls.bl
-cat $PRIV/boot/lower-core.bl $PRIV/boot/lower.bl $FE/hook.bl $PRIV/host/record.bl $Q/aot-hooked.bl $Q/loader-decls.bl $FE/stage.bl $Q/jobs.bl > $Q/native.bl
+# host.record names itself with a fun literal; the native linker answers that
+# for image modules only, so the evaluated copy is told its module.
+printf '(ns host.record)\n(defn- self-mod [] :Elixir.BeamLisp.Record)\n' > $Q/record-self.bl
+cat $PRIV/boot/lower-core.bl $PRIV/boot/lower.bl $FE/hook.bl $PRIV/host/record.bl $Q/record-self.bl $Q/aot-hooked.bl $Q/loader-decls.bl $FE/stage.bl $Q/jobs.bl > $Q/native.bl
 echo "== native front"
 T B research/native-seed/chez/qualify.bl -- eval --image $IMG --file $Q/native.bl > $Q/native.txt 2>&1
 echo "ok $(grep -c '^UNIT ok' $Q/native.txt) fail $(grep -c '^UNIT fail' $Q/native.txt)"
