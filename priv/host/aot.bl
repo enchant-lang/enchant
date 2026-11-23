@@ -3166,20 +3166,29 @@
    an older entry. Public so the test can point it at a table it wrote; the
    reader passes the immutable-root answer and never a caller's."
   [path immutable?]
+  ;; K1: a path under /nix/store/ names immutable bytes, so its first complete
+  ;; read stands for the VM (as Env/sdk_file_digest! already does for image
+  ;; files). The digest was recomputed over the ~0.9 MB table on every seed
+  ;; miss, ~100 times per cold start (7% of its samples). Any other path keeps
+  ;; the digest check, so a replaced table there is still re-read.
   (if-not (and immutable? (File/regular? path))
     nil
-    (let [digest (crypto/hash :sha256 (File/read! path))
-          memo-key (tuple :Elixir.BeamLisp.AOT :sealed_seed_table path)
-          hit (persistent_term/get memo-key nil)]
-      (if (and hit (erlang/== digest (elem hit 0)))
+    (let [memo-key (tuple :Elixir.BeamLisp.AOT :sealed_seed_table path)
+          hit (persistent_term/get memo-key nil)
+          store? (immutable_root? path)]
+      (if (and hit store? (erlang/== :immutable (elem hit 0)))
         (elem hit 1)
-        (let [table
-              (try
-                (let [decoded (erlang/binary_to_term (File/read! path) (list :safe))]
-                  (when (valid_seed_table? decoded) decoded))
-                (catch _ nil))]
-          (persistent_term/put memo-key (tuple digest table))
-          table)))))
+        (let [bytes (File/read! path)
+              digest (if store? :immutable (crypto/hash :sha256 bytes))]
+          (if (and hit (erlang/== digest (elem hit 0)))
+            (elem hit 1)
+            (let [table
+                  (try
+                    (let [decoded (erlang/binary_to_term bytes (list :safe))]
+                      (when (valid_seed_table? decoded) decoded))
+                    (catch _ nil))]
+              (persistent_term/put memo-key (tuple digest table))
+              table)))))))
 
 (defn- sealed_seed_table
   "The sealed table for THIS image, or nil. Read and validated once per VM. Nil
@@ -3356,10 +3365,17 @@
        key (tuple :Elixir.BeamLisp.AOT :native-declaration source ns)
        hit (persistent_term/get key nil)]
   (if (and hit (= digest (elem hit 0))) (elem hit 1)
-   (let [declaration (or (disk_native_declaration digest ns)
-                         (let [d (sdk_native_source_declaration_content ns source content)]
-                           (store_native_declaration! digest ns d)
-                           d))]
+   ;; `:none` is the stored answer for a source that mentions `defnative`
+   ;; without declaring exactly one (the compiler, the loader, this file):
+   ;; those were re-parsed by the reader on every VM start because a stored nil
+   ;; read back as a miss.
+   (let [stored (disk_native_declaration digest ns)
+         declaration (cond
+                       (erlang/== :none stored) nil
+                       stored stored
+                       :else (let [d (sdk_native_source_declaration_content ns source content)]
+                               (store_native_declaration! digest ns (if (nil? d) :none d))
+                               d))]
     (persistent_term/put key (tuple digest declaration))
     declaration)))))
 
@@ -3406,11 +3422,12 @@
           (if (String/contains? content "defnative")
             (let [ns (BeamLisp.Loader/declared_ns content)
                   declaration (when ns (sdk_native_source_declaration_content ns path content))]
-              (if declaration
+              (if ns
                 (let [digest (crypto/hash :sha256 content)]
                   (File/write! (Path/join output (native_declaration_name digest ns))
-                    (erlang/term_to_binary (tuple digest ns declaration) (list :deterministic)))
-                  (erlang/+ count 1)) count)) count))))))
+                    (erlang/term_to_binary (tuple digest ns (if declaration declaration :none))
+                                           (list :deterministic)))
+                  (if declaration (erlang/+ count 1) count)) count)) count))))))
 
 (defn- store_native_declaration! [digest ns declaration]
   (try

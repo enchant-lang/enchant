@@ -300,11 +300,14 @@
    computation for the VM's life; the daemon uses THIS to detect that the
    checkout it serves has drifted from the sources it booted with, which must
    force a restart, not a stale reuse. A completely Source-absent SDK checks
-   its actual packaged floor instead; absence never hashes as a new compiler."
+   its actual packaged floor instead; absence never hashes as a new compiler.
+   On an immutable root (`immutable_toolchain`) the sources cannot drift, so
+   the live value is computed once per VM for that exact root and runtime.
+   The packaged floor's check reads loaded code, so it is never memoized.
   []
   (if (packaged_compiler?)
     (do (aot_backend) (erlang/element 1 (BeamLisp.Bootstrap/packaged_keys!)))
-    (compute_compiler_key)))
+    (immutable_memo :current_compiler_key (fn [] (compute_compiler_key)))))
 
 (defn current_build_key
   "Like `current_compiler_key/0` for the build tier: both the compiler and
@@ -313,7 +316,8 @@
   []
   (if (packaged_compiler?)
     (do (aot_backend) (erlang/element 2 (BeamLisp.Bootstrap/packaged_keys!)))
-    (hash_parts (lists/append (lst (current_compiler_key)) (build_source_contents)))))
+    (immutable_memo :current_build_key
+      (fn [] (hash_parts (lists/append (lst (current_compiler_key)) (build_source_contents)))))))
 
 (defn current_keys
   "Live compiler and build keys together. The build key incorporates the
@@ -345,13 +349,47 @@
 
 (defn- packaged_compiler?
   "Only a completely Source-absent sealed SDK uses the verified floor key.
-   A partial tree keeps live hashing and its normal mismatch/refusal."
+   A partial tree keeps live hashing and its normal mismatch/refusal. The
+   answer walks the whole `priv/` tree once per suffix; on an immutable root
+   it is a constant of that root, so it is walked once per VM."
   []
-  (let [root (BeamLisp.Tiers/priv_root)]
-    (and (File/regular? (Path/join root "sdk-code.term"))
-         (Enum/all? (BeamLisp.Tiers/source_extensions)
-           (fn [suffix] (erlang/== '() (Path/wildcard (Path/join root (bcat "**/*" suffix))))))
-         (erlang/== nil (live_codegen_digest)))))
+  (immutable_memo :packaged_compiler?
+    (fn []
+      (let [root (BeamLisp.Tiers/priv_root)]
+        (and (File/regular? (Path/join root "sdk-code.term"))
+             (Enum/all? (BeamLisp.Tiers/source_extensions)
+               (fn [suffix] (erlang/== '() (Path/wildcard (Path/join root (bcat "**/*" suffix))))))
+             (erlang/== nil (live_codegen_digest)))))))
+
+(defn immutable_toolchain
+  "The identity of an immutable toolchain, or nil. Every input the live keys
+   read lies under `priv/` or the codegen roots (`BL_ROOT`/lib and the app's
+   lib); when all of them are content-addressed `/nix/store/` paths their bytes
+   cannot change, so a value derived from them is a constant of this tuple plus
+   the runtime (Elixir, OTP, backend). A checkout, a writable drop or any root
+   outside the store answers nil and keeps live computation on every call."
+  []
+  (let [priv (BeamLisp.Tiers/priv_root)
+        roots (codegen_source_roots)]
+    (when (Enum/all? (cons priv roots) (fn [path] (String/starts_with? path "/nix/store/")))
+      (tup priv roots (System/version) (erlang/system_info :otp_release)
+           (Application/get_env :beam_lisp :aot_backend :core)))))
+
+(defn- immutable_memo
+  "`(thunk)`, memoized per VM under `tag` and the exact `immutable_toolchain`
+   identity; computed on every call when there is none. Errors are not
+   memoized, and a different root, runtime or BL_ROOT is a different key."
+  [tag thunk]
+  (let [identity (immutable_toolchain)]
+    (if (erlang/== nil identity)
+      (erlang/apply thunk (lst))
+      (let [key (tup (self_mod) :immutable tag identity)
+            hit (persistent_term/get key :undefined)]
+        (if (erlang/== hit :undefined)
+          (let [value (erlang/apply thunk (lst))]
+            (persistent_term/put key (tup :value value))
+            value)
+          (erlang/element 2 hit))))))
 
 (defn- build_source_contents
   "Content of every build-driver source, sorted by path. Read DIRECTLY (no
