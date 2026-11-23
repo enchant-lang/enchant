@@ -246,6 +246,17 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - `test/bl/emit_test.bl` ("the live module's bytes ARE the committed seed's bytes"), `test/bl/seed_publication_test.bl` (its `/tmp/bl-seed-test-host-out` manifest is missing) and `test/bl/perf/cold_namespace_load_test.bl` fail the same way on the batch-7 and batch-8 SDKs. Find whether it is the seeded floor (a `bl seed --check` question) or the tests' environment.
 - **Done when.** Each passes on a fresh integration SDK, or its premise is corrected and the reason recorded.
 
+#### U10 🔨 Remove the fixed recomputation per request (34 ms) · S+ · client + realm · branch `lane/warm-floor2`
+- **Why.** U9: of a ~51 ms warm request, engine capture is 22.8 ms (976 files) and project generation 11.1 ms, both recomputed though the tree did not change.
+- **Change.** A per-tree resident that observes the tree, or a generation token the realm records and the client trusts only while cheap inputs are unchanged. A wrong answer must retire the realm, never serve stale code.
+- **Done when.** Warm median −25 ms or better; an edit to a loaded file still retires; an unrelated edit does not; `cargo test` and loader tests pass.
+
+#### U11 🔨 One request, one process in the VM (13.6 → 2–4 ms) · S+ · BL runtime · branch `lane/warm-floor2`
+- The handler spawns ~10 processes per request (5 `Refs/spawn_owned`, io proxy, heartbeat). Run the command in the connection process, open a realm handle once per generation, write frames directly, heartbeat only past a threshold, return on the same connection, skip custody for unchanged module sets. Keep dead-owner recovery.
+
+#### U12 🔨 Compact keep-alive request (~6 ms) · S+ · client + protocol · branch `lane/warm-floor2`
+- Skip connect+hello; send an environment generation/delta instead of 91 variables (10.7 KB frame); cache the evaluated user file by source hash.
+
 ### N — the native compiler on the default path
 
 #### N1 ✅ `cerl` as data on the native host · S+ · native-only
@@ -470,6 +481,7 @@ Cards in one lane conflict; lanes run at the same time.
 | ✅ | U1: the client digests what the realm loaded | The loader records each resolved source and absent candidate in `.bl/realm-sources.v1` (epoch token, self-healing); the client digests declared roots plus exactly those. An edited test helper is seen; warm run 152 → 87–96 ms, `--version` 77–80 ms. Next (U1c): 2,506 absent lines and ~35k statx per request | `2d71662e7` |
 | ✅ | `Loader/ns_home` answers in JavaScript | A page has no realms (`:global`); all 23 js_* files pass | `2d71662e7` |
 | ✅ | U8 sealed seed metadata (`seed_artifact_metadata!`, 5.2%) | producer writes `priv/seed-metadata.term` (105 rows, 716 KB); immutable-root reader checks manifest digest per row; derive 2.2 ms/seed vs sealed 0.5 ms/seed, table read 8.3 ms; 447-assertion equality test | `lane/cold-start` |
+| ✅ | U9: the warm request floor, measured | 50.7 ms median = engine capture 22.8 + project generation 11.1 (fixed, recomputed) + VM handler 13.6 + client exec ~3 + connect 1.2 + exit 0.8. Three removals proposed; 1.5–2 ms reachable | `3e6b30096` |
 | ✅ | W2: multi-file runs stay isolated, and warm requests keep the engine env | The ward loads its test library at `:global` (a realm-scoped compiler generation made the authority decline every later file's certificates); workers exit `:shutdown` so linked servers die with their file; `bl run` interns `*command-line-args*` at `:global`; the daemon stops tombstoning the VM's own `BL_ROOT`/`BL_EBIN`… on warm requests (that made the seed floor fall back to `<checkout>/build`, and a client could relabel the image). Ten files 10/10 in three orders; seed_runtime_abi 11/11 warm | (batch 15) |
 | ✅ | U8: seed metadata sealed at SDK build time | The producer writes `priv/seed-metadata.term` (105 rows, proofs per seed); an immutable image reads it, checking version, compiler key, decoder MD5 and the manifest digest per row. Derive 2.4 ms → read 0.5 ms per seed; cold run median 3,190 → 2,810 ms (4 pairs, load ~20) | (batch 14) |
 | ✅ | U7: execution receipts derived on first use | `Env/mark_emitted` stored a computed receipt (an ANF walk) for all 1,438 definitions a cold start publishes; it now stores `{:deferred …}` and the row's decoder derives it. Republication of 158 definitions 70 → 17.7 ms; cold start median 3,375 → 3,247 ms (4 pairs). Batch preload, `find_file` memo and "something compiles" measured and dropped | `0c9a9cf3d` |
