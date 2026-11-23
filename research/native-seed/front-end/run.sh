@@ -40,6 +40,7 @@ if [ "${NF_QUALIFY:-}" = 1 ]; then
 fi
 echo "== custody"
 T B $FE/custody.bl -- $Q/out $MODE 2>&1 | tail -3
+[ -f $Q/out/kernel.etf ] || T B $FE/kernel.bl -- $Q/out/kernel.etf 2>&1 | grep -v "^KERNEL :" | tail -3
 sed 's#BeamLisp\.Emit/compile_descriptor#native-front.hook/compile-descriptor#g' $PRIV/host/aot.bl > $Q/aot-hooked.bl
 echo "hooked sites $(grep -c 'native-front.hook/compile-descriptor' $Q/aot-hooked.bl)"
 JOB=$(cat $Q/out/jobs.bl)
@@ -47,7 +48,8 @@ if [ -n "${NF_ONLY:-}" ]; then JOB="${JOB%)} [$(for n in $NF_ONLY; do printf '"%
 { echo '(println "NF-STAGE-LOADED")'
   [ -f "${NF_EXTRA:-}" ] && cat $NF_EXTRA
   echo "(try $JOB (catch e (println (str \"NF-TOP \" (pr-str e)))))"; } > $Q/jobs.bl
-cat $PRIV/boot/lower-core.bl $PRIV/boot/lower.bl $FE/hook.bl $Q/aot-hooked.bl $FE/stage.bl $Q/jobs.bl > $Q/native.bl
+python3 $FE/loader-decls.py $PRIV/host/loader.bl $Q/loader-decls.bl
+cat $PRIV/boot/lower-core.bl $PRIV/boot/lower.bl $FE/hook.bl $Q/aot-hooked.bl $Q/loader-decls.bl $FE/stage.bl $Q/jobs.bl > $Q/native.bl
 echo "== native front"
 T B research/native-seed/chez/qualify.bl -- eval --image $IMG --file $Q/native.bl > $Q/native.txt 2>&1
 echo "ok $(grep -c '^UNIT ok' $Q/native.txt) fail $(grep -c '^UNIT fail' $Q/native.txt)"
@@ -56,4 +58,6 @@ grep "^UNIT-STACK" $Q/native.txt | sort -u -k3 | cut -c1-1500 | head -12
 grep -v "^UNIT" $Q/native.txt | tail -c ${NF_TAIL:-3000}
 [ "${NF_COMPARE:-1}" = 0 ] && exit 0
 echo "== compare"
-T B $FE/compare.bl -- $Q/out 2>&1 | tail -30
+T B $FE/compare.bl -- $Q/out > $Q/compare.txt 2>&1
+grep "^FRONT-DIFF" $Q/compare.txt | cut -c1-${NF_DIFF_WIDTH:-400}
+grep -v "^FRONT-DIFF" $Q/compare.txt | tail -30

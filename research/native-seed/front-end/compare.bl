@@ -24,6 +24,27 @@
   (let [d (Path/join dir (str prefix i ".desc.etf"))]
    (if (File/exists? d) (recur (inc i) (conj out [d (Path/join dir (str prefix i ".core.etf"))])) out))))
 
+(defn- first-diff
+ "The first path at which a and b differ, with both values there."
+ [a b path]
+ (cond
+  (erlang/=:= a b) nil
+  (and (erlang/is_map a) (erlang/is_map b))
+   (let [ks (sort-by (fn [k] [(= :attrs k) k]) (distinct (concat (Map/keys a) (Map/keys b))))]
+    (or (some (fn [k] (if (and (Map/has_key? a k) (Map/has_key? b k)) (first-diff (Map/get a k) (Map/get b k) (conj path k))
+                       {:path (conj path k) :native (Map/has_key? a k) :beam (Map/has_key? b k)})) ks)
+        {:path path :native a :beam b}))
+  (and (erlang/is_list a) (erlang/is_list b))
+   (if (not= (count a) (count b)) {:path path :native-count (count a) :beam-count (count b)
+                                   :first (some (fn [[i x y]] (when-not (erlang/=:= x y) (first-diff x y (conj path i))))
+                                                (map vector (range) a b))}
+    (some (fn [[i x y]] (first-diff x y (conj path i))) (map vector (range) a b)))
+  (and (erlang/is_tuple a) (erlang/is_tuple b) (= (erlang/tuple_size a) (erlang/tuple_size b)))
+   (first-diff (Tuple/to_list a) (Tuple/to_list b) (conj path :tuple))
+  :else {:path path :native a :beam b}))
+
+(defn- show [x] (let [s (pr-str x)] (if (> (count s) 600) (str (subs s 0 600) "...") s)))
+
 (defn- beam-of [core file]
  (elem (lower/module->beam core file) 1))
 
@@ -48,6 +69,7 @@
                                (let [nd (erlang/binary_to_term (File/read! d))
                                      file (get-in nd [:ann :file])]
                                 {:module (:name nd) :desc-equal (erlang/=:= nd (nth reference i))
+                                 :diff (when-not (erlang/=:= nd (nth reference i)) (show (first-diff nd (nth reference i) [])))
                                  :beam-equal (= (beam-of (erlang/binary_to_term (File/read! c)) file) (get beams (:name nd)))}))
                               natives)
                  (map (fn [[d c]]
@@ -61,7 +83,8 @@
                                           (some #(false? (:desc-equal %)) rows) "descriptor-differs"
                                           :else "beam-differs")
        :modules (count rows) :generated (count generated)
-       :differs (to-list (map #(Atom/to_string (:module %)) bad))})))
+       :differs (to-list (map #(Atom/to_string (:module %)) bad))
+       :diff (some :diff rows)})))
    (catch e {:namespace namespace :reason "beam-reference-failed" :error (ex-message e)}))))
 
 (defn run [[out]]
@@ -70,6 +93,8 @@
        results (mapv #(check-unit out %) rows)
        ok (filter #(nil? (:reason %)) results)]
   (File/write! (Path/join out "compare.json") (Jason/encode! (to-list (map #(update % :differs (fn [x] (or x (list)))) results))))
+  (doseq [r results :when (:diff r)]
+   (println (str "FRONT-DIFF " (:namespace r) " " (:diff r))))
   (println (str "FRONT units " (count results) " identical " (count ok)
                 " modules " (reduce + (map #(or (:modules %) 0) ok))
                 " generated " (reduce + (map #(or (:generated %) 0) ok))))

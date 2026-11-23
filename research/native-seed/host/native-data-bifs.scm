@@ -538,7 +538,9 @@
 ;; on one SDK whose custody facts the BEAM computed once (front-end/custody.bl).
 ;; host/nf-install-world/1 installs them; the leaves below answer from them.
 ;; Env fork/bind/capture are exact snapshots of this image's Env rows: there is
-;; one process, so a fork is a saved row map and a bind restores it.
+;; one process and one row table, so a fork saves the rows and destroy puts
+;; them back (the rows a view wrote die with it, as on the BEAM). The process
+;; dictionary is not part of an env.
 (define nf-world (make-parameter #f))
 (define nf-locks (make-parameter '()))
 (define (nf-world-get k . d)
@@ -556,8 +558,7 @@
  (and (>= (string-length s) (string-length p)) (string=? (substring s 0 (string-length p)) p)))
 (nf-leaf! "Elixir.BeamLisp.Tiers/boot_source?/1"
  (lambda (file) (let ((f (if (string? file) file (native-atom-name file))))
-  (or (nf-string-prefix? (string-append (nf-world-get (bl-key "priv-root") "") "/boot/") f)
-      (nf-string-prefix? (string-append (nf-world-get (bl-key "priv-root") "") "/std/") f)))))
+  (nf-string-prefix? (string-append (nf-world-get (bl-key "priv-root") "") "/boot/") f))))
 (nf-leaf! "Elixir.BeamLisp.Tiers/tier_of_ns/1" (lambda (ns) (bl-key "library")))
 (nf-leaf! "Elixir.BeamLisp.Tiers/dirs/0" (lambda () (list (nf-world-get (bl-key "priv-root")))))
 ;; Loader: source text and paths come from the world's namespace table.
@@ -607,27 +608,45 @@
     (else (scan (cdr ps))))))))))
 ;; Env custody: exact row snapshots.
 (define nf-env-stack '())
+;; Put a saved row map back: rebuild the exact-key index from it and republish
+;; every (ns name) row whose value changed, as native-env-put! does per row.
+(define (nf-restore-rows! rows)
+ (let ((before native-env-rows))
+  (if (not (eq? before rows))
+   (let ((old (make-table test: equal?)) (changed '()))
+    (for-each (lambda (p) (table-set! old (bl-nth p 0) (bl-nth p 1))) (native-map-pairs before))
+    (set! native-env-rows rows)
+    (set! native-env-index (make-table test: equal?))
+    (set! native-env-index-exact? #t)
+    (for-each (lambda (p)
+               (let ((k (bl-nth p 0)) (v (bl-nth p 1)))
+                (if (native-env-index-key? k) (table-set! native-env-index k v) (set! native-env-index-exact? #f))
+                (if (not (eq? (table-ref old k native-missing) v)) (set! changed (cons k changed)))
+                (table-set! old k native-missing)))
+     (native-map-pairs rows))
+    (table-for-each (lambda (k v) (if (not (eq? v native-missing)) (set! changed (cons k changed)))) old)
+    (for-each native-env-row-changed! changed)
+    (native-link-changed!)))))
 (nf-leaf! "Elixir.BeamLisp.Env/capture/0"
  (lambda () (bl-map (bl-key "rows") native-env-rows (bl-key "ns") native-env-current
                      (bl-key "pdict") (native-pdict))))
 (nf-leaf! "Elixir.BeamLisp.Env/bind/1"
  (lambda (snapshot)
-  (set! native-env-rows (bl-get snapshot (bl-key "rows") native-env-rows))
+  (nf-restore-rows! (bl-get snapshot (bl-key "rows") native-env-rows))
   (set! native-env-current (bl-get snapshot (bl-key "ns") native-env-current))
   (if (native-map-has? snapshot (bl-key "pdict")) (native-pdict (bl-get snapshot (bl-key "pdict"))))
   (native-link-changed!) (bl-key "ok")))
 (nf-leaf! "Elixir.BeamLisp.Env/fork/1"
  (lambda (how)
   (let ((token (native-unique-integer)))
-   (set! nf-env-stack (cons (list token native-env-rows native-env-current native-pdict nf-world) nf-env-stack))
+   (set! nf-env-stack (cons (list token native-env-rows native-env-current) nf-env-stack))
    token)))
 (nf-leaf! "Elixir.BeamLisp.Env/destroy/1"
  (lambda (token)
   (let scan ((rest nf-env-stack))
    (cond ((null? rest) bl-nil)
     ((eqv? (car (car rest)) token)
-     (set! native-env-rows (cadr (car rest))) (set! native-env-current (caddr (car rest)))
-     (native-pdict (cadddr (car rest))) (nf-world (car (cddddr (car rest))))
+     (nf-restore-rows! (cadr (car rest))) (set! native-env-current (caddr (car rest)))
      (set! nf-env-stack (cdr rest)) (native-link-changed!) (bl-key "ok"))
     (else (scan (cdr rest)))))))
 ;; with_env binds the env id the thunk sees (env_id/0), as the BEAM's
@@ -742,10 +761,11 @@
  (cond ((string=? a "") b) ((string=? b "") a)
   ((char=? (string-ref a (- (string-length a) 1)) #\/) (string-append a b))
   (else (string-append a "/" b))))
+(define (nf-file-size path) (let* ((p (open-file-input-port path)) (n (port-length p))) (close-port p) n))
 (define (nf-stat-file path)
  (if (not (file-exists? path)) (bl-key "error")
   (bl-map (bl-key "__struct__") (bl-key "Elixir.File.Stat")
-          (bl-key "size") (if (file-directory? path) 4096 (file-size path))
+          (bl-key "size") (if (file-directory? path) 4096 (nf-file-size path))
           (bl-key "type") (if (file-directory? path) (bl-key "directory")
                            (if (file-regular? path) (bl-key "regular") (bl-key "other")))
           (bl-key "mode") 0 (bl-key "mtime") bl-nil (bl-key "atime") bl-nil (bl-key "ctime") bl-nil
@@ -814,8 +834,12 @@
    ((call/cc (lambda (k)
      (with-exception-handler
       (lambda (e)
-       (if (and (> nf-trace-left 0) (not (native-raised? e)) (not (memq e nf-trace-seen)))
-        (let ((text (with-output-to-string "" (lambda () (display-exception e (current-output-port))))))
+       (if (and (> nf-trace-left 0) (not (memq e nf-trace-seen))
+                (or (not (native-raised? e))
+                    (let ((r (vector-ref e 2))) (and (bl-tag? r 'tuple) (> (bl-count r) 1) (eq? (bl-nth r 0) (bl-key "badarg"))
+                                                     (not (and (string? (bl-nth r 1)) (nf-string-prefix? "invalid UTF-8" (bl-nth r 1))))))))
+        (let ((text (if (native-raised? e) (native-render (vector-ref e 2) #t)
+                     (with-output-to-string "" (lambda () (display-exception e (current-output-port)))))))
          (set! nf-trace-seen (cons e nf-trace-seen))
          (set! nf-trace-left (- nf-trace-left 1))
          (display "NF-TRACE ") (write text) (display " ") (write (nf-trace-frames)) (newline)))
@@ -920,3 +944,20 @@
   (if (eq? kind (bl-key "sha256")) (native-bytes (nf-sha256 (nf-iodata-bytes data)))
    (native-badarg "crypto:hash supports sha256 natively"))))
 (nf-set-leaf! "Elixir.Enum/to_list/1" (lambda (xs) (if (nf-range? xs) (nf-range-items xs) (native-finite-items xs))))
+;; Code.ensure_loaded?/1: a module this image carries (a native namespace's
+;; module or a host leaf module); nothing is ever loaded on demand.
+(define nf-ensure-seen '())
+(nf-set-leaf! "Elixir.Code/ensure_loaded?/1"
+ (lambda (mod)
+  (let ((answer (erlang-module-loaded? mod)))
+   (if (and (> nf-trace-left 0) (not (member mod nf-ensure-seen)))
+    (begin (set! nf-ensure-seen (cons mod nf-ensure-seen))
+     (display "NF-ENSURE-LOADED ") (write (native-render mod #t)) (display " ") (write answer) (newline)))
+   answer)))
+;; host/nf-route!/2: KEY (Module/function/arity) becomes a call of the BL
+;; function F, and function_exported/3 answers true for it.
+(nf-leaf! "host/nf-route!/2"
+ (lambda (key f)
+  (set! native-excluded-host-leaves (let loop ((xs native-excluded-host-leaves)) (cond ((null? xs) '()) ((equal? (car xs) key) (loop (cdr xs))) (else (cons (car xs) (loop (cdr xs)))))))
+  (nf-set-leaf! key (lambda arguments (bl-invoke f arguments)))
+  (bl-key "ok")))
