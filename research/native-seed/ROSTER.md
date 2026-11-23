@@ -246,7 +246,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - `test/bl/emit_test.bl` ("the live module's bytes ARE the committed seed's bytes"), `test/bl/seed_publication_test.bl` (its `/tmp/bl-seed-test-host-out` manifest is missing) and `test/bl/perf/cold_namespace_load_test.bl` fail the same way on the batch-7 and batch-8 SDKs. Find whether it is the seeded floor (a `bl seed --check` question) or the tests' environment.
 - **Done when.** Each passes on a fresh integration SDK, or its premise is corrected and the reason recorded.
 
-#### U10 🔨 Remove the fixed recomputation per request (34 ms) · S+ · client + realm · branch `lane/warm-floor2`
+#### U10 🔨 Remove the fixed recomputation per request (34 ms) — prototype resident hangs in the real checkout; reverted from main (`da07cadf8`); branch `lane/warm-floor2`
 - **Why.** U9: of a ~51 ms warm request, engine capture is 22.8 ms (976 files) and project generation 11.1 ms, both recomputed though the tree did not change.
 - **Change.** A per-tree resident that observes the tree, or a generation token the realm records and the client trusts only while cheap inputs are unchanged. A wrong answer must retire the realm, never serve stale code.
 - **Done when.** Warm median −25 ms or better; an edit to a loaded file still retires; an unrelated edit does not; `cargo test` and loader tests pass.
