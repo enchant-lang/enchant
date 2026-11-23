@@ -300,6 +300,21 @@ pub fn file_digest(path: &Path) -> io::Result<[u8; 32]> {
     Ok(content.finalize().into())
 }
 
+/// `file_digest` for a caller that already has the file's metadata: on a cache
+/// hit a regular file costs one stat instead of an open plus a stat. `meta`
+/// must describe `path` itself (a `symlink_metadata` result), not a symlink's
+/// target.
+#[cfg(target_os = "linux")]
+pub fn file_digest_stamped(path: &Path, meta: &Metadata) -> io::Result<[u8; 32]> {
+    if let Some(digest) = digest_cache::lookup(path, &Stamp::file(meta)) { return Ok(digest); }
+    file_digest(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn file_digest_stamped(path: &Path, _meta: &Metadata) -> io::Result<[u8; 32]> {
+    file_digest(path)
+}
+
 #[cfg(target_os = "linux")]
 pub struct Snapshot {
     pub fingerprint: String,

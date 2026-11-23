@@ -80,6 +80,7 @@ function mapGet(k, m, dflt) {
 const num = (x) => (x instanceof Flt ? x.v : x);
 export const ERLANG = {
   "erlang/+/2": (a, b) => R.add(a, b),
+  "erlang/-/1": (a) => R.neg(a),
   "erlang/-/2": (a, b) => R.sub(a, b),
   "erlang/*/2": (a, b) => R.mul(a, b),
   "erlang///2": (a, b) => {
@@ -563,7 +564,7 @@ function rangeEntries(c, lo, hi, rev) {
 export const NUMBERS = {
   "Elixir.BeamLisp.Num/add/2": R.add, "Elixir.BeamLisp.Num/sub/2": R.sub,
   "Elixir.BeamLisp.Num/mul/2": R.mul, "Elixir.BeamLisp.Num/div/2": R.div,
-  "Elixir.BeamLisp.Num/neg/1": (a) => R.sub(0, a),
+  "Elixir.BeamLisp.Num/neg/1": (a) => R.neg(a),
   "Elixir.BeamLisp.Num/lt/2": R.lt, "Elixir.BeamLisp.Num/gt/2": R.gt,
   "Elixir.BeamLisp.Num/le/2": R.le, "Elixir.BeamLisp.Num/ge/2": R.ge,
   "Elixir.BeamLisp.Num/num_eq/2": R.numEq,

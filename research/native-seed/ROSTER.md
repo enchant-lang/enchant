@@ -89,7 +89,10 @@ Numbers in "Done" rows are measured, never estimated.
 ### The integration gate (integrator only)
 For each batch:
 1. Merge the branches into `main`.
-2. Run `work run --memory 4G --timeout 3000 -- scripts/prepare-checkout-sdk`.
+2. Run `work run --memory 4G --timeout 3000 -- scripts/prepare-checkout-sdk`, then
+   **`./bin/bl realm stop`** on that tree before the gates. A warm realm started before the rebuild
+   keeps the old SDK modules, and a gate on it reports errors (undefined functions, a keyword
+   called with six arguments) that do not exist on the rebuilt image.
    Only when `priv/`, `nix/`, `scripts/`, `bin/`, `native/` or `tooling/drop/`
    changed. The two most recent runs took 862 s and 1301 s.
 3. Run every gate test the cards named, in one `./bin/bl test a.bl b.bl ...`.
@@ -381,6 +384,16 @@ census to start from.
 - `(- 0.0)` prints `0.0` on JS, `-0.0` on the BEAM; `erlang/-/1` has no JS leaf.
 - **Done when.** Both answer as on the BEAM; a js_diff case for each.
 
+#### W2 ⏳ Two files still fail inside a multi-file test run · S · BL
+- On the batch-5 and batch-10 SDKs: in a run of the ten realm/seed/JS files (W1's list),
+  `realm_ownership_test` fails `a-shared-namespace-is-named-from-its-hash` with
+  "Shared namespace admission refused … {:reason :compiler-authority-unavailable}" and
+  `seed_runtime_abi_test` fails 8 assertions ("publishes … public surface" → false). Both pass alone.
+- W1 made the runs coherent; something an earlier file does still breaks the compiler authority and
+  the seed publication. Bisect which earlier file, and fix the isolation.
+- **Done when.** The ten files pass in both orders.
+- Card `0c9a9cf3d` records the first observation.
+
 #### W1 ✅ A multi-file `bl test` breaks after a realm-retirement test · S · BL
 - **Why.** On `main` (checked 2026-11-22 on the batch-2 SDK, without U1), `./bin/bl test` with
   `test/bl/contextual_realm_retirement_test.bl` first and nine realm/seed/JS files after it:
@@ -448,8 +461,10 @@ Cards in one lane conflict; lanes run at the same time.
 
 | | Work | Result | Commit |
 |---|---|---|---|
+| ✅ | U1c: one manifest line per searched directory | Misses batched per directory with an entry digest; the client lists each once; declared roots only from top-level `:paths`. Manifest after ten files 1,348 → ~21 lines; project statx −73.6%; warm run 87–96 → 77–87 ms, 7,509 statx per request | (batch 10) |
 | ✅ | U1: the client digests what the realm loaded | The loader records each resolved source and absent candidate in `.bl/realm-sources.v1` (epoch token, self-healing); the client digests declared roots plus exactly those. An edited test helper is seen; warm run 152 → 87–96 ms, `--version` 77–80 ms. Next (U1c): 2,506 absent lines and ~35k statx per request | `2d71662e7` |
 | ✅ | `Loader/ns_home` answers in JavaScript | A page has no realms (`:global`); all 23 js_* files pass | `2d71662e7` |
+| ✅ | U8 sealed seed metadata (`seed_artifact_metadata!`, 5.2%) | producer writes `priv/seed-metadata.term` (105 rows, 716 KB); immutable-root reader checks manifest digest per row; derive 2.2 ms/seed vs sealed 0.5 ms/seed, table read 8.3 ms; 447-assertion equality test | `lane/cold-start` |
 | ✅ | U7: execution receipts derived on first use | `Env/mark_emitted` stored a computed receipt (an ANF walk) for all 1,438 definitions a cold start publishes; it now stores `{:deferred …}` and the row's decoder derives it. Republication of 158 definitions 70 → 17.7 ms; cold start median 3,375 → 3,247 ms (4 pairs). Batch preload, `find_file` memo and "something compiles" measured and dropped | `0c9a9cf3d` |
 | ✅ | U6: SDK files hashed once per VM | Store files hashed once; artifact metadata and kernel disassembly reused; a warm inventory walk 118 → 98 ms; cold run paired with the previous SDK 3,594 → 3,483 ms median (load ~10). U5's "1.5 s of repeated walks" was too high: a repeat walk is ~100 ms | `c8a408a94` |
 | ✅ | J3: `js_compiled_core` passes | Fixed by W1's realm-local link fix: 11/11 | `c8a408a94` |
@@ -499,7 +514,6 @@ Cards in one lane conflict; lanes run at the same time.
 | 🧪 | U7 "something compiles" (`compile_sdk_source!`, 3.1% inclusive) | nothing is compiled on an unchanged SDK: the function stages and admits library Sources (callable-ready checks, retention). The only `compile:forms` work is the 7 native host stubs (14 `compile_descriptor` calls, about 0.5% of samples); their bytes embed the physical `.so` path, so they cannot be sealed before the image has its store path | dropped |
 | 🧪 | U7 native-host bootstrap (782 ms in the checker) | a checker artifact: the edited hosts change the live compiler key, so the primed `native-declarations` miss and 6 Sources are re-read. On the real SDK `bootstrap_sdk_native_hosts!` is 1.2% of samples | dropped |
 | 🧪 | U7 `Loader.find_file` memo | 2.3% inclusive; a memo would need a stat of every earlier search dir to keep shadowing safe, so at most about 1% | dropped |
-| 🧪 | U7 sealed seed-metadata table (`seed_artifact_metadata!`, 5.2%: first-time decode of 95 seeds) | needs the producer to write `priv/seed-metadata.term` and an immutable-root-only reader; cannot be exercised in the checker (its image is not under `/nix/store`) | deferred: needs an SDK build pair |
 
 ## Scratch
 

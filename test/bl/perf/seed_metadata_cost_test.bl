@@ -1,0 +1,45 @@
+(ns perf.seed-metadata-cost-test)
+
+;; What a cold VM pays for the seeds it loads: deriving each proof from the
+;; sealed bytes, versus reading the producer's table once and taking rows.
+;; The table is built here for the measurement; in a real image the producer
+;; built it, so only the second half is a runtime cost.
+
+(def ^:private seed-dir (BeamLisp.Bootstrap/seed_dir))
+
+(defn- once [f]
+ (let [t (erlang/monotonic_time :microsecond)] (f) (/ (- (erlang/monotonic_time :microsecond) t) 1000.0)))
+
+(deftest derive-every-seed-versus-read-the-table
+ (let [table (BeamLisp.AOT/seed_metadata_table seed-dir)
+       rows (:rows table)
+       key (:compiler-key table)
+       names (Map/keys rows)
+       derive (fn []
+                (Enum/each names
+                 (fn [name]
+                  (let [mod (String/to_existing_atom (Path/basename name ".beam"))]
+                   (BeamLisp.AOT/seed_artifact_derivation! mod name (:sha-hex (Map/get rows name))
+                     (File/read! (Path/join seed-dir name)) key)))))
+       bytes (erlang/term_to_binary table (list :deterministic (tuple :compressed 1)))
+       sealed (fn []
+                (let [decoded (erlang/binary_to_term bytes (list :safe))]
+                 (Enum/each names
+                  (fn [name]
+                   (when-not (BeamLisp.AOT/seed_metadata_sealed decoded name (:sha-hex (Map/get rows name)))
+                    (erlang/error (tuple :sealed_row_missing name)))))))
+       ;; What the reader pays: read the file and decode the row map only.
+       read-ms (once (fn [] (erlang/binary_to_term bytes (list :safe))))
+       derive-ms (once derive)
+       sealed-ms (once sealed)
+       decoded (erlang/binary_to_term bytes (list :safe))
+       row-ms (once (fn [] (Enum/each names
+                 (fn [name] (BeamLisp.AOT/seed_metadata_sealed decoded
+                              name (:sha-hex (Map/get rows name)))))))]
+  (println "SEED-METADATA-COST rows" (erlang/length names)
+           "derive-ms" derive-ms "table-bytes" (erlang/byte_size bytes)
+           "table-read-ms" read-ms "rows-only-ms" sealed-ms "rows-with-read-ms" row-ms
+           "derive-us-per-seed" (/ (* 1000.0 derive-ms) (erlang/length names))
+           "sealed-us-per-seed" (/ (* 1000.0 row-ms) (erlang/length names)))
+  (is (> (erlang/length names) 50))
+  (is (<= (erlang/byte_size bytes) (* 8 1024 1024)))))

@@ -1,8 +1,20 @@
 (ns perf.cold-namespace-load-test)
 
-;; What the first load of the CLI namespaces costs in a fresh VM on an unchanged
-;; SDK image, and how many modules that load compiles. Run this file alone: the
-;; numbers are only meaningful in a VM that has not loaded these namespaces yet.
+;; What the first load of the CLI namespaces costs on an unchanged SDK, and how
+;; many modules that load compiles.
+;;
+;; A COLD number needs a VM that has not loaded `bl.cli` yet, and `bl test`
+;; cannot provide one: the launcher dispatches EVERY command THROUGH `bl.cli`,
+;; and the isolated runner forks one warm image, so this file always starts with
+;; the CLI already loaded. The bare-VM harness (`scripts/check-runtime-hosts`)
+;; boots the application without it, and that is where the cold figure is
+;; measured.
+;;
+;; The test therefore asserts the property that is true in the VM it is in: a
+;; cold load takes measurable time and reports its compile work; a warm
+;; `ensure_loaded` is a no-op that recompiles nothing. It prints which one it
+;; measured, so a warm run is never read as a cold number. Run it alone for the
+;; least noise.
 
 (def ^:private compile-patterns
  [(tuple :Elixir.BeamLisp.Emit :compile_descriptor 1)
@@ -14,16 +26,25 @@
   (if (erlang/is_integer count) count 0)))
 
 (deftest first-load-of-the-cli-namespaces
- (let [bootstrap (ets/lookup :beam_lisp_vars :bl_sdk_native_bootstrap)
+ (let [preloaded? (BeamLisp.Env/loaded_ns? "bl.cli")
+       bootstrap (ets/lookup :beam_lisp_vars :bl_sdk_native_bootstrap)
        boot-us (when-not (= bootstrap (list)) (:elapsed-us (elem (erlang/hd bootstrap) 1)))]
   (try
    (Enum/each compile-patterns (fn [p] (erlang/trace_pattern p true (list :local :call_count))))
    (let [t (erlang/monotonic_time :millisecond)]
     (BeamLisp.Loader/ensure_loaded "bl.cli")
-    (let [ms (- (erlang/monotonic_time :millisecond) t)]
-     (println "COLD-NS-LOAD native-bootstrap-us" boot-us "bl.cli-load-ms" ms
-              "compile_descriptor" (calls (nth compile-patterns 0))
-              "compile_sdk_source" (calls (nth compile-patterns 1))
-              "execution_entries" (calls (nth compile-patterns 2)))
-     (is (> ms 0))))
+    (let [ms (- (erlang/monotonic_time :millisecond) t)
+          descriptor (calls (nth compile-patterns 0))
+          sdk-source (calls (nth compile-patterns 1))
+          receipts (calls (nth compile-patterns 2))]
+     (println "COLD-NS-LOAD native-bootstrap-us" boot-us
+              "bl.cli-already-loaded" preloaded? "bl.cli-load-ms" ms
+              "compile_descriptor" descriptor
+              "compile_sdk_source" sdk-source
+              "execution_entries" receipts)
+     (is (BeamLisp.Env/loaded_ns? "bl.cli") "the CLI namespace is loaded")
+     (if preloaded?
+       (is (and (zero? descriptor) (zero? sdk-source) (zero? receipts))
+           "an already-loaded CLI namespace recompiles nothing")
+       (is (> ms 0) "a first load of the CLI namespaces takes measurable time"))))
    (finally (Enum/each compile-patterns (fn [p] (erlang/trace_pattern p false (list :local :call_count))))))))
