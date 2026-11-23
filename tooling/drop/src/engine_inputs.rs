@@ -318,6 +318,10 @@ pub fn file_digest_stamped(path: &Path, _meta: &Metadata) -> io::Result<[u8; 32]
 #[cfg(target_os = "linux")]
 pub struct Snapshot {
     pub fingerprint: String,
+    /// The fingerprint without the files a checkout VM reloads in place
+    /// (`dev_reload`). Equal to `fingerprint` when nothing is reloadable. It keys
+    /// the VM; `fingerprint` still selects and builds the SDK.
+    pub base_fingerprint: String,
     files: BTreeMap<PathBuf, (Stamp, [u8; 32])>,
     directories: Vec<(PathBuf, Stamp)>,
     policy: (PathBuf, Stamp),
@@ -333,21 +337,31 @@ impl Snapshot {
         if !policy_info.is_file() { return Err(invalid("engine-input policy must be a regular file")); }
         let policy_stamp = Stamp::file(&policy_info);
         let policy = Policy::read(&root)?;
-        let mut capture = Capture { policy, entries: 0, bytes: 0, seen: BTreeSet::new(),
-            rows: Vec::new(), snapshot: Self { fingerprint: String::new(), files: BTreeMap::new(), directories: Vec::new(), policy: (policy_path, policy_stamp) } };
+        let mut capture = Capture { policy, reload: crate::dev_reload::Policy::read(&root), entries: 0, bytes: 0, seen: BTreeSet::new(),
+            rows: Vec::new(), snapshot: Self { fingerprint: String::new(), base_fingerprint: String::new(), files: BTreeMap::new(), directories: Vec::new(), policy: (policy_path, policy_stamp) } };
         capture.walk(&root, &[], 0)?;
         if capture.policy.roots.iter().any(|path| !capture.seen.contains(path.as_bytes())) {
             return Err(invalid("required engine-input root is missing"));
         }
         capture.rows.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut hash = Sha256::new();
-        hash.update(b"beam-lisp-engine-inputs-v1\0[");
-        for (index, (_, row)) in capture.rows.iter().enumerate() {
-            if index != 0 { hash.update(b","); }
-            hash.update(row.as_bytes());
-        }
-        hash.update(b"]");
-        capture.snapshot.fingerprint = format!("{:x}", hash.finalize());
+        let digest = |prefix: &[u8], base: bool| {
+            let mut hash = Sha256::new();
+            hash.update(prefix);
+            hash.update(b"[");
+            for (index, (_, row, _)) in capture.rows.iter().filter(|row| !(base && row.2)).enumerate() {
+                if index != 0 { hash.update(b","); }
+                hash.update(row.as_bytes());
+            }
+            hash.update(b"]");
+            format!("{:x}", hash.finalize())
+        };
+        capture.snapshot.fingerprint = digest(b"beam-lisp-engine-inputs-v1\0", false);
+        // `scripts/sdk-inputs --base` computes the same bytes.
+        capture.snapshot.base_fingerprint = if capture.rows.iter().any(|row| row.2) {
+            digest(b"beam-lisp-engine-inputs-base-v1\0", true)
+        } else {
+            capture.snapshot.fingerprint.clone()
+        };
         capture.snapshot.verify()?;
         Ok(capture.snapshot)
     }
@@ -378,8 +392,8 @@ impl Snapshot {
 
 #[cfg(target_os = "linux")]
 struct Capture {
-    policy: Policy, entries: u64, bytes: u64, seen: BTreeSet<Vec<u8>>,
-    rows: Vec<(Vec<u32>, String)>, snapshot: Snapshot,
+    policy: Policy, reload: Option<crate::dev_reload::Policy>, entries: u64, bytes: u64, seen: BTreeSet<Vec<u8>>,
+    rows: Vec<(Vec<u32>, String, bool)>, snapshot: Snapshot,
 }
 
 #[cfg(target_os = "linux")]
@@ -411,8 +425,15 @@ impl Capture {
             self.seen.insert(path.clone());
             let key = points(&path);
             let encoded = json_name(&key);
+            // Reloadable rows stay in `fingerprint` and leave `base_fingerprint`.
+            let relative = std::str::from_utf8(&path).ok();
+            let held = |file: bool| match (&self.reload, relative) {
+                (Some(reload), Some(name)) => if file { reload.reloadable(name) } else { reload.reload_directory(name) },
+                _ => false,
+            };
             if info.is_dir() {
-                self.rows.push((key, format!("[{encoded},\"directory\"]")));
+                let held = held(false);
+                self.rows.push((key, format!("[{encoded},\"directory\"]"), held));
                 self.walk(&physical, &path, depth + 1)?;
             } else if info.is_file() {
                 if info.len() > self.policy.file_bytes { return Err(invalid("engine-input file size limit exceeded")); }
@@ -445,7 +466,8 @@ impl Capture {
                 };
                 let hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
                 let executable = info.mode() & 0o100 != 0;
-                self.rows.push((key, format!("[{encoded},\"regular\",{executable},\"{hex}\"]")));
+                let held = held(true);
+                self.rows.push((key, format!("[{encoded},\"regular\",{executable},\"{hex}\"]"), held));
                 self.snapshot.files.insert(physical, (stamp, digest));
             } else { return Err(invalid("selected engine input must be a regular file or directory")); }
         }
@@ -459,7 +481,7 @@ impl Capture {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub struct Snapshot { pub fingerprint: String }
+pub struct Snapshot { pub fingerprint: String, pub base_fingerprint: String }
 
 #[cfg(not(target_os = "linux"))]
 impl Snapshot {

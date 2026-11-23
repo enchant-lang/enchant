@@ -3795,6 +3795,10 @@
   this exact member of the actual sealed image, whose bytes are verified here.
   A missing file alone and a caller's row never create image ownership."
  [root module row]
+ (if (Map/get row :dev-overlay)
+  ;; A checkout overlay row is current while the overlay still holds those
+  ;; exact bytes; the SDK's own file is not its source (U15).
+  (erlang/== (Map/get row :source-digest) (BeamLisp.Env/dev_sdk_source_digest (Map/get row :source)))
  (let [name (Map/get row :source)
        source (sdk_unit_source_path root name)
        relative (when source (Path/relative_to source root))]
@@ -3806,7 +3810,17 @@
          (and raw
               (erlang/== (Map/take raw (list :source :source-digest :sha256 :compiler-key))
                  (Map/take row (list :source :source-digest :sha256 :compiler-key)))
-              (erlang/not (erlang/== nil (image_sdk_entry! root (Atom/to_string module) raw)))))))))
+              (erlang/not (erlang/== nil (image_sdk_entry! root (Atom/to_string module) raw))))))))))
+
+(defn sdk_dev_emission_rows!
+  "U15: inventory rows for a unit compiled from a checkout copy at `source`
+   under the private tree `root`, bound to the exact emitted bytes. Rows carry
+   the same root-relative :source as the SDK's own. Returns module => row."
+  [root source beams]
+  (Map/new (Enum/map
+    (sdk_emission_entries! root source
+      (Enum/map beams (fn [beam] (tuple (elem beam 0) (File/read! (elem beam 1))))))
+    (fn [entry] (tuple (elem (elem entry 0) 1) (elem entry 1))))))
 
 (defn decode_sdk_image_metadata!
   "Pure decoding for the native metadata cache. No loading, evaluation, caller
@@ -3886,8 +3900,10 @@
                   (let [mod (elem loaded 0)]
                     (if (Map/has_key? inventory (Atom/to_string mod)) (cons mod out) out))))
         result
-    (loop [pending (erlang/++ (Map/keys (sdk_native_receipts)) roots)
-           seen (MapSet/new) out (Map/merge seed (sdk_native_receipts))]
+    ;; A checkout overlay's rows answer for the modules it compiled (U15).
+    (let [overlay (if (erlang/function_exported :Elixir.BeamLisp.Env :dev_sdk_rows 0) (BeamLisp.Env/dev_sdk_rows) {})]
+    (loop [pending (erlang/++ (Map/keys overlay) (erlang/++ (Map/keys (sdk_native_receipts)) roots))
+           seen (MapSet/new) out (Map/merge (Map/merge seed (sdk_native_receipts)) overlay)]
       (when (erlang/> (erlang/map_size out) 8192) (erlang/error :sdk_dependency_closure_too_large))
       (if (erlang/== pending (list)) out
         (let [mod (erlang/hd pending) rest (erlang/tl pending)]
@@ -3902,7 +3918,7 @@
                 (let [dependencies (Enum/uniq (erlang/++ (Map/get row :imports (list))
                                       (Map/values (or (Map/get row :forwarder-routes) {}))))]
                   (recur (erlang/++ dependencies rest) (MapSet/put seen mod)
-                         (Map/put out mod row)))))))))]
+                         (Map/put out mod row))))))))))]
     (assert_sdk_seed_snapshot! manifest)
     result))
 
