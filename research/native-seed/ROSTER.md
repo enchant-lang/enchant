@@ -486,7 +486,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - The refusal rate is reported per reason.
   - Flipping to "on" passes the same suites.
 
-#### N4 🔒 The SDK rebuilds only what changed · S+ (after N2)
+#### N4 ⏳ The SDK rebuilds only what changed · S+ (N2 done)
 - **Why.** A compiler edit rotates every unit's key, so all 662 units
   recompile in a 4-CPU QEMU VM (862 s on 2026-11-22). The native compiler
   compiles its own 1.8 MB bundle in 6.4 s.
