@@ -51,6 +51,57 @@
 (defn- physical_sdk_path [path]
  (when (and (erlang/is_binary path) (File/exists? path)) (Path/expand path)))
 
+;; cerl_trees:free_variables/1 over the native host's cerl records (the
+;; tuples core_parse.hrl declares): an ordset of the variable names a Core
+;; tree uses without binding. Pattern variables bind; everything else uses.
+(defn- nf-pattern-vars [p]
+ (if-not (erlang/is_tuple p) (list)
+  (case (elem p 0)
+   :c_var (list (elem p 2))
+   :c_alias (cons (elem (elem p 2) 2) (nf-pattern-vars (elem p 3)))
+   :c_cons (concat (nf-pattern-vars (elem p 2)) (nf-pattern-vars (elem p 3)))
+   :c_tuple (mapcat nf-pattern-vars (elem p 2))
+   :c_values (mapcat nf-pattern-vars (elem p 2))
+   :c_map (mapcat (fn [pair] (nf-pattern-vars (elem pair 4))) (elem p 3))
+   :c_binary (mapcat (fn [seg] (nf-pattern-vars (elem seg 2))) (elem p 2))
+   (list))))
+(defn- nf-pattern-uses [p]
+ (if-not (erlang/is_tuple p) (list)
+  (case (elem p 0)
+   :c_alias (nf-pattern-uses (elem p 3))
+   :c_cons (concat (nf-pattern-uses (elem p 2)) (nf-pattern-uses (elem p 3)))
+   :c_tuple (mapcat nf-pattern-uses (elem p 2))
+   :c_values (mapcat nf-pattern-uses (elem p 2))
+   :c_map (mapcat (fn [pair] (concat (nf-core-free (elem pair 3)) (nf-pattern-uses (elem pair 4)))) (elem p 3))
+   :c_binary (mapcat (fn [seg] (concat (nf-pattern-uses (elem seg 2)) (nf-core-free (elem seg 3)))) (elem p 2))
+   (list))))
+(defn- nf-without [names bound] (let [b (set bound)] (remove #(contains? b %) names)))
+(defn- nf-core-free [t]
+ (cond
+  (erlang/is_list t) (mapcat nf-core-free t)
+  (not (erlang/is_tuple t)) (list)
+  :else
+  (case (elem t 0)
+   :c_var (list (elem t 2))
+   :c_literal (list)
+   :c_fun (nf-without (nf-core-free (elem t 3)) (map #(elem % 2) (elem t 2)))
+   :c_let (concat (nf-core-free (elem t 3)) (nf-without (nf-core-free (elem t 4)) (map #(elem % 2) (elem t 2))))
+   :c_letrec (let [names (map #(elem (elem % 0) 2) (elem t 2))]
+              (nf-without (concat (mapcat #(nf-core-free (elem % 1)) (elem t 2)) (nf-core-free (elem t 3))) names))
+   :c_clause (let [bound (mapcat nf-pattern-vars (elem t 2))]
+              (concat (mapcat nf-pattern-uses (elem t 2))
+                      (nf-without (concat (nf-core-free (elem t 3)) (nf-core-free (elem t 4))) bound)))
+   :c_case (concat (nf-core-free (elem t 2)) (nf-core-free (elem t 3)))
+   :c_receive (concat (nf-core-free (elem t 2)) (nf-core-free (elem t 3)) (nf-core-free (elem t 4)))
+   :c_try (concat (nf-core-free (elem t 2))
+                  (nf-without (nf-core-free (elem t 4)) (map #(elem % 2) (elem t 3)))
+                  (nf-without (nf-core-free (elem t 6)) (map #(elem % 2) (elem t 5))))
+   :c_map_pair (concat (nf-core-free (elem t 3)) (nf-core-free (elem t 4)))
+   :c_map (concat (nf-core-free (elem t 2)) (nf-core-free (elem t 3)))
+   :c_bitstr (concat (nf-core-free (elem t 2)) (nf-core-free (elem t 3)))
+   (mapcat nf-core-free (drop 2 (Tuple/to_list t))))))
+(defn- nf-free-variables [tree] (sort (distinct (nf-core-free tree))))
+
 ;; The compiler reaches these through BeamLisp.AOT; here they are host.aot's.
 (defn- nf-route-aot! []
  (doseq [[name arity f] [["sdk_constructor_binding_reference" 2 sdk_constructor_binding_reference]
@@ -62,6 +113,11 @@
                          ["constructor_call!" 6 constructor_call!]
                          ["constructor_metadata_compiling?" 0 constructor_metadata_compiling?]]]
   (host/nf-route! (str "Elixir.BeamLisp.AOT/" name "/" arity) f))
+ (host/nf-route! "cerl_trees/free_variables/1" nf-free-variables)
+ ;; host.record is evaluated before host.aot (the native image lacks it).
+ (host/nf-route! "Elixir.BeamLisp.Record/declaration_descriptor/4" host.record/declaration_descriptor)
+ (host/nf-route! "Elixir.BeamLisp.Record/declaration_descriptor/5" host.record/declaration_descriptor)
+ (host/nf-route! "Elixir.BeamLisp.Record/declaration_kind/3" host.record/declaration_kind)
  (host/nf-route! "Elixir.BeamLisp.Loader/source_decls_from/3" nfl-source_decls_from)
  (host/nf-route! "Elixir.BeamLisp.Loader/source_decls/1" nf-source-decls))
 
@@ -135,7 +191,8 @@
   (host/nf-install-world
    {:priv-root (:priv-root doc) :compiler-key (:compiler-key doc)
     :namespaces namespaces :keys keys :source-hashes hashes
-    :library-names (list) :build-namespaces (list)})))
+    :library-names (list) :build-namespaces (list)
+    :declaration-tables (or (:declaration-tables doc) {})})))
 
 (defn nf-run
  ([custody out] (nf-run custody out nil))

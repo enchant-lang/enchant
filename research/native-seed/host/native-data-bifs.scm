@@ -294,6 +294,10 @@
 (define (etf-binary bytes acc) (etf-push bytes (etf-u32 (length bytes) (cons 109 acc))))
 (define (etf-map-like? x)
  (or (bl-tag? x 'map) (bl-tag? x 'vec) (bl-tag? x 'set) (native-opaque-struct? x)))
+(define (etf-byte-list? p n)
+ (cond ((null? p) (> n 0)) ((not (pair? p)) #f) ((>= n 65535) #f)
+  ((let ((x (car p))) (and (integer? x) (exact? x) (>= x 0) (< x 256))) (etf-byte-list? (cdr p) (+ n 1)))
+  (else #f)))
 (define (etf-encode x acc)
  (cond ((eq? x #t) (etf-atom "true" acc)) ((eq? x #f) (etf-atom "false" acc)) ((bl-is-nil x) (etf-atom "nil" acc))
   ((and (symbol? x) (native-colon-symbol? x)) (etf-atom (native-atom-name x) acc))
@@ -303,6 +307,8 @@
   ((string? x) (etf-binary (native-utf8-bytes x) acc))
   ((native-bytes? x) (etf-binary (bytevector->u8-list (vector-ref x 1)) acc))
   ((null? x) (cons 106 acc))
+  ;; STRING_EXT, as the BEAM writes a proper list of 1..65535 bytes.
+  ((and (pair? x) (etf-byte-list? x 0)) (etf-push x (etf-u16 (length x) (cons 107 acc))))
   ((pair? x)
    (let count ((p x) (n 0))
     (if (pair? p) (count (cdr p) (+ n 1))
@@ -318,7 +324,11 @@
                               (native-map-pairs (native-assert-map x)))))
     (let loop ((ps pairs) (acc (etf-u32 (length pairs) (cons 116 acc))))
      (if (null? ps) acc (loop (cdr ps) (etf-encode (bl-nth (car ps) 1) (etf-encode (bl-nth (car ps) 0) acc)))))))
+  ;; erlang:external_size/1 only measures: a closure or reference counts as a
+  ;; fixed-size stand-in (the BEAM's own sizes depend on its code and node).
+  (etf-measuring? (etf-push (make-list 32 0) acc))
   (else (native-badarg "term_to_binary: no external form for this value"))))
+(define etf-measuring? #f)
 (define (native-term-to-binary x)
  (native-bytes (u8-list->bytevector (reverse (etf-encode x (list 131))))))
 (define (etf-options-ok? opts)
@@ -969,7 +979,21 @@
 (nf-set-leaf! "Elixir.Regex/match?/2" (lambda (regex text) (not (bl-is-nil (native-regex-run regex text)))))
 (nf-set-leaf! "erlang/external_size/1"
  (lambda (x) (if (or (h-is-float x) (h-is-int x)) (native-external-number-size x)
-              (bytevector-length (vector-ref (native-term-to-binary x) 1)))))
-;; No publication generations exist natively: every query declines its memo
-;; certificate (nil), which costs a re-read and changes no answer.
-(nf-set-leaf! "Elixir.BeamLisp.Env/namespace_generations/1" (lambda (namespaces) bl-nil))
+              (dynamic-wind (lambda () (set! etf-measuring? #t))
+                            (lambda () (bytevector-length (vector-ref (native-term-to-binary x) 1)))
+                            (lambda () (set! etf-measuring? #f))))))
+;; No publication happens natively: every namespace is at generation 0 of
+;; :global, so declaration-query certificates are stable.
+(nf-set-leaf! "Elixir.BeamLisp.Env/namespace_generations/1"
+ (lambda (namespaces) (map (lambda (ns) (bl-make-tuple3 (bl-key "global") ns 0)) (native-finite-items namespaces))))
+(define (bl-make-tuple3 a b c) (bl-tuple (list a b c)))
+;; The SDK's checked declaration tables are the BEAM's (custody).
+(nf-set-leaf! "Elixir.BeamLisp.PackageAuthority/sdk_checked_declaration_table/1"
+ (lambda (ns) (native-raw-map-get (nf-world-get (bl-key "declaration-tables") (bl-empty-map)) ns bl-nil)))
+;; String.replace_suffix/3 and replace_prefix/3 (byte-wise, as Elixir's).
+(define (nf-string-suffix? p s)
+ (and (>= (string-length s) (string-length p)) (string=? (substring s (- (string-length s) (string-length p)) (string-length s)) p)))
+(nf-set-leaf! "Elixir.String/replace_suffix/3"
+ (lambda (s match with) (if (nf-string-suffix? match s) (string-append (substring s 0 (- (string-length s) (string-length match))) with) s)))
+(nf-set-leaf! "Elixir.String/replace_prefix/3"
+ (lambda (s match with) (if (nf-string-prefix? match s) (string-append with (substring s (string-length match) (string-length s))) s)))
