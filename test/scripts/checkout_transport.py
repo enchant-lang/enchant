@@ -61,8 +61,10 @@ with tempfile.TemporaryDirectory(prefix='bl-checkout-transport-') as scratch:
                 continue
             try:
                 if f'XDG_RUNTIME_DIR={runtime}'.encode() + b'\0' in (proc / 'environ').read_bytes():
-                    command = (proc / 'cmdline').read_bytes().split(b'\0', 1)[0]
-                    if Path(os.fsdecode(command)).name in {'beam.smp', 'beam'}:
+                    argv = (proc / 'cmdline').read_bytes().split(b'\0')
+                    # The per-tree generation resident lives until killed.
+                    if (Path(os.fsdecode(argv[0])).name in {'beam.smp', 'beam'}
+                            or b'--generation-service' in argv):
                         owned.append(int(proc.name))
             except (FileNotFoundError, ProcessLookupError, PermissionError):
                 pass
