@@ -233,6 +233,12 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   `Cannot build '<drv>'.` — the leaf (`{:artifact-failed host.beam-lisp}`, then the producer's
   `** (ArgumentError) …`) sits higher in the same file. Prefer distinct lines that are not
   `Cannot build`, falling back to the first three; add a fixture whose chain hides its leaf.
+  **Done in batch 19 (`9d9f68bb8`).**
+  - Leaves are a `** (…Error)` line, an `:artifact-failed` unit, or any `error:` line other
+    than `Cannot build`. They come first, and the links fill what's left of the three.
+  - Builder prefixes are stripped.
+  - The new fixture is `test/fixtures/preparation/producer-failed`, from batch 17's real
+    failure, trimmed.
   `nix/` is an SDK input, so land it with the next SDK-input batch.
 
 #### U4 ✅ Lock work per request proportional to change — retargeted: locks cost 1–3 ms per request, Env full-table scans cost 15–30 ms; U4b replaces the scans with exact-key lookups (`lane/runtime`, Env own time per spawn 1,904 → 971 µs) · S+ · BL runtime (after U1)
@@ -308,18 +314,45 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - `seed_runtime_abi` passes warm twice, and `warm_request_env` passes.
   - Two successive helper edits are both seen.
 
-#### U11 🔨 One request, one process in the VM (13.6 → 2–4 ms) · S+ · BL runtime · branch `lane/warm-floor2`
-- The handler spawns ~10 processes per request (5 `Refs/spawn_owned`, io proxy, heartbeat). Run the command in the connection process, open a realm handle once per generation, write frames directly, heartbeat only past a threshold, return on the same connection, skip custody for unchanged module sets. Keep dead-owner recovery.
+#### U11 ✅ Fewer process starts per request · landed batch 19 (`ffa931ab0`)
+- **What landed.** Three fewer owned process starts per request. Each owned start costs about 1.04 ms; a plain `erlang/spawn` costs about 1.8 µs.
+  - The heartbeat comes from the connection process while it waits.
+  - `vm.net`'s client watcher and `vm.io`'s output proxy are plain processes.
+  - The connection worker and the command's child stay owned, so a client that leaves still cancels its command. Gate 19c checked this: a client sent SIGTERM at 4 s left no marker. The agent also checked SIGKILL.
+- **Left (≈1–2 ms).**
+  - The connection worker could be a plain process too. It hands its environment to the command's child, so check that first.
+  - `realm/open` re-reads `env.bl` and takes a `:global` lock on every request (0.67 ms traced).
 
-#### U12 🔨 Compact keep-alive request (~6 ms) · S+ · client + protocol · branch `lane/warm-floor2`
-- **U12a ✅ (batch 17).** `run FILE` replays an unchanged file's compiled forms, keyed by source hash, while the realm's `definition_context` is unchanged.
+#### U12 ✅ Request framing and the client's fixed cost · landed batches 17 and 19
+- **U12a (batch 17).** `run FILE` replays an unchanged file's compiled forms, keyed by source hash, while the realm's `definition_context` is unchanged.
   - The code is in `priv/host/beam_lisp.bl`, forwarded through `priv/host/compiler.bl`.
-  - `run_file_cache_test` and `run_file_scope_test` are green on the SDK.
-  - Gate 17 needed three fixes:
-    - host constants became `defn`s;
-    - a floor guard for the producer;
-    - facade forwards, because without them the guard was always false.
-- **U12b ⏳.** Skip connect and hello. Send an environment generation or delta instead of 91 variables (a 10.7 KB frame).
+  - It needed three fixes: host constants as `defn`s, a floor guard, and facade forwards.
+- **Platform selection reuse (batch 19, `a99ca9941`).** This was the largest remaining cost, and U9 had missed it.
+  - Every `./bin/bl` re-hashed `nix/`, `tooling/drop` and `native/` (20 ms).
+  - `scripts/prepare-checkout-platform` now reuses the fingerprint recorded for an identical settled stat listing, stored in `.bl/platform-stat.v1`.
+  - `BL_CHECKOUT_DIGEST_CACHE=0` recomputes.
+- **U12b (batch 19, `5053857f6`).** The generation service and its client read lines in blocks. This made no measurable difference.
+- **Declined.**
+  - Skipping connect and hello isn't possible while each command is a new client process, and hello costs only 0.79 ms.
+  - An environment delta would save about 0.5 ms and needs a protocol change.
+- **Warm floor after batch 19** (gate 19c, load ~24, 15 runs):
+  - `bl run` of `(println 1)`: 26 ms median;
+  - with the generation service off: 73 ms;
+  - with the platform cache off: 41 ms.
+
+#### U13 ⏳ A caller can steer which VM owns its request with `BL_CHECKOUT_SDK_INPUTS` · S · client · since batch 17
+- **Symptom.** `test/scripts/checkout_transport.py` fails at `caller-cannot-supply-engine-pin`: with `BL_CHECKOUT_SDK_INPUTS` set to 64 zeros, the owner differs from `first`.
+  - It passes on main before batch 17 (`7e4b5823a`).
+  - It fails on batch 18 and batch 19.
+  - The suspect is U10's generation service (`tooling/drop/src/generation.rs`, `checkout.rs:144`, `launcher.rs:631`). The client should drop or override a caller's value, never key a VM by it.
+- **Done when.** `checkout_transport.py` passes end to end on the SDK, and the generation service stays on (warm median within 2 ms of 26 ms).
+
+#### U14 ⏳ `realm_shared_test` and `session_test`'s daemon case fail on main · S · BL runtime · old
+- **Symptom.** `test/bl/vm/realm_shared_test.bl` gives 53 passed, 53 failed and 6 errored. `session_test` fails `a-daemon-records-its-build-and-cleans-up-on-stop` (3).
+  - The failures are identical before batch 17 (`7e4b5823a`), on batch 18, and on batch 19.
+  - Errors include `FunctionClauseError :inet.tcp_close/1` and `String.contains?/2`, and a test's `ran` marker is missing.
+  - After this file runs, the realm is unusable, so later requests in a gate print nothing. Run it last.
+- **Done when.** Both files pass in a warm realm, and the ten files still pass after them.
 
 ### N — the native compiler on the default path
 
