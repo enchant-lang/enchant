@@ -5325,6 +5325,17 @@
 (defn- realm_unit_restore_enabled? []
   (erlang/not (lists/member (System/get_env "BL_REALM_UNIT_RESTORE") (list "0" "off" "false"))))
 
+(defn- realm_unit_memo
+  "`(f)` remembered per VM under `tag` and the bytes' digest: every fact
+   memoized here is a pure function of the source bytes (and the namespace
+   name in `tag`), so the same bytes in a later realm skip another parse."
+  [tag content f]
+  (let [row (tuple :bl_realm_unit_memo tag (crypto/hash :sha256 content))
+        hit (ets/lookup :beam_lisp_vars row)]
+    (if (erlang/== (list) hit)
+      (let [value (f)] (ets/insert :beam_lisp_vars (tuple row value)) value)
+      (elem (erlang/hd hit) 1))))
+
 (defn- realm_unit_admissible?
   "One namespace per file, the one being loaded, whose top-level heads are all
    standard defining forms (the loader's own replay classifier)."
@@ -5352,10 +5363,28 @@
               (erlang/not (lists/any (fn [r] (lists/member r macros)) refs))
               (lists/all (fn [r] (lists/member r inames)) refs)))))
 
+(defn- realm_unit_node
+  "`source_graph_node_cached`, remembered per VM for a namespace whose source
+   resolves into the SDK's priv root under these search dirs. Those bytes sit
+   in an immutable store path, and a project file of the same name could only
+   be a declared shadow (which declines restoration) or a refused load. A
+   project namespace is re-read on every key, as its bytes are what changes."
+  [name context]
+  (let [memo (tuple :bl_realm_unit_sdk_node name (elem context 1))
+        row (ets/lookup :beam_lisp_vars memo)]
+    (cond
+      (erlang/== (list) row)
+        (let [node (source_graph_node_cached name context)
+              sdk? (realm_unit_sdk_source? (BeamLisp.Loader/source_path name))]
+          (ets/insert :beam_lisp_vars (tuple memo (if (and node sdk?) (tuple :sdk node) :project)))
+          node)
+      (erlang/== :project (elem (erlang/hd row) 1)) (source_graph_node_cached name context)
+      :else (elem (elem (erlang/hd row) 1) 1))))
+
 (defn- realm_unit_nodes
   "The plan nodes of `name`'s require closure, `(list)` when it has no source."
   [name context]
-  (or (BeamLisp.BuildPlan/nodes_from_resolver name (fn [n] (source_graph_node_cached n context)))
+  (or (BeamLisp.BuildPlan/nodes_from_resolver name (fn [n] (realm_unit_node n context)))
       (list)))
 
 (defn- realm_unit_prefixes
@@ -5395,9 +5424,12 @@
   "Whether a compile-time member's own implicit references are read: project
    sources always; SDK sources only while a U15 overlay is active (otherwise
    the SDK identity names them)."
-  [name]
+  [name context]
   (or (erlang/== true (persistent_term/get :bl_dev_sdk_overlay false))
-      (erlang/not (realm_unit_sdk_source? (BeamLisp.Loader/source_path name)))))
+      (let [row (ets/lookup :beam_lisp_vars (tuple :bl_realm_unit_sdk_node name (elem context 1)))]
+        (if (erlang/== (list) row)
+          (erlang/not (realm_unit_sdk_source? (BeamLisp.Loader/source_path name)))
+          (erlang/== :project (elem (erlang/hd row) 1))))))
 
 (defn- realm_unit_full_lines
   "Fold the compile-time closure of `ns` (see the header). Answers
@@ -5417,7 +5449,8 @@
         ;; member of the compile-time closure. A project namespace reached
         ;; that way joins the compile-time closure.
         (erlang/not (erlang/== (list) pending))
-          (let [found (realm_unit_implicit (elem (erlang/hd pending) 1))
+          (let [text (elem (erlang/hd pending) 1)
+                found (realm_unit_memo :implicit text (fn [] (realm_unit_implicit text)))
                 project (Enum/filter found
                           (fn [p] (let [path (BeamLisp.Loader/source_path p)]
                                     (and path (erlang/not (realm_unit_sdk_source? path))))))]
@@ -5435,7 +5468,7 @@
                 fresh (Enum/filter members (fn [m] (erlang/not (maps/is_key (maps/get :ns m) full))))
                 full (if (erlang/== (list) members) (maps/put x "?" full) full)
                 full (Enum/reduce fresh full (fn [m acc] (maps/put (maps/get :ns m) (maps/get :hash m) acc)))
-                scan (Enum/filter (Enum/map (Enum/filter fresh (fn [m] (realm_unit_scanned? (maps/get :ns m))))
+                scan (Enum/filter (Enum/map (Enum/filter fresh (fn [m] (realm_unit_scanned? (maps/get :ns m) context)))
                                     (fn [m] (tuple (maps/get :ns m)
                                               (source_content_cached (maps/get :ns m)
                                                 (source_resolution_key (maps/get :ns m) context)))))
@@ -5506,10 +5539,14 @@
   "`(f)`; with BL_REALM_UNIT_TIMES set, also one stderr line of its wall time."
   [ns phase f]
   (if (erlang/== nil (System/get_env "BL_REALM_UNIT_TIMES")) (f)
-    (let [t0 (erlang/monotonic_time :microsecond) value (f)]
+    (let [t0 (erlang/monotonic_time :microsecond) value (f)
+          us (erlang/- (erlang/monotonic_time :microsecond) t0)
+          row (tuple :bl_realm_unit_time ns phase)]
+      ;; Also summed in the VM, for a reader that cannot see its stderr.
+      (ets/update_counter :beam_lisp_vars row (list (tuple 2 1) (tuple 3 us)) (tuple row 0 0))
       (IO/puts :stderr (erlang/iolist_to_binary
         (list "bl-realm-unit " ns " " (erlang/atom_to_binary phase :utf8) " "
-              (Integer/to_string (erlang/- (erlang/monotonic_time :microsecond) t0)) "us")))
+              (Integer/to_string us) "us")))
       value)))
 
 (defn- realm_unit_code_free?
@@ -5524,20 +5561,45 @@
          (fn [mod] (or (erlang/not (erlang/check_old_code mod)) (code/soft_purge mod))))))
 
 (defn- realm_unit_key
-  "The restore key of realm-local `ns` (see the header), or nil to compile."
-  [ns target realm content context]
+  "The restore key of realm-local `ns` (see the header), or nil to compile.
+   The compiler namespaces must have no realm-local definition (`context`
+   non-nil); their global code is named by the compiler key, the SDK root and
+   the overlay, never by this VM's publication counters, so a key is stable
+   across realms and VMs."
+  [ns target realm content]
   (with_source_snapshot
     (fn []
-      (let [closure (ns_closure_hash ns)
-            folded (when closure (realm_unit_full_lines ns content (source_resolution_context)))]
-        (when (and folded (realm_unit_live_ok? (lists/delete ns (elem folded 1))))
-          (tuple closure
-            (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary
-              (tuple :realm_unit_v1 (BeamLisp.Emit/module_for ns) realm context closure
-                     (elem folded 0) (realm_unit_caps target)
-                     (realm_unit_overlay (elem folded 1))
-                     (physical_sdk_path (BeamLisp.Tiers/priv_root)))))
-              (list (tuple :case :lower)))))))))
+      (let [context (source_resolution_context)
+            ;; `ns_closure_hash` over the same resolver, SDK nodes remembered.
+            nodes (realm_unit_timed ns :key-closure (fn [] (realm_unit_nodes ns context)))
+            closure (when (erlang/not (erlang/== (list) nodes)) (BeamLisp.BuildPlan/key_from_nodes ns nodes))
+            folded (when closure (realm_unit_timed ns :key-full (fn []
+                     (realm_unit_full_lines ns content context))))]
+        (when (and folded (realm_unit_timed ns :key-live (fn [] (realm_unit_live_ok? (lists/delete ns (elem folded 1))))))
+          (let [parts (list (BeamLisp.Emit/module_for ns) realm closure (elem folded 0)
+                            (realm_unit_caps target)
+                            (realm_unit_timed ns :key-overlay (fn [] (realm_unit_overlay (elem folded 1))))
+                            (physical_sdk_path (BeamLisp.Tiers/priv_root)))]
+            (when (System/get_env "BL_REALM_UNIT_TIMES")
+              (IO/puts :stderr (erlang/iolist_to_binary
+                (list "bl-realm-unit " ns " key-parts "
+                      (Enum/join (Enum/map parts (fn [p] (String/slice (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary p))) 0 8))) " ")))))
+            (tuple closure
+              (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (tuple :realm_unit_v2 parts)))
+                (list (tuple :case :lower))))))))))
+
+(defn- realm_unit_seen!
+  "Whether `key` was asked for before in this VM; records it. A miss on a key
+   seen once compiles through the eval path (about half the cost of
+   `compile_source` on real units, nothing to store); only a key asked for
+   again, i.e. a unit that survived a realm retirement unchanged, pays
+   `compile_source` once so later realms restore. A unit just edited is
+   therefore never slower than before M2. The finite lexical subset keeps
+   storing on its first compile."
+  [key]
+  (let [row (tuple :bl_realm_unit_seen key)]
+    (if (ets/member :beam_lisp_vars row) true
+      (do (ets/insert :beam_lisp_vars (tuple row true)) false))))
 
 (defn ensure_loaded_local
   "Realm-local AOT fast path. Code bytes are keyed by everything a fresh
@@ -5549,17 +5611,18 @@
   (let [provider (BeamLisp.Loader/package_provider ns)]
    (if (and provider (maps/get :modules provider nil))
     (load_package_local ns provider content)
+  (let [finite (realm_unit_memo :finite content (fn [] (local_cacheable_source? content)))]
   (if (and (repair_enabled?)
-           (or (local_cacheable_source? content)
-               (and (realm_unit_restore_enabled?) (realm_unit_admissible? ns content)))
+           (or finite (and (realm_unit_restore_enabled?)
+                           (realm_unit_memo (tuple :admissible ns) content (fn [] (realm_unit_admissible? ns content)))))
            (Enum/empty? (maps/get :shadow (or (maps/get :decl realm nil) (maps/new)) (list))))
     (let [context (BeamLisp.Env/namespace_generations
                     (list "core" "sugar" "rt" "compiler" "lower" "lower-core" "anf"))
-          context (if (and context
-                         (Enum/all? context (fn [row]
-                           (or (erlang/== :global (elem row 0)) (erlang/== 0 (elem row 2))))))
-                    (Enum/filter context (fn [row] (erlang/== :global (elem row 0)))) nil)
-          keyed (when context (realm_unit_timed ns :key (fn [] (realm_unit_key ns target realm content context))))]
+          ;; Own compiler overrides decline.
+          context (and context
+                       (Enum/all? context (fn [row]
+                         (or (erlang/== :global (elem row 0)) (erlang/== 0 (elem row 2))))))
+          keyed (when context (realm_unit_timed ns :key (fn [] (realm_unit_key ns target realm content))))]
       (if (erlang/== nil keyed) :no_module
         (let [closure (elem keyed 0)
               key (elem keyed 1)
@@ -5574,7 +5637,9 @@
                              (try (BeamLisp.AOTCache/output_replay_complete? (elem hit 1) entry)
                                   (catch _ false))))))
                     :miss hit)]
-          (if (erlang/not (realm_unit_code_free? ns realm (if (erlang/== :miss hit) (list) (elem hit 1))))
+          (if (or (and (erlang/== :miss hit) (erlang/not finite) (erlang/not (realm_unit_seen! key))
+                       (realm_unit_timed ns :first-sight (fn [] true)))
+                  (erlang/not (realm_unit_code_free? ns realm (if (erlang/== :miss hit) (list) (elem hit 1)))))
             :no_module
             (do
               (if (erlang/== :miss hit)
@@ -5582,7 +5647,7 @@
                 (realm_unit_timed ns :restore (fn [] (load_cached_entry ns (elem hit 1) entry link_dir))))
               (BeamLisp.Env/mark_loaded ns)
               :loaded)))))
-    :no_module))))
+    :no_module)))))
 
 (defn- repair_or_no_module
   "The gate's repair gatekeeper: try to repair a library artifact, else answer
