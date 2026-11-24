@@ -1,0 +1,63 @@
+{
+ "card": "M3 The first command in a fresh checkout VM costs what --cold costs",
+ "date": "2026-11-24",
+ "branch": "lane/m3",
+ "base": "main ab1a361e8; measured on a private copy of 535538242 (research/substrate-ab/m1/copy.sh) running main's SDK vdd8ppwp and checkout platform k3f6kmfx, so its VM was its own",
+ "command": "bl test test/bl/scene/frame_plan_test.bl, after `realm stop` (warm) or as `bin/bl --cold` (cold); the m1.py first-in-fresh-vm/test and cold/test rows",
+ "how": "research/substrate-ab/m3/drive.py: pairs of (realm stop; first command through the warm path) and (realm stop; --cold), wall from the driver. Traced runs load research/substrate-ab/m3/m3_trace.erl at VM boot (ERL_AFLAGS=-s m3_trace start): call/return of ~25 named functions (session start, listen, request handler, manager start, realm open, handle-in-vm, dev-overlay sync, loader ensure_loaded/do_load/compile_sdk_source!, retain_sdk_runtime!, sdk_runtime_inventory_uncached!), every call >= 20 ms written with its wall-clock start, so VM phases line up with the driver's t0. The light trace changed walls by less than the run-to-run spread (traced warm 5.0 s vs plain 4.7-6.4 s at the same load). split.py computes the phases. 16 CPUs; the VM runs +S 2:2.",
+ "walls_ms": {
+  "plain_pl1_load_18.8_22.6": {"warm_first": {"n": 4, "median": 5994, "min": 4739, "max": 9676}, "cold": {"n": 4, "median": 3279, "min": 3131, "max": 6133}},
+  "traced_tr2_load_23.4_25.7": {"warm_first": {"n": 3, "median": 5019, "min": 4921, "max": 5065}, "cold": {"n": 3, "median": 3134, "min": 3130, "max": 3178}},
+  "traced_tr3_load_9.6_10.2": {"warm_first": {"n": 2, "median": 6155, "min": 5452, "max": 6858}, "cold": {"n": 2, "median": 3902, "min": 3382, "max": 4421}}
+ },
+ "phases_ms_median_n5": {
+  "note": "tr2 + tr3, 5 warm and 5 cold traced runs; each warm row is extra work the cold path does not do, except where marked",
+  "warm": {
+   "wall": 5065,
+   "client_and_spawn_to_vm_start": 228,
+   "vm_boot_to_bl.cli_loaded": 1330,
+   "session_namespace_loads (bl.realm-lifecycle, vm.client, vm.session, vm.net)": 194,
+   "session_start_to_listening": 69,
+   "listening_to_first_request (client readiness poll + hello + reconnect)": 171,
+   "boot_services_still_running_after_the_request_arrived (overlapped, not added)": 626,
+   "request_to_handle-in-vm (bl.daemon load queued behind the boot's loads)": 260,
+   "handle-in-vm_to_test (manager-start lock wait, dev-overlay sync, realm open, mgr/run)": 569,
+   "test (ward load to exit)": 2243
+  },
+  "cold": {
+   "wall": 3178,
+   "bin/bl_and_selection_to_vm_start": 188,
+   "vm_boot_to_bl.cli_loaded": 1288,
+   "bl.cli_to_test": 35,
+   "test (ward load to exit)": 1687
+  },
+  "surplus_of_warm_over_cold": {
+   "total": 1887,
+   "client_and_spawn": 40,
+   "vm_boot": 42,
+   "daemon_namespaces_and_listen": 228,
+   "client_readiness_wait": 171,
+   "first_request_waiting_for_daemon_infrastructure": 829,
+   "test_itself_slower": 556
+  }
+ },
+ "findings": {
+  "card_premise": "The client's readiness wait is not where the time goes. The VM listens before its services start; the client's 200 ms hello poll plus the reconnect took 40-296 ms (median 171), and the request then waited inside the VM for the boot's services, which finished 472-792 ms (median 626) after the request arrived. So sending the request at once (this branch's client) only moves the wait inside the VM.",
+  "global_lock_backoff": "The boot and the first request take the same locks: vm.manager/start (:vm-manager-start, batch 25's dupstart fix), the realm lifecycle, the session live table, and the loader's per-file :bl_load locks. All are :global.trans or :global.set_lock with infinite retries, whose sleep after a failed attempt is uniform in 0-250 ms, then 0-500 ms, 0-1 s and up to 8 s (kernel-11.0.1 global.erl random_sleep). In tr2 warm 2 the request's manager start ended 285 ms after the boot released the lock. trans_check.bl, same workload (holder 300 ms, waiter 20 ms in): :global.trans waiter got the lock 147-497 ms off the release (8 rounds; in 4 the waiter overtook the holder, which was itself in backoff); the 2 ms-poll lock 0-2 ms (8 of 8), exclusive, re-entrant, released on a raise.",
+  "client_change_alone_regresses": "ab.py, 6 rotating rounds at load 8.8-9.8, platform client vs this branch's client against the OLD VM code: old median 5535 [5171-6001], new 6532 [4890-10646], cold 3319 [3221-4714]. Attaching at once lands the request inside the boot's lock window sooner, and :global's backoff grows with every failed attempt. The client change must ship with the VM change (await-boot!).",
+  "test_slower_in_the_warm_vm": "Both paths take the SDK lease at the start of the isolated test run (retain_sdk_runtime! 730 ms cold, 754 ms warm), and every SDK namespace loaded after it re-derives the runtime inventory (sdk_runtime_inventory_uncached!): 107-115 ms per load in the cold VM, 174-214 ms in the warm one, which has ~20 more daemon namespaces loaded. reload.check took 171 ms cold, 387 ms warm. This is M4's retain_sdk_runtime! (priv/host/env.bl), not changed here.",
+  "daemon_namespaces": "Loaded through the one Loader.Server before the test starts, none of them by --cold: bl.realm-lifecycle 31-48, vm.client 35-62, vm.session 53-86, vm.net 20-32, vm.manager 34-42, vm.owner 162-212, proc.reg 131-175, proc.server 21-34, reload.declaration 49-64, reload.execution 25-34, vm.idle 60, vm.core 24-45, reload.generation 131-173 (vm.core/prepare-drain!), bl.daemon 32-42, vm.exec 28-62, vm.realm 27-49, vm.spec 25-42, vm.index 26-174, vm.registry 24-56 (ms, compile_sdk_source! per namespace). About 1 s of serialized loader work: with it on the critical path the warm first command cannot reach --cold.",
+  "sampler": "A 5 ms process sampler (sm1) perturbed the VM too much for timing (warm 6.7-7.0 s); it showed Loader.Server and file_server_2 as the busy processes, nothing else competing."
+ },
+ "changes": {
+  "tooling/drop (launcher.rs first_request, daemon.rs attach_when_listening)": "The client that started the VM (or found a start in flight) sends the command as soon as the socket accepts it, retrying every 10 ms while nothing has read it, instead of a 200 ms readiness-hello poll and a second connection. A VM that exits unsuccessfully ends the wait at once, as before.",
+  "priv/std/vm/session.bl (await-boot!)": "A command that arrives while its session is still in boot-realm-services! waits on a per-session atomics slot (2 ms poll, cleared in a finally) instead of racing the boot for its locks.",
+  "priv/std/vm/manager.bl (trans), priv/std/vm/realm.bl": "The manager start and the realm lifecycle lock poll every 2 ms (`:global.set_lock` with 0 retries) instead of :global.trans's backoff; same lock ids, same nodes, re-entrant, released in a finally."
+ },
+ "inner_loop": {
+  "cargo": "cargo test --release: 141-142 passed; builder_tests failures (WouldBlock lease, BL_ARTIFACT_PLATFORM, cargo metadata) also fail on the base commit and vary run to run; the new a_first_request_is_sent_once_the_vm_listens_and_a_dead_vm_ends_the_wait passes.",
+  "transport_scripts_with_the_branch_client_on_the_old_SDK (gate.sh, load 6.9-9.5)": "checkout_transport.py exit 0 (first 3.124 s, same owner, env isolation, concurrency); warm_cancel.py ok (8 PASS); realm_stop_after_overlay.py strict exit 0 (10 fresh cycles, 0 failures, plain and overlay stops).",
+  "bl_check": "bl check of the changed session.bl/manager.bl/realm.bl: the same diagnostics and smells as the unchanged files (2/6, 0/3, 0/0); manager_trans_test.bl ok."
+ },
+ "not_verified_without_an_SDK": "await-boot! and vm.manager/trans run only in an SDK built from this branch. Expected from the phase split: the request proceeds when the boot ends instead of 0-500 ms later, about 100-300 ms of the 1.9 s. The done-when (warm first <= cold median) is NOT expected from M3 alone: the daemon's ~1 s of namespace loads and M4's inventory cost remain."
+}

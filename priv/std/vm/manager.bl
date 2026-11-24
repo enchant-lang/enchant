@@ -234,6 +234,23 @@
   (handle-call [:shutdown scope] [_from st]
     (let [[answer st2] (shutdown-vms st scope)] (reply answer st2))))
 
+(def ^:private LOCK-POLL-MS 2)
+
+(defn trans
+  "`global/trans` without its retry backoff: run `f` holding the lock `id`
+   ({resource requester}, re-entrant for the same requester), on the same
+   nodes. `:global` sleeps a random 0-250 ms after its first failed attempt,
+   then up to 500 ms, 1 s and on. In a fresh VM the boot and the first request
+   take the same locks (the manager's start, a realm's lifecycle), so the
+   request slept through most of that backoff after the boot had released
+   them (M3: 285 ms after `start`'s release). This polls every 2 ms instead."
+  [id f]
+  (let [nodes (erlang/apply :lists :append (list (list (erlang/node)) (erlang/nodes)))]
+    (loop []
+      (if (= true (global/set_lock id nodes 0))
+        (try (f) (finally (global/del_lock id nodes)))
+        (do (Process/sleep LOCK-POLL-MS) (recur))))))
+
 (defn start
   "Boot the global daemon (idempotent by name). Returns its pid. The owner
    registry must exist before any VM spawns a member, so start it first.
@@ -249,7 +266,7 @@
    whether that start is eager or on demand."
   []
   (or (Process/whereis MANAGER)
-      (global/trans (tuple :vm-manager-start (erlang/self))
+      (trans (tuple :vm-manager-start (erlang/self))
         (fn []
           (or (Process/whereis MANAGER)
               (do (owner/start)

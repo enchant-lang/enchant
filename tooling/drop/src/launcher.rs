@@ -528,20 +528,49 @@ fn retry_from_warm(bin: &std::path::Path, root: &std::path::Path, argv: &[String
         }
     }
     if t == Transport::Require {
-        if !wait_ready_for(root, shared, started.as_mut()) {
+        return Some(first_request(root, argv, shared, started.as_mut()));
+    }
+    None
+}
+
+/// M3: run a required-warm command on the VM that is starting for it (this
+/// client's start, or one in flight). The request is sent as soon as the VM
+/// listens and waits inside it for the VM's services, instead of the client
+/// polling a readiness hello every 200 ms and then connecting again for the
+/// command (`attach_when_listening`). Nothing is run cold.
+#[cfg(unix)]
+fn first_request(root: &std::path::Path, argv: &[String], shared: bool, vm: Option<&mut StartedVm>) -> i32 {
+    // As long as `wait_ready_for` waited: checkouts may compile SDK units first.
+    let deadline = std::time::Duration::from_secs(if checkout_root().is_some() { 360 } else { 120 });
+    let req = request_frame(root, argv);
+    let mut vm = vm;
+    let outcome = attach_when_listening(
+        || match attach_request(root, shared, &req) {
+            Attach::Fallback => None,
+            other => Some(other),
+        },
+        vm.as_mut().and_then(|v| v.child.as_mut()),
+        deadline,
+        std::time::Duration::from_millis(10),
+    );
+    match outcome {
+        Ok(Attach::RestartRequired) => {
+            eprintln!("bl: required warm VM unavailable; service was not run cold");
+            1
+        }
+        Ok(attached) => after_attach(attached).unwrap_or(1),
+        Err(wait) => {
+            if let (VmWait::Died(code), Some(vm)) = (&wait, vm.as_ref()) {
+                report_dead_vm(vm, *code);
+            }
             if let Some(log) = log_path(root, &build_id(), shared) {
                 eprintln!("bl: required warm VM did not become ready; command was not run; log: {}", log.display());
             } else {
                 eprintln!("bl: required warm VM did not become ready; command was not run (see `bl vm logs`)");
             }
-            return Some(1);
-        }
-        return Some(after_attach(try_attach(root, argv, shared)).unwrap_or_else(|| {
-            eprintln!("bl: required warm VM unavailable; service was not run cold");
             1
-        }));
+        }
     }
-    None
 }
 
 /// Stop the warm VM for `root` by asking the release, which owns the lifecycle.
@@ -615,6 +644,7 @@ fn main() {
     }
     if argv.first().map(String::as_str) == Some("--engine-inputs") {
         if argv.len() != 2 { fail("usage: --engine-inputs ROOT"); }
+        engine_inputs::bind_digest_cache_root(&std::fs::canonicalize(&argv[1]).unwrap_or_else(|_| PathBuf::from(&argv[1])));
         let snapshot = engine_inputs::Snapshot::capture(Path::new(&argv[1]))
             .unwrap_or_else(|error| fail(&format!("checkout engine inventory: {error}")));
         engine_inputs::save_digest_cache();

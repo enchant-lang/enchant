@@ -1,0 +1,39 @@
+(ns m3-trans-check)
+;; vm.manager/trans as written in the branch, checked against :global.trans.
+(def LOCK-POLL-MS 2)
+(defn trans [id f]
+  (let [nodes (erlang/apply :lists :append (list (list (erlang/node)) (erlang/nodes)))]
+    (loop []
+      (if (= true (global/set_lock id nodes 0))
+        (try (f) (finally (global/del_lock id nodes)))
+        (do (Process/sleep LOCK-POLL-MS) (recur))))))
+
+(defn now [] (erlang/monotonic_time :millisecond))
+
+(defn contend
+  "A holder keeps resource :m3 for 300 ms; a waiter asks 20 ms in. Returns how
+   long after the release the waiter got it, and whether they overlapped."
+  [locker]
+  (let [parent (erlang/self)
+        inside (atom 0) overlap (atom false)
+        body (fn [ms] (when (> (swap! inside inc) 1) (reset! overlap true))
+               (Process/sleep ms) (swap! inside dec))]
+    (spawn (fn [] (locker (tuple :m3 (erlang/self)) (fn [] (body 300) (erlang/send parent [:released (now)])))))
+    (Process/sleep 20)
+    (spawn (fn [] (locker (tuple :m3 (erlang/self)) (fn [] (erlang/send parent [:got (now)]) (body 1)))))
+    (let [released (receive [:released t] t (after 5000 nil))
+          got (receive [:got t] t (after 10000 nil))]
+      {:after-release-ms (- got released) :overlap @overlap})))
+
+(defn rounds [locker n] (vec (map (fn [_] (:after-release-ms (contend locker))) (range n))))
+
+(let [mine (rounds trans 8)
+      theirs (rounds (fn [id f] (global/trans id f)) 8)
+      nested (trans (tuple :m3n (erlang/self)) (fn [] (trans (tuple :m3n (erlang/self)) (fn [] :inner))))
+      thrown (try (trans (tuple :m3x (erlang/self)) (fn [] (throw (ex-info "boom" {})))) (catch e (ex-message e)))
+      free-after-throw (let [p (erlang/self)]
+                         (spawn (fn [] (trans (tuple :m3x (erlang/self)) (fn [] (erlang/send p :took)))))
+                         (receive :took true (after 100 false)))]
+  (println "M3-TRANS trans-after-release-ms" mine)
+  (println "M3-TRANS global-trans-after-release-ms" theirs)
+  (println "M3-TRANS exclusive" (not (:overlap (contend trans))) "nested" nested "thrown" thrown "free-after-throw" free-after-throw))

@@ -29,5 +29,32 @@
             :new ["priv/lib/split/new.bl"]}
            (o/scan c (str r "/s") p)))))
 
+;; M4: a settled file is compared once; later scans stat it and reuse the
+;; verdict. An edit moves its stamp, so it is compared again, even at the same
+;; size; a file written within the racy window is compared on every scan.
+(deftest a-settled-file-is-read-once-and-an-edit-is-still-seen
+  (let [r (tree) c (str r "/c") s (str r "/s") p (o/policy c)
+        reads (tuple :Elixir.File :read! 1)
+        counted (fn [f]
+                  (erlang/trace_pattern reads true (list :local :call_count))
+                  (try (let [v (f)] [v (elem (erlang/trace_info reads :call_count) 1)])
+                    (finally (erlang/trace_pattern reads false (list :local :call_count)))))]
+    (do
+      (File/write! (str c "/priv/lib/split/wire.bl") "w2")
+      ;; settled: mtime and ctime whole seconds more than `racy-seconds` past
+      (Process/sleep 3100)
+      (let [[[found seen] n1] (counted #(o/scan-with c s p nil))
+            [[again seen2] n2] (counted #(o/scan-with c s p seen))]
+        (is (= ["priv/lib/split/wire.bl"] (:changed found)))
+        (is (= found again) "the reused verdicts are the same answer")
+        (is (< 0 n1) "the first scan compares bytes")
+        (is (= 0 n2) "a settled, unchanged tree is not read again")
+        (File/write! (str c "/priv/lib/split/wire.bl") "w")
+        (File/write! (str c "/priv/std/test.bl") "T")
+        (let [[[edited _] n3] (counted #(o/scan-with c s p seen2))]
+          (is (= ["priv/std/test.bl"] (:changed edited)) "a same-size edit and a revert are both seen")
+          (is (< 0 n3)))
+        (is (= (o/scan c s p) (first (o/scan-with c s p seen2))) "scan and scan-with agree")))))
+
 (deftest an-unchanged-generation-does-nothing
   (is (nil? (o/sync! nil))))
