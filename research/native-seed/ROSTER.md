@@ -275,7 +275,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
     - erts + Elixir, ~240 ms.
 - **A host comment after T3's `priv/build` change:** 670 s.
 
-#### T4 ⏳ `proc/owner_registry_test` and `application_package_test` fail after other files in one VM · H
+#### T4 ✅ (landed `5585e228a`: both were test bugs, green warm and --cold on SDK vdd8ppwp) `proc/owner_registry_test` and `application_package_test` fail after other files in one VM · H
 - In gate 26 (after the T3 group in the same VM) and on main's SDK `8as75r07`, these fail:
   - `proc/owner_registry`: all 4 tests fail with "Test owner failed during admitted startup".
   - `application_package` `package-consumers-preserve-source-effects-across-fresh-vms`: "Application package realm identity mismatch".
