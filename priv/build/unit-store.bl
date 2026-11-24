@@ -114,10 +114,32 @@
                 (- remaining size)]))
              [[] 268435456] rows))}))
 
-(defn- link-or-copy!
-  "A hard link to an immutable verified file, or a copy where links cannot go."
+(defn- read-only-inode!
+  "Clear every write bit of `path`'s inode. True when the inode is read-only.
+   Through prim_file, like the rest of restoration (see `lstat`)."
+  [path]
+  (let [info (prim_file/read_file_info path)
+        mode (when (= :ok (elem info 0)) (elem (elem info 1) 7))]
+    (boolean (and (erlang/is_integer mode)
+                  (or (= 0 (erlang/band mode 146))   ; no 0o222 bit
+                      (= :ok (prim_file/write_file_info path
+                               (erlang/setelement 1
+                                 (erlang/setelement 8 (erlang/make_tuple 14 :undefined)
+                                   (erlang/band mode (erlang/bnot 146)))
+                                 :file_info))))))))
+
+(defn link-or-copy!
+  "A hard link to an immutable verified file, or a copy where links cannot go.
+   A link shares the store file's inode, so a write in place would change the
+   store. The shared inode is made read-only before the link is used: such a
+   write then fails with `eacces` and never reaches the store. Where the
+   inode's mode cannot be changed (a file this user does not own), copy.
+   Every writer of a linked path unlinks first."
   [source destination]
-  (when-not (= :ok (prim_file/make_link source destination))
+  (if (= :ok (prim_file/make_link source destination))
+    (when-not (read-only-inode! destination)
+      (prim_file/delete destination)
+      (File/cp! source destination))
     (File/cp! source destination)))
 
 (defn- link-unit!
@@ -627,6 +649,9 @@
             (doseq [[module _] (:beams (BeamLisp.AOT/verify_unit directory))]
               (File/rm (Path/join out (str (Atom/to_string module) ".beam")))))
           (File/rm_rf! directory))))
+    ;; Unit-store files are written by unlinking first: a store path may be
+    ;; a hard link to another store's file.
+    (prim_file/delete (Path/join out "unit-index.json"))
     (File/write! (Path/join out "unit-index.json")
       (Jason/encode! {"version" 2 "compiler" key "runtime" runtime "library-runtime" library
                       "units" (:units result)}))

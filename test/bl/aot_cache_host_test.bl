@@ -160,6 +160,7 @@
     (t :compute_build_key 0)
     (t :compute_compiler_key 0)
     (t :packaged_compiler? 0)
+    (t :any_wildcard_suffix? 2)
     (t :copy 2)
     (t :current_build_key 0)
     (t :current_compiler_key 0)
@@ -923,3 +924,33 @@
           (is (= :miss (erlang/apply m :fetch (list key "other-realm" out source))))
           (is (= (File/read! good) (File/read! (Path/join out (beam-name mod)))))
           (finally (File/rm_rf! dir)))))))
+
+(deftest the-first-source-file-answers-the-packaged-compiler-walk
+  ;; K2: `packaged_compiler?` stops at the first match of `**/*SUFFIX` instead
+  ;; of listing every one. The answer must be the wildcard's, case for case:
+  ;; dot names neither match nor are descended into, any entry kind matches by
+  ;; name, a symlinked directory is followed, an absent directory is empty.
+  (let [probe (ensure-probe!)
+        dir (str (System/tmp_dir!) "/bl_wildcard_suffix_" (erlang/unique_integer (list :positive)))
+        mk (fn [rel] (File/mkdir_p! (Path/join dir rel)))
+        touch (fn [rel] (File/mkdir_p! (Path/dirname (Path/join dir rel))) (File/write! (Path/join dir rel) ""))
+        cases (fn []
+                (Enum/map (list ".bl" ".org" ".md" ".none" ".txt")
+                  (fn [suffix]
+                    (list suffix
+                          (not (empty? (Path/wildcard (Path/join dir (str "**/*" suffix)))))
+                          (erlang/apply probe :any_wildcard_suffix? (list dir suffix))))))]
+   (try
+    (mk "empty/deeper")
+    (is (every? (fn [c] (= (nth c 1) (nth c 2))) (cases)) "empty tree")
+    (touch ".hidden/a.bl")
+    (touch "x/.b.org")
+    (touch "x/y/.dot/z.md")
+    (is (every? (fn [c] (= (nth c 1) (nth c 2))) (cases)) "only dot names")
+    (mk "a/b/c/d.org")
+    (touch "a/b/c/e.txt")
+    (File/ln_s! (Path/join dir "a") (Path/join dir "link"))
+    (touch "deep/1/2/3/4/f.bl")
+    (is (every? (fn [c] (= (nth c 1) (nth c 2))) (cases)) (pr-str (cases)))
+    (is (= false (erlang/apply probe :any_wildcard_suffix? (list (Path/join dir "absent") ".bl"))))
+    (finally (File/rm_rf! dir)))))

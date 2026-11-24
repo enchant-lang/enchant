@@ -175,10 +175,24 @@
 ;; One request per connection, and after the request is read nothing reads the
 ;; socket again, so a client killed mid-command (timeout -s KILL, Ctrl+C, a closed
 ;; terminal) was never noticed: its command ran on, holding whatever it held. A
-;; watcher now polls the socket and, when the peer is gone, sends the request process
-;; `:client_gone`. It does not kill anything itself: the handler decides how to stop
-;; its command and runs its own cleanup (see `vm.session/dispatch-command`), because
-;; killing a process from outside skips its `finally`.
+;; watcher now polls the socket and acts when the peer is gone.
+;;
+;; F2: the command runs in the connection's own process (no second owned start,
+;; ~1 ms). That process cannot wait for its client and run a command at once, so
+;; the handler ARMS the watcher (`arm-cancel!`) for the time the command runs:
+;;
+;;   • the client leaves → the watcher claims the request (`claim!`), ends the
+;;     connection process with `:client_gone`, waits for it, then runs the
+;;     handler's cleanup itself, since a process ended from outside skips its
+;;     `finally`;
+;;   • the connection process dies on its own (a linked exit, a kill) → the same
+;;     claim and cleanup, and the client is told the command ended abnormally,
+;;     because the watcher owns the socket and it is still open;
+;;   • the command stays quiet → the watcher sends its heartbeat.
+;;
+;; The claim is one atomics cell per request: whoever moves it from 0 to 1 first
+;; (the watcher, or the handler finishing) releases the request's custody, once.
+;; Unarmed (a control request), a gone client is still told with `:client_gone`.
 ;;
 ;; The poll is a zero-length `recv` with a short timeout on a passive socket: it
 ;; consumes nothing (the client sends no further frame on this connection) and
@@ -186,6 +200,7 @@
 
 (def CLIENT-POLL-MS 200)
 (def CLIENT-GONE :client_gone)
+(def ^:private WATCHER :vm_net_watcher)
 
 (defn client-gone?
   "Whether the peer of `conn` has closed it. Consumes nothing."
@@ -193,19 +208,88 @@
   (let [r (gen_tcp/recv conn 0 CLIENT-POLL-MS)]
     (and (= :error (elem r 0)) (not= :timeout (elem r 1)))))
 
+(defn new-claim
+  "A request's custody claim: one atomics cell, 0 while unclaimed."
+  []
+  (erlang/apply :atomics :new (list 1 (to-list [(tuple :signed false)]))))
+
+(defn claim!
+  "Take request custody `claim`. True for exactly one caller."
+  [claim]
+  (= :ok (erlang/apply :atomics :compare_exchange (list claim 1 0 1))))
+
+(defn arm-cancel!
+  "Arm this connection's watcher while a command runs in THIS process. `armed`:
+   {:claim cell :cleanup (fn []) :beat (fn []) :every ms :abnormal (fn [reason])}.
+   `cleanup` runs in the watcher after it ended this process; `abnormal` after
+   this process died by itself, to tell the client. Returns whether a watcher
+   was there to arm."
+  [armed]
+  (let [w (erlang/get WATCHER)]
+    (if (erlang/is_pid w)
+      (do (erlang/send w (tuple :vm_net_arm armed)) true)
+      false)))
+
+(defn- await-down [mref ms]
+  (receive
+    [:DOWN r :process _p _why] :when (= r mref) true
+    (after ms false)))
+
+(defn- take-over!
+  "Claim an armed request whose process is ending or must end: end `worker`
+   with `reason` unless it is already `down`, wait for it, run the cleanup.
+   A command that traps exits is killed after a second. Answers whether this
+   call held the claim."
+  [armed worker mref reason down]
+  (when (claim! (:claim armed))
+    (when-not down
+      (erlang/exit worker reason)
+      (when-not (await-down mref 1000)
+        (erlang/exit worker :kill)
+        (await-down mref 5000)))
+    (try ((:cleanup armed)) (catch _ nil))
+    true))
+
 (defn- watch-client
-  "Spawn a watcher that sends `worker` `:client_gone` once `conn`'s peer closes, and
-   ends by itself when `worker` does. Returns the watcher's pid."
+  "Spawn the watcher of `conn` for its connection process `worker` (above).
+   Ends by itself when `worker` does. Returns the watcher's pid."
   [conn worker]
-  ;; A plain BEAM process: it runs only this SDK namespace's socket poll, so it
-  ;; needs no env conveyance or execution registration, which cost a request
-  ;; ~0.6 ms of the owned-start protocol for a process that never runs user code.
+  ;; A plain BEAM process: it runs only SDK namespace code (the poll, the
+  ;; handler's cleanup), so it needs no env conveyance or execution registration,
+  ;; which cost a request ~0.6 ms of the owned-start protocol.
   (erlang/spawn (fn []
-           (loop []
-             (cond
-               (client-gone? conn) (erlang/send worker CLIENT-GONE)
-               (erlang/is_process_alive worker) (recur)
-               :else :ok)))))
+           (let [mref (erlang/monitor :process worker)]
+             ;; `gone`: the client left before the handler armed this watcher (the
+             ;; first poll can see it within the first 200 ms); an arm that comes
+             ;; after takes the request over at once
+             (loop [armed nil next-beat 0 gone false]
+               (let [m (receive
+                         [:vm_net_arm a] (tuple :arm a)
+                         [:DOWN r :process _p why] :when (= r mref) (tuple :down why)
+                         (after (if gone :infinity 0) nil))]
+                 (cond
+                   (and (some? m) (= :down (elem m 0)))
+                   ;; the connection process ended: a normal end released its
+                   ;; own claim; anything else is ours to release and report
+                   (when (and (some? armed) (take-over! armed worker mref :ended true))
+                     (try ((:abnormal armed) (elem m 1)) (catch _ nil)))
+
+                   (and (some? m) (= :arm (elem m 0)))
+                   (let [a (elem m 1)]
+                     (if gone
+                       (take-over! a worker mref CLIENT-GONE false)
+                       (recur a (+ (erlang/monotonic_time :millisecond) (:every a)) false)))
+
+                   (client-gone? conn)
+                   (if (some? armed)
+                     (take-over! armed worker mref CLIENT-GONE false)
+                     (do (erlang/send worker CLIENT-GONE) (recur nil 0 true)))
+
+                   (and (some? armed) (>= (erlang/monotonic_time :millisecond) next-beat))
+                   (do (try ((:beat armed)) (catch _ nil))
+                       (recur armed (+ (erlang/monotonic_time :millisecond) (:every armed)) false))
+
+                   :else (recur armed next-beat false))))))))
 
 (defn- serve-requests [conn handler]
   (let [req (frame-recv conn 1800000)]  ; 30min read window (a test can run long)
@@ -213,12 +297,18 @@
       (let [decoded (wire/decode (:ok req))
             frame (:ok decoded)
             watcher (watch-client conn (erlang/self))]
+        ;; The watcher owns the socket from here, so it is still open to tell the
+        ;; client when this process dies under its command. This process keeps
+        ;; reading and writing it (an inet socket serves any process).
+        (gen_tcp/controlling_process conn watcher)
+        (erlang/put WATCHER watcher)
         ;; :request → the command handler; :control → status/stop
         (when (some? frame)
           (handler frame (fn [bytes] (frame-send conn bytes))))
-        (erlang/exit watcher :kill)
+        (erlang/erase WATCHER)
         ;; one request per connection (the launcher opens a fresh conn each time)
-        (gen_tcp/close conn)))))
+        (gen_tcp/close conn)
+        (erlang/exit watcher :kill)))))
 
 ;; ── the accept loop (a long-lived process, NOT namespace state) ─────────────
 
@@ -253,21 +343,54 @@
         (erlang/exit worker :kill)
         (throw error)))))
 
-(defn- accept-loop [lsock expect token handler build]
-  (let [ar (gen_tcp/accept lsock 5000)]
-    (cond
-      (= :ok (elem ar 0))
-      (do
-        (let [conn (elem ar 1)]
-          (handoff-connection conn (fn [] (serve-conn conn expect token handler build))))
-        (accept-loop lsock expect token handler build))
+(defn await-spare-start
+  "Internal: a connection worker started BEFORE its connection arrives. It
+   serves the one connection its accept loop transfers with `ticket`, and ends
+   with that loop."
+  [parent ticket serve]
+  (let [ref (erlang/monitor :process parent)]
+    (receive
+      [:connection-start received conn] :when (= received ticket)
+      (do (erlang/demonitor ref (list :flush))
+          (try (serve conn) (finally (gen_tcp/close conn))))
+      [:DOWN received :process _pid _reason] :when (= received ref)
+      :parent-stopped)))
 
-      ;; timeout is normal — loop again so the process stays responsive to stop
-      (= :timeout (elem ar 1))
-      (accept-loop lsock expect token handler build)
+(defn- start-spare
+  "An owned connection worker, waiting for the next connection: {:pid :ticket}.
+   The owned start (~1 ms) is paid between requests, not inside one (F2)."
+  [serve]
+  (let [parent (erlang/self) ticket (erlang/make_ref)]
+    {:pid (spawn (fn [] (await-spare-start parent ticket serve))) :ticket ticket}))
 
-      ;; listener closed (stop) — exit the loop
-      :else :stopped)))
+(defn- hand-to-spare
+  "Give `conn` to the waiting worker. Answers whether it took it; on false the
+   caller still owns `conn`."
+  [spare conn]
+  (and (some? spare)
+       (= :ok (try (gen_tcp/controlling_process conn (:pid spare)) (catch _ :failed)))
+       (do (erlang/send (:pid spare) (tuple :connection-start (:ticket spare) conn)) true)))
+
+(defn- accept-loop
+  ([lsock expect token handler build]
+   (accept-loop lsock expect token handler build nil))
+  ([lsock expect token handler build spare]
+   (let [serve (fn [conn] (serve-conn conn expect token handler build))
+         spare (or spare (start-spare serve))
+         ar (gen_tcp/accept lsock 5000)]
+     (cond
+       (= :ok (elem ar 0))
+       (let [conn (elem ar 1)]
+         (when-not (hand-to-spare spare conn)
+           ;; the spare is gone: start this connection's worker the old way
+           (handoff-connection conn (fn [] (serve conn))))
+         (accept-loop lsock expect token handler build nil))
+
+       ;; timeout: keep looping (lets the process see a close)
+       (= :timeout (elem ar 1))
+       (accept-loop lsock expect token handler build spare)
+
+       :else :stopped))))
 
 (defn- bind-endpoint
   "Bind `sock-path`, chmod it, mint the token if absent, start accepting, and

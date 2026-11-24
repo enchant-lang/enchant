@@ -1055,6 +1055,42 @@
 
 (def PROJECT-KEY :bl-cli-project)
 
+(def ^:private PROJECT-MEMO
+  "persistent_term key: {env.bl path → [bytes project]} for project files whose
+   value is a literal map. Written when a file's bytes change, read per command."
+  (tuple :bl.cli :project-memo))
+
+(def ^:private PROJECT-MEMO-LIMIT 64)
+
+(defn- read-bytes [path]
+  (let [r (erlang/apply :file :read_file (list path))]
+    (when (= :ok (elem r 0)) (elem r 1))))
+
+(defn project-of
+  "`(env/project cwd)`, remembered per env.bl by its bytes. A warm VM serves
+   every command of a tree, and each one used to re-read, parse and normalize
+   the same file: 1.7 ms of a 10 ms request at this repository's root (F3).
+   A literal project map is a function of its bytes and its path, so equal
+   bytes answer the value computed before. A computed `env.bl` (`:dynamic`)
+   runs its code each time, as it always did."
+  [cwd]
+  (let [path (env/find cwd)
+        bytes (when path (read-bytes path))]
+    (if (nil? bytes)
+      (env/project cwd)
+      (let [memo (erlang/apply :persistent_term :get (list PROJECT-MEMO {}))
+            hit (get memo path)]
+        (if (and (some? hit) (= bytes (first hit)))
+          (second hit)
+          (let [p (env/project cwd)]
+            ;; remember only a literal file, and only the bytes the value was
+            ;; read from: a write between the two reads is simply not remembered
+            (when (and (not= :dynamic (env/literal path)) (= bytes (read-bytes path)))
+              (erlang/apply :persistent_term :put
+                (list PROJECT-MEMO (assoc (if (>= (count memo) PROJECT-MEMO-LIMIT) {} memo)
+                                          path [bytes p]))))
+            p))))))
+
 (defn with-project
   "Bind the tree's env.bl for this command. Returns the project value.
    A tree's overrides/ directory — vendored or patched copies of shipped
@@ -1062,7 +1098,7 @@
    entry, no flag, the same doctrine that makes the compiler's own .bl
    available by default."
   []
-  (let [p (without-shadowed-tasks (env/project (BeamLisp/cwd)))]
+  (let [p (without-shadowed-tasks (project-of (BeamLisp/cwd)))]
     (when (seq (:source/imports p)) (source-imports/activate! p))
     (u/each (fn [d] (BeamLisp.Env/add_search_path d)) (:paths p))
     (let [ovr (u/resolve "overrides")]

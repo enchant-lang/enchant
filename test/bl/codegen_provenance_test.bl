@@ -32,9 +32,10 @@
 ;     the fallback accepts, so a drop built from this checkout boots with the key
 ;     its beams were stamped with instead of being born stale.
 ;
-; The test writes `priv/codegen.sources` only through production's own bake path
-; (it is a gitignored, derived artifact) and restores the previous bytes
-; afterwards. No `.ex`/`.bl` source is ever touched.
+; The test never writes the image's `priv/codegen.sources` (a store SDK has it
+; read-only). The bake runs in a probe compiled from this checkout's
+; `priv/host/aot_cache.bl` with the baked path pointed at a scratch file, and
+; the image's file must come out unchanged. No `.ex`/`.bl` source is touched.
 ;
 ; Run: bin/bl test test/bl/codegen_provenance_test.bl
 
@@ -120,17 +121,40 @@
 
 (defn- baked-path [] (Path/join (BeamLisp.Tiers/priv_root) "codegen.sources"))
 
-(defn- with-baked
-  "Run `f` with `priv/codegen.sources` holding `content`, restoring the previous
-   bytes on the way out — including when a write fails part-way."
+(def ^:private PROBE :Elixir.BeamLisp.CodegenProvenanceProbe)
+
+(defn- with-scratch-bake
+  "Run `(f probe scratch-file)` with `probe` the pinned `AOTCache` compiled from
+   this checkout's `priv/host/aot_cache.bl`, its baked digest path pointed at a
+   scratch file. Production's bake writes beside the SDK's tiers, which a store
+   SDK has read-only; the scratch copy runs the same code on a writable path.
+   `content`, when given, is planted in the scratch file first. The real
+   `priv/codegen.sources` must come out byte-identical."
   [content f]
-  (let [path (baked-path)
-        original (when (File/exists? path) (File/read! path))]
+  (let [dir (str (System/tmp_dir!) "/bl_codegen_bake_" (erlang/unique_integer (list :positive)))
+        scratch (Path/join dir "codegen.sources")
+        source (File/read! (Path/join (root) "priv/host/aot_cache.bl"))
+        site "(Path/join (BeamLisp.Tiers/priv_root) \"codegen.sources\")"
+        _ (is (= 2 (count (String/split source site))) "the baked path is named once")
+        host (Path/join dir "aot_cache.bl")
+        real (when (File/exists? (baked-path)) (File/read! (baked-path)))]
+    (File/mkdir_p! dir)
     (try
-      (File/write! path content)
-      (f)
+      (File/write! host (String/replace source site (pr-str scratch)))
+      (when content (File/write! scratch content))
+      (let [result (BeamLisp.AOT/compile_host_file host
+                     (list (erlang/list_to_tuple (list :module PROBE))
+                           (erlang/list_to_tuple (list :output_dir dir))
+                           (erlang/list_to_tuple (list :load? false))))
+            path (erlang/element 2 result)]
+        (code/purge PROBE) (code/delete PROBE)
+        (code/load_binary PROBE (erlang/binary_to_list path) (File/read! path))
+        (f PROBE scratch))
       (finally
-        (if (nil? original) (File/rm path) (File/write! path original))))))
+        (code/purge PROBE) (code/delete PROBE)
+        (File/rm_rf! dir)
+        (is (= real (when (File/exists? (baked-path)) (File/read! (baked-path))))
+            "the SDK's own baked digest is never written")))))
 
 ; ── the module list is the same set, in the same order ───────────────────────
 
@@ -169,13 +193,15 @@
   ; below then disagrees with the sources on disk.
   (let [sentinel (String/duplicate "0" 64)
         live (live-codegen-digest)]
-    (with-baked sentinel
-      (fn []
-        (let [key (BeamLisp.AOTCache/current_compiler_key)]
-          (is (= live (String/trim (File/read! (baked-path))))
+    (with-scratch-bake sentinel
+      (fn [probe scratch]
+        (let [key (erlang/apply probe :compute_compiler_key (list))]
+          (is (= live (String/trim (File/read! scratch)))
               "production must BAKE the digest of the live sources, not keep a stale one")
           (is (= (predicted-key (str "codegen-source:" live)) key)
-              "the toolchain key must be the key of the LIVE codegen sources"))))))
+              "the toolchain key must be the key of the LIVE codegen sources"))))
+    (is (= (predicted-key (str "codegen-source:" live)) (BeamLisp.AOTCache/current_compiler_key))
+        "and so is the running toolchain's key")))
 
 (deftest every-codegen-source-is-readable-at-the-path-the-rule-names
   (doseq [m (codegen-modules)]
@@ -221,20 +247,19 @@
   ; drop falls through to the legacy beam-bytes rule — and (b) exactly this
   ; checkout's live digest, which is the property that makes a drop built FROM a
   ; checkout boot with the key its beams carry. The checkout bakes it whenever it
-  ; computes the key; this asserts the result.
-  (let [path (baked-path)
-        original (when (File/exists? path) (File/read! path))]
-    (try
-      (let [key (BeamLisp.AOTCache/current_compiler_key)
-            baked (String/trim (File/read! path))]
+  ; computes the key; this asserts the result, on a scratch bake path.
+  (with-scratch-bake nil
+    (fn [probe scratch]
+      (let [key (erlang/apply probe :compute_compiler_key (list))
+            baked (String/trim (File/read! scratch))]
         (is (Regex/match? (Regex/compile! "^[0-9a-f]{64}$") baked)
             "the baked digest must be the shape the drop's fallback accepts")
         (is (= (live-codegen-digest) baked)
             "the baked digest must BE the live digest, or a drop is born stale")
+        (is (= baked (erlang/apply probe :baked_codegen_digest (list)))
+            "the drop's fallback reads back exactly the baked digest")
         (is (= (predicted-key (str "codegen-source:" baked)) key)
-            "a drop computing its key from the baked digest gets this checkout's key"))
-      (finally
-        (if (nil? original) (File/rm path) (File/write! path original))))))
+            "a drop computing its key from the baked digest gets this checkout's key")))))
 
 
 (deftest runtime-package-proof-helpers-retain-the-native-compiler-boundary

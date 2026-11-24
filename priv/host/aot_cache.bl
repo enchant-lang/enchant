@@ -358,8 +358,27 @@
       (let [root (BeamLisp.Tiers/priv_root)]
         (and (File/regular? (Path/join root "sdk-code.term"))
              (Enum/all? (BeamLisp.Tiers/source_extensions)
-               (fn [suffix] (erlang/== '() (Path/wildcard (Path/join root (bcat "**/*" suffix))))))
+               (fn [suffix] (erlang/not (any_wildcard_suffix? root suffix))))
              (erlang/== nil (live_codegen_digest)))))))
+
+(defn- any_wildcard_suffix?
+  "Whether the wildcard `DIR/**/*SUFFIX` matches anything, answered at
+   the first match instead of listing every match. Same rules as the wildcard:
+   a name starting with `.` neither matches nor is descended into, any entry
+   kind matches by name, directories are followed through symlinks and an
+   unreadable directory contributes nothing. A source-carrying SDK answers at
+   its first `.bl` (K2: the full walk of `priv/` was ~30 ms of each cold start);
+   a Source-absent one still walks everything."
+  [dir suffix]
+  (let [listed (File/ls dir)]
+    (cond
+      (erlang/not (erlang/== :ok (erlang/element 1 listed))) false
+      :else
+      (let [names (Enum/reject (erlang/element 2 listed) (fn [name] (String/starts_with? name ".")))]
+        (or (Enum/any? names (fn [name] (String/ends_with? name suffix)))
+            (Enum/any? names (fn [name]
+              (let [path (Path/join dir name)]
+                (and (File/dir? path) (any_wildcard_suffix? path suffix))))))))))
 
 (defn immutable_toolchain
   "The identity of an immutable toolchain, or nil. Every input the live keys
