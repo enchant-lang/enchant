@@ -83,6 +83,41 @@
             (is (= :sdk-runtime-retained (BeamLisp.Env/ensure_sdk_runtime!)))))))
     (File/rm_rf! root)))
 
+(deftest an-edit-re-proves-only-its-unit-in-the-runtime-inventory
+  ;; M4: with a runtime lease held, replacing one unit used to drop the
+  ;; discovery cache, so its retention walked the whole SDK closure again
+  ;; (123-140 ms of every edit). Now only the unit's rows are proved again,
+  ;; the lease takes the new code, and the result is the full walk's.
+  (require 'split.web)
+  (let [sdk (File/read! (Path/join (BeamLisp.Tiers/priv_root) "lib/split/wire.bl"))
+        root (scratch-checkout)
+        full (tuple :Elixir.BeamLisp.AOT :sdk_runtime_inventory! 1)
+        patch (tuple :Elixir.BeamLisp.AOT :sdk_runtime_inventory_patched! 3)
+        calls (fn [mfa] (elem (erlang/trace_info mfa :call_count) 1))
+        cached (fn [] (BeamLisp.Env/with_env :global (fn [] (BeamLisp.Env/sdk_runtime_inventory_cached!))))
+        body :Elixir.BeamLisp.Ns.Body.Split.Wire]
+    (with-checkout root
+      (fn []
+        (is (= :sdk-runtime-retained (BeamLisp.Env/ensure_sdk_runtime!)))
+        (cached)
+        (doseq [mfa [full patch]] (erlang/trace_pattern mfa true (list :local :call_count)))
+        (try
+          (let [result (install! root (String/replace sdk "(erlang/length (unicode/characters_to_list s))" "2"))]
+            (is (= false (:reverted? result)))
+            (is (= 2 (split.wire/wire-text-length "abcd")) "the edit runs")
+            (is (= 1 (calls patch)) "the unit's rows were proved again")
+            (is (= 0 (calls full)) "and the SDK closure was not walked")
+            (is (= :sdk-runtime-retained (BeamLisp.Env/ensure_sdk_runtime!)))
+            (is (BeamLisp.Env/sdk_runtime_retained_modules? (list body)) "the lease holds the new code")
+            (is (= 0 (calls full)) "retention reuses the re-proved inventory")
+            (is (= (BeamLisp.AOT/sdk_runtime_inventory! true) (cached)) "which is what the full walk proves"))
+          (finally (doseq [mfa [full patch]] (erlang/trace_pattern mfa false (list :local :call_count)))))
+        (install! root sdk)
+        (is (= 4 (split.wire/wire-text-length "abcd")) "the SDK's source runs again")
+        (is (= :sdk-runtime-retained (BeamLisp.Env/ensure_sdk_runtime!)))
+        (is (BeamLisp.Env/sdk_runtime_retained_modules? (list body)))))
+    (File/rm_rf! root)))
+
 (deftest a-unit-that-defines-a-server-owner-is-held-whole
   ;; data.bounded-cache defines `defserver owner`. Its owner module cannot be
   ;; republished in place (`:code_leased`, even after the owner process stops)

@@ -4233,9 +4233,86 @@
                    (Map/put (elem acc 2) mod
                      {:namespace (Map/get row :forwarder-namespace) :routes routes :md5 (Map/get row :md5)})
                    (elem acc 2))))))]
+     ;; M4: hand the closure this proof was built from to a caller that asked
+     ;; for it (Env's discovery cache), so an overlay can re-prove one unit.
+     (when (erlang/== :wanted (Process/get :bl_sdk_inventory_entries))
+      (Process/put :bl_sdk_inventory_entries (tuple :entries root entries)))
      (if source-targets?
       (tuple (elem proof 0) (elem proof 1) (elem proof 2) (sdk_source_target_inventory! entries))
       proof))))
+
+(defn sdk_runtime_inventory_patched!
+  "M4: the runtime inventory after a checkout overlay replaced ONE SDK unit
+   (U15), re-derived from the closure `entries` that `inventory` was proved
+   from. Only the replaced unit's rows (`rows`: module => its overlay row, for
+   every module of the unit) take the per-row proof `sdk_runtime_inventory!`
+   gives each entry: compiler key, Source currency, loaded MD5 or forwarder
+   route, forwarder targets. Every other module's loaded MD5 is compared
+   again, and the closure-derived maps and Source targets are rebuilt from the
+   patched closure exactly as the full walk builds them. Returns
+   (tuple inventory entries), or nil when this is not such a replacement: the
+   unit's module set moved, it now reaches a module the closure does not
+   hold, or another entry shares its Source. The caller then takes the full
+   walk, and binds a result to a fresh certificate before any use."
+  [inventory entries rows]
+  (let [root (physical_sdk_path (BeamLisp.Tiers/priv_root))
+        names (Enum/uniq (Enum/map rows (fn [entry] (Map/get (elem entry 1) :source))))
+        name (when (erlang/== 1 (erlang/length names)) (erlang/hd names))
+        replaced (Enum/sort (Map/keys rows))
+        previous (Enum/sort (Enum/flat_map entries
+                   (fn [entry] (if (and name (erlang/== name (Map/get (elem entry 1) :source)))
+                                 (list (elem entry 0)) (list)))))
+        dependencies (fn [row] (Enum/uniq (erlang/++ (Map/get row :imports (list))
+                                            (Map/values (or (Map/get row :forwarder-routes) {})))))
+        before (MapSet/new (Enum/flat_map previous (fn [mod] (dependencies (Map/get entries mod)))))
+        patched (Map/merge entries rows)]
+   (when (and (erlang/is_binary name) (erlang/is_tuple inventory)
+              (erlang/=< 3 (erlang/tuple_size inventory))
+              (erlang/not (erlang/== replaced (list)))
+              (erlang/== replaced previous)
+              (Enum/all? rows (fn [entry]
+                (Enum/all? (dependencies (elem entry 1))
+                  (fn [mod] (or (Map/has_key? patched mod) (MapSet/member? before mod)))))))
+    (Enum/each rows
+     (fn [entry]
+      (let [mod (elem entry 0) row (elem entry 1)
+            forwarder? (erlang/== :mutable-forwarder (Map/get row :role))
+            routes (Map/get row :forwarder-routes)]
+       (when (erlang/== :native-host (Map/get row :role)) (erlang/error :stale_sdk_runtime_inventory))
+       (when forwarder?
+        (Enum/each routes
+         (fn [route]
+          (let [proof (Map/get patched (elem route 1))]
+           (when-not (and proof (Enum/member? (list :stable-body :stable-seed) (Map/get proof :role)))
+            (erlang/error :unproved_sdk_forwarder_target))))))
+       (when-not (and (erlang/is_atom mod) (not (Map/get row :seed?))
+                      (erlang/== (BeamLisp.AOTCache/compiler_key) (Map/get row :compiler-key))
+                      (sdk_source_current? root mod row))
+        (erlang/error :stale_sdk_runtime_inventory)))))
+    (let [proof (Enum/reduce patched (tuple (Map/new) (Map/new) (Map/new))
+                 (fn [entry acc]
+                  (let [mod (elem entry 0) row (elem entry 1) source_name (Map/get row :source)
+                        forwarder? (erlang/== :mutable-forwarder (Map/get row :role))
+                        routes (Map/get row :forwarder-routes)]
+                   (when-not (and (erlang/module_loaded mod)
+                                  (or (erlang/== (erlang/apply mod :module_info (list :md5)) (Map/get row :md5))
+                                      (and forwarder? (BeamLisp.Env/sdk_forwarder_current? mod routes))))
+                    (erlang/error :sdk_runtime_loaded_code_changed))
+                   ;; One digest per Source, as the full walk requires.
+                   (when (and source_name (Map/has_key? (elem acc 1) source_name)
+                              (erlang/not (erlang/== (Map/get row :source-digest) (Map/get (elem acc 1) source_name))))
+                    (erlang/error :stale_sdk_runtime_inventory))
+                   (tuple (if forwarder? (elem acc 0) (Map/put (elem acc 0) mod (Map/get row :md5)))
+                          (if source_name (Map/put (elem acc 1) source_name (Map/get row :source-digest)) (elem acc 1))
+                          (if forwarder?
+                            (Map/put (elem acc 2) mod
+                              {:namespace (Map/get row :forwarder-namespace) :routes routes :md5 (Map/get row :md5)})
+                            (elem acc 2))))))]
+     (tuple
+      (if (erlang/== 4 (erlang/tuple_size inventory))
+       (tuple (elem proof 0) (elem proof 1) (elem proof 2) (sdk_source_target_inventory! patched))
+       proof)
+      patched)))))
 
 (defn- sdk_callable_manifest! []
   ;; A running VM uses one compiler generation. Capture its authoritative seed
