@@ -1,6 +1,8 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
+import shutil
 import tempfile
 import unittest
 
@@ -141,6 +143,51 @@ class ProducedCompilerTests(unittest.TestCase):
         self.report['stages'][1]['producer_floor'] = '/build/reproduction/B'
         self.report['initial_seed_files']['manifest.term'] = 'f' * 64
         self.reject_report('recorded producer inputs')
+
+    def retained_with_elided_c(self):
+        """Retained P/B products, and C recorded as an elided fixpoint."""
+        original = MODULE.STORE
+        self.addCleanup(setattr, MODULE, 'STORE', original)
+        MODULE.STORE = re.compile(re.escape(str(self.root)) + r'/store/[^/]+')
+        products = {}
+        seed = self.compiler / 'seed'
+        for label in 'PBC':
+            product = self.root / 'store' / ('product-' + label)
+            shutil.copytree(seed, product / label)
+            products[label] = str(product)
+            (self.compiler / 'generations').mkdir(exist_ok=True)
+            (self.compiler / 'generations' / label).symlink_to(product, target_is_directory=True)
+        self.report['generation_products'] = products
+        self.report['preparation']['producer_floor'] = self.report['initial_seed']
+        for index, label in enumerate('PB'):
+            path = self.qualification / f'{label}.boot.log'
+            path.write_text(json.dumps({'kind': 'fresh-source-floor', 'status': 'passed',
+                'seed': products[label] + '/' + label, 'runtime': 'erts17.0.1-elixir1.20.4', 'tests': []}) + '\n')
+        self.report['stages'][0]['producer_floor'] = products['P'] + '/P'
+        c = self.report['stages'][1]
+        for key in ('bootstrap',):
+            c.pop(key)
+        c.update(producer_floor=products['B'] + '/B', produced=False, fresh_boot_qualified=False,
+                 elided=True, fixpoint={'kind': 'byte-identical-predecessor', 'booted': 'P', 'reproduced': 'B'})
+        for suffix in ('bootstrap.json', 'boot.log', 'producer.log'):
+            (self.qualification / f'C.{suffix}').unlink()
+        self.write('result.json', self.report)
+
+    def test_an_elided_c_is_verified_from_byte_identical_p_and_b(self):
+        self.retained_with_elided_c()
+        receipt = self.verify()
+        self.assertEqual(('passed', 'elided-C: P = B'), (receipt['status'], receipt['fixpoint']))
+
+    def test_an_elided_c_requires_equal_p_and_b_and_no_c_receipts(self):
+        self.retained_with_elided_c()
+        self.report['preparation']['files'] = dict(self.report['preparation']['files'],
+                                                   **{'Elixir.BeamLisp.Compiler.beam': 'f' * 64})
+        self.reject_report('byte-identical P and B')
+        self.report['preparation']['files'] = dict(self.report['stages'][0]['files'])
+        self.write('result.json', self.report)
+        (self.qualification / 'C.boot.log').write_text('stale receipt\n')
+        with self.assertRaisesRegex(ValueError, 'qualification files'):
+            self.verify()
 
     def test_mutable_report_cannot_be_admitted_as_a_selected_sdk(self):
         with self.assertRaisesRegex(ValueError, 'immutable top-level Nix store'):

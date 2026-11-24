@@ -176,6 +176,116 @@ class ArtifactGenerationInputsTest(unittest.TestCase):
         self.assertFalse(report["self_reproduction_qualified"])
         self.assertIn("generation P fresh boot failed", diagnostic)
 
+    def run_generation(self, label, out, *extra, preparation=b"preparation", probe_accepts=True):
+        """One retained stage through the same inert fixture; answers its calls."""
+        calls = []
+
+        def run(command, *args, **kwargs):
+            if command[0] == "cp":
+                return self.real_run(command, *args, **kwargs)
+            if command[0] == "elixir":
+                env = kwargs["env"]
+                image = Path(kwargs["cwd"])
+                seed = (image / "priv/bootstrap/seed/Elixir.Probe.beam").read_bytes()
+                if "BL_GENERATION_OUTPUT" not in env:
+                    calls.append(("probe", seed))
+                    if not probe_accepts:
+                        return subprocess.CompletedProcess(command, 1, "sdk_preinit_producer_unproved")
+                    Path(env["BL_GENERATION_BOOTSTRAP_RECEIPT"]).write_text('{"installation": "current"}')
+                    return subprocess.CompletedProcess(command, 0, "")
+                target = Path(env["BL_GENERATION_OUTPUT"])
+                calls.append(("produce", label, seed))
+                target.mkdir()
+                (target / "Elixir.Probe.beam").write_bytes(preparation if label == "P" else b"current")
+                (target / "manifest.term").write_bytes(b"inert manifest")
+                Path(env["BL_GENERATION_UNIT_STORE"]).mkdir(exist_ok=True)
+                Path(env["BL_GENERATION_BOOTSTRAP_RECEIPT"]).write_text("{}")
+                return subprocess.CompletedProcess(command, 0, "")
+            calls.append(("boot", label))
+            return subprocess.CompletedProcess(command, 0, "")
+
+        arguments = [str(SCRIPT), "--root", str(self.root), "--out", str(out), "--generation", label, *extra]
+        with patch.object(sys, "argv", arguments), patch.object(subprocess, "run", side_effect=run), \
+                contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            result = self.module["main"]()
+        return result, json.loads((out / "result.json").read_text()), calls
+
+    def candidate(self):
+        candidate = self.root / "previous-compiler"
+        candidate.mkdir()
+        (candidate / "manifest.term").write_text("previous qualified manifest\n")
+        (candidate / "Elixir.Probe.beam").write_bytes(b"previous qualified compiler")
+        return candidate
+
+    def test_p_boots_the_previous_compiler_when_its_startup_accepts_this_source(self):
+        candidate = self.candidate()
+        result, report, calls = self.run_generation("P", self.output, "--bootstrap-candidate", str(candidate))
+        self.assertEqual(0, result)
+        self.assertEqual([("probe", b"previous qualified compiler"),
+                          ("produce", "P", b"previous qualified compiler"), ("boot", "P")], calls)
+        self.assertEqual(str(candidate), report["initial_seed"])
+        self.assertTrue(report["bootstrap_choice"]["accepted"])
+        inputs = json.loads((self.output / "inputs.json").read_text())
+        self.assertIn("priv/bootstrap/seed/Elixir.Probe.beam", inputs)
+
+    def test_a_refused_previous_compiler_falls_back_to_the_committed_floor(self):
+        candidate = self.candidate()
+        result, report, calls = self.run_generation("P", self.output, "--bootstrap-candidate", str(candidate),
+                                                    probe_accepts=False)
+        self.assertEqual(0, result)
+        self.assertEqual([("probe", b"previous qualified compiler"),
+                          ("produce", "P", b"inert artifact placeholder"), ("boot", "P")], calls)
+        self.assertEqual(str(self.seed.resolve()), report["initial_seed"])
+        self.assertFalse(report["bootstrap_choice"]["accepted"])
+        self.assertIn("sdk_preinit_producer_unproved", report["bootstrap_choice"]["refusal"])
+
+    def test_a_bootstrap_candidate_selects_only_preparation(self):
+        with patch.object(sys, "argv", self.arguments + ["--generation", "B", "--bootstrap-candidate",
+                                                         str(self.candidate())]), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.module["main"]()
+
+    def staged_products(self, preparation):
+        p, b = self.root / "product-P", self.root / "product-B"
+        self.assertEqual(0, self.run_generation("P", p, preparation=preparation)[0])
+        self.assertEqual(0, self.run_generation("B", b, "--seed", str(p / "P"), preparation=preparation)[0])
+        return p, b
+
+    def test_c_is_elided_when_b_booted_a_byte_identical_p(self):
+        p, b = self.staged_products(b"current")
+        out = self.root / "product-C"
+        result, report, calls = self.run_generation("C", out, "--seed", str(b / "B"),
+                                                    "--elide-when-equal", str(p), str(b))
+        self.assertEqual(0, result)
+        self.assertEqual([], calls)
+        stage = report["generation"]
+        self.assertTrue(stage["elided"])
+        self.assertFalse(stage["produced"])
+        self.assertEqual("byte-identical-predecessor", stage["fixpoint"]["kind"])
+        self.assertEqual(json.loads((b / "result.json").read_text())["generation"]["files"], stage["files"])
+        self.assertEqual(b"current", (out / "C/Elixir.Probe.beam").read_bytes())
+        self.assertTrue((out / "unit-store").is_dir())
+
+    def test_c_runs_when_p_and_b_differ(self):
+        p, b = self.staged_products(b"preparation")
+        out = self.root / "product-C"
+        result, report, calls = self.run_generation("C", out, "--seed", str(b / "B"),
+                                                    "--elide-when-equal", str(p), str(b))
+        self.assertEqual(0, result)
+        self.assertEqual([("produce", "C", b"current"), ("boot", "C")], calls)
+        self.assertTrue(report["generation"]["fresh_boot_qualified"])
+        self.assertNotIn("elided", report["generation"])
+
+    def test_c_elision_refuses_a_changed_retained_b(self):
+        p, b = self.staged_products(b"current")
+        (b / "B/Elixir.Probe.beam").write_bytes(b"tampered")
+        out = self.root / "product-C"
+        result, report, _ = self.run_generation("C", out, "--seed", str(b / "B"),
+                                                "--elide-when-equal", str(p), str(b))
+        self.assertEqual(1, result)
+        self.assertIn("incomplete for C's elision check", report["error"])
+
     def assert_seed_rejected(self):
         with patch.object(sys, "argv", self.arguments), \
                 patch.object(subprocess, "run", side_effect=self.run_without_native), \

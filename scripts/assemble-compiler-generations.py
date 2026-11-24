@@ -25,9 +25,13 @@ def assemble(products, output):
     for label, product in zip('PBC', products):
         report = json.loads((product / 'result.json').read_text())
         stage = report.get('generation')
+        # C may be elided only as a byte-identical-predecessor fixpoint: B's
+        # own run booted P, and P's bytes equal B's (checked below).
+        elided = label == 'C' and isinstance(stage, dict) and stage.get('elided') is True
         if (report.get('kind') != 'artifact-generation-stage'
                 or not isinstance(stage, dict) or stage.get('generation') != label
-                or stage.get('produced') is not True or stage.get('fresh_boot_qualified') is not True
+                or (not elided and (stage.get('produced') is not True
+                                    or stage.get('fresh_boot_qualified') is not True))
                 or 'error' in report or inventory(product / label) != stage.get('files')):
             raise ValueError(f'Incomplete compiler generation {label}')
         inputs = json.loads((product / 'inputs.json').read_text())
@@ -38,11 +42,14 @@ def assemble(products, output):
             shutil.copyfile(product / 'inputs.json', qualification / 'inputs.json')
         elif original_inputs != sources:
             raise ValueError('Compiler source inputs changed between retained generations')
-        for suffix in ('bootstrap.json', 'producer.log', 'boot.log'):
-            shutil.copyfile(product / f'{label}.{suffix}', qualification / f'{label}.{suffix}')
+        if not elided:
+            for suffix in ('bootstrap.json', 'producer.log', 'boot.log'):
+                shutil.copyfile(product / f'{label}.{suffix}', qualification / f'{label}.{suffix}')
         generations.append(stage)
     if generations[1]['files'] != generations[2]['files']:
         raise ValueError('B and C byte inventories differ')
+    if generations[2].get('elided') is True and generations[0]['files'] != generations[1]['files']:
+        raise ValueError('Elided C requires P and B byte inventories to be equal')
     report = {'version': 1, 'kind': 'artifact-generation-qualification',
               'initial_seed': initial['initial_seed'], 'initial_seed_files': initial['initial_seed_files'],
               'floor_installed': False, 'native_execution_admission': False,
