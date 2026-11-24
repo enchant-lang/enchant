@@ -58,14 +58,51 @@
     (some (fn [c] (beneath? c relative)) (:restart policy)) :restart
     :else nil))
 
-(defn- sources
-  "Root-relative library sources under the policy's roots."
-  [root policy]
-  (sort (distinct
-    (for [dir (:roots policy) ext (:extensions policy)
-          path (Path/wildcard (Path/join (Path/join root dir) (str "**/*" ext)))
-          :when (File/regular? path)]
-      (Path/relative_to path root)))))
+;; M4: `scan` used to list the library roots with two `Path/wildcard`
+;; walks per root and read every checkout file and its SDK twin in full on
+;; every new request generation, a project edit included: 46-84 ms for 643
+;; files. It now walks the roots once, stats each source once, and reads a
+;; file only when its stat stamp is not one it has already compared. The
+;; SDK side is an immutable store tree, so a verdict holds while the checkout
+;; file's stamp does. A stamp is reused only when it was settled when compared
+;; (its mtime and ctime at least `racy-seconds` older than the scan, the rule
+;; git's index and the client's digest cache use): a later write moves mtime
+;; and ctime past that moment, and ctime cannot be set from user space.
+(defn- racy-seconds [] 2)
+
+(defn- stamp
+  "[size inode mtime ctime device] of a regular file (followed through links), or
+   :directory, or nil."
+  [path]
+  (let [info (file/read_file_info path (list (tuple :time :posix)))]
+    (when (= :ok (erlang/element 1 info))
+      (let [r (erlang/element 2 info) type (erlang/element 3 r)]
+        (cond
+          (= :regular type) [(erlang/element 2 r) (erlang/element 12 r) (erlang/element 6 r) (erlang/element 7 r)
+                             (erlang/element 10 r)]
+          (= :directory type) :directory
+          :else nil)))))
+
+(defn- walk-sources
+  "{rel stamp} for every regular file under `dir` (root-relative `rel`) whose
+   name ends with one of `extensions`, skipping dot entries as `Path/wildcard`
+   does."
+  [root rel extensions depth out]
+  (let [listed (file/list_dir (Path/join root rel))]
+    (if (or (> depth 32) (not= :ok (erlang/element 1 listed)))
+      out
+      (reduce
+        (fn [out entry]
+          (let [name (unicode/characters_to_binary entry)
+                child (str rel "/" name)]
+            (if (String/starts_with? name ".")
+              out
+              (let [s (stamp (Path/join root child))]
+                (cond
+                  (= :directory s) (walk-sources root child extensions (inc depth) out)
+                  (and s (some (fn [ext] (String/ends_with? name ext)) extensions)) (assoc out child s)
+                  :else out)))))
+        out (erlang/element 2 listed)))))
 
 (defn- same-bytes? [a b]
   (let [sa (File/stat a) sb (File/stat b)]
@@ -75,22 +112,53 @@
 
 (defn- digest [path] (crypto/hash :sha256 (File/read! path)))
 
+(defn- verdict
+  "How the checkout file `rel` compares with the SDK: :same, :differs or
+   :absent (no SDK file)."
+  [root sdk-priv rel]
+  (let [mine (Path/join root rel)
+        theirs (Path/join sdk-priv (subs rel (count "priv/")))]
+    (cond
+      (not (File/regular? theirs)) :absent
+      (same-bytes? mine theirs) :same
+      :else :differs)))
+
+(defn scan-with
+  "`scan`, reusing `seen` ({:sdk sdk-priv :rows {rel [stamp verdict]}}, from
+   an earlier call) for files whose settled stamp has not moved. Returns
+   [found seen']."
+  [root sdk-priv policy seen]
+  (let [now (erlang/system_time :second)
+        prior (if (= sdk-priv (:sdk seen)) (:rows seen) {})
+        files (reduce (fn [out dir] (walk-sources root dir (:extensions policy) 0 out))
+                      {} (:roots policy))
+        judged (reduce
+                 (fn [acc [rel s]]
+                   (let [known (get prior rel)
+                         v (if (and known (= s (first known))) (second known) (verdict root sdk-priv rel))
+                         settled (< (+ (max (nth s 2) (nth s 3)) (racy-seconds)) now)]
+                     (-> acc
+                         (assoc-in [:verdicts rel] v)
+                         (update :rows (fn [rows] (if settled (assoc rows rel [s v]) rows))))))
+                 {:verdicts {} :rows {}} files)
+        found (reduce
+                (fn [out rel]
+                  (let [v (get-in judged [:verdicts rel])]
+                    (cond
+                      (= :absent v) (if (held policy rel) out (update out :new conj rel))
+                      (= :same v) out
+                      (held policy rel) (assoc-in out [:held rel] (held policy rel))
+                      :else (update out :changed conj rel))))
+                {:changed [] :held {} :new []}
+                (sort (keys files)))]
+    [found {:sdk sdk-priv :rows (:rows judged)}]))
+
 (defn scan
   "Compare the checkout's library sources with the running SDK's. Returns
    {:changed [rel] :held {rel reason} :new [rel]}: `changed` differ from an SDK
    file and reload; `held` differ but are not reloadable; `new` have no SDK file."
   [root sdk-priv policy]
-  (reduce
-    (fn [out rel]
-      (let [mine (Path/join root rel)
-            theirs (Path/join sdk-priv (subs rel (count "priv/")))]
-        (cond
-          (not (File/regular? theirs)) (if (held policy rel) out (update out :new conj rel))
-          (same-bytes? mine theirs) out
-          (held policy rel) (assoc-in out [:held rel] (held policy rel))
-          :else (update out :changed conj rel))))
-    {:changed [] :held {} :new []}
-    (sources root policy)))
+  (first (scan-with root sdk-priv policy nil)))
 
 (defn- note-once! [key message]
   (let [s (state)]
@@ -152,7 +220,7 @@
                   (when (seq (:failed s)) (throw (blocking-error (:failed s))))
                   (let [p (policy root)
                         sdk-priv (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
-                        found (scan root sdk-priv p)
+                        [found seen] (scan-with root sdk-priv p (:seen s))
                         digests (into {} (map (fn [rel] [rel (digest (Path/join root rel))]) (:changed found)))
                         applied (:applied s)
                         ;; a failure stands while its bytes do; a new edit retries
@@ -191,7 +259,7 @@
                                " for this unit. Run scripts/prepare-checkout-sdk to build the edit in.")))
                       ;; Every outcome advances the generation; only a compile
                       ;; error blocks, and it is re-raised from state.
-                      (put-state! (assoc (state) :applied applied :failed failed :generation generation))
+                      (put-state! (assoc (state) :applied applied :failed failed :generation generation :seen seen))
                       (when (seq failed) (throw (blocking-error failed)))
                       (when (seq work)
                         {:applied (count (filter (fn [rel] (contains? applied rel)) due))

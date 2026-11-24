@@ -205,6 +205,7 @@ fn query_at(
 #[cfg(target_os = "linux")]
 pub fn generation_serve(root: PathBuf) -> ! {
     let root = std::fs::canonicalize(&root).unwrap_or(root);
+    engine_inputs::bind_digest_cache_root(&root);
     let socket = socket_path(&root).expect("socket path");
     if let Some(parent) = socket.parent() { let _ = std::fs::create_dir_all(parent); }
     if UnixStream::connect(&socket).is_ok() {
@@ -314,6 +315,13 @@ struct Watch {
     scopes: HashMap<libc::c_int, u8>,
     dirs: HashMap<libc::c_int, PathBuf>,
     watched: HashSet<PathBuf>,
+    /// M4: what the drained events touched. `files` are the engine-scope
+    /// paths of plain file events (a write, a close, an attribute change, a
+    /// file created, removed or renamed in a watched directory); `structural`
+    /// is set by any other event in any scope (a directory event, a watch
+    /// removed, an event without a name, an overflow). Taken by `State::sync`.
+    files: Vec<PathBuf>,
+    structural: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -321,7 +329,8 @@ impl Watch {
     fn new() -> std::io::Result<Self> {
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         if fd < 0 { return Err(std::io::Error::last_os_error()); }
-        Ok(Self { fd, scopes: HashMap::new(), dirs: HashMap::new(), watched: HashSet::new() })
+        Ok(Self { fd, scopes: HashMap::new(), dirs: HashMap::new(), watched: HashSet::new(),
+                  files: Vec::new(), structural: false })
     }
     fn reset(&mut self) -> std::io::Result<()> {
         unsafe { libc::close(self.fd); }
@@ -396,11 +405,12 @@ impl Watch {
                 };
                 let size = std::mem::size_of::<libc::inotify_event>() + event.len as usize;
                 offset += size;
-                if event.mask & libc::IN_Q_OVERFLOW != 0 { return SCOPE_ALL; }
+                if event.mask & libc::IN_Q_OVERFLOW != 0 { self.structural = true; return SCOPE_ALL; }
                 let scope = self.scopes.get(&event.wd).copied().unwrap_or(SCOPE_ALL);
                 if event.mask & libc::IN_IGNORED != 0 {
                     self.scopes.remove(&event.wd);
                     self.dirs.remove(&event.wd);
+                    self.structural = true;
                     dirty |= scope;
                     continue;
                 }
@@ -424,6 +434,12 @@ impl Watch {
                                          event.wd, event.mask, scope, narrowed,
                                          path.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
                     }
+                }
+                let plain = event.len > 0
+                    && event.mask & (libc::IN_ISDIR | libc::IN_DELETE_SELF | libc::IN_MOVE_SELF) == 0;
+                match (&path, plain) {
+                    (Some(path), true) => if narrowed & (SCOPE_ENGINE | SCOPE_RUNTIME) != 0 { self.files.push(path.clone()) },
+                    _ => self.structural = true,
                 }
                 dirty |= narrowed;
             }
@@ -478,6 +494,12 @@ struct State {
     engine: Option<(String, String)>,
     runtime_env: Option<String>,
     projects: HashMap<String, String>,
+    /// M4: files whose events alone invalidated the engine scope since the
+    /// last computation. When each is a reloadable library source the engine
+    /// snapshot already holds, the next answer re-reads only them
+    /// (`Snapshot::refresh_reloadable`): such an edit moves the engine and
+    /// project tokens, never the runtime token. Anything else captures again.
+    patch: Vec<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
@@ -500,6 +522,7 @@ impl State {
             engine: None,
             runtime_env: None,
             projects: HashMap::new(),
+            patch: Vec::new(),
         })
     }
 
@@ -587,6 +610,7 @@ impl State {
         let post_watch = self.sync();
         self.log(&format!("post_watch_dirty={post_watch}"));
         let b = std::time::Instant::now();
+        let patched = self.refresh_patch(&env_key);
         let recomputed_engine = self.engine.is_none() || self.runtime_env.as_deref() != Some(env_key.as_str());
         if recomputed_engine {
             self.compute_engine()?;
@@ -597,7 +621,7 @@ impl State {
         if recomputed_project {
             self.compute_project(&project, &extra, &key)?;
         }
-        self.log(&format!("compute engine={recomputed_engine} project={recomputed_project} us={}", b.elapsed().as_micros()));
+        self.log(&format!("compute engine={recomputed_engine} patched={patched} project={recomputed_project} us={}", b.elapsed().as_micros()));
         if self.sync() != 0 {
             self.log("answer=fallback (event during compute)");
             return Err("tree changed while computing".into());
@@ -607,7 +631,35 @@ impl State {
         Ok(Generations { engine, runtime, project: project_token })
     }
 
+    /// Apply a pending reloadable-source patch to the engine snapshot, or drop
+    /// the engine so it is captured again. Returns whether it patched.
+    fn refresh_patch(&mut self, env_key: &str) -> bool {
+        if self.patch.is_empty() { return false; }
+        let mut paths = std::mem::take(&mut self.patch);
+        paths.sort();
+        paths.dedup();
+        let patched = self.runtime_env.as_deref() == Some(env_key)
+            && self.engine.is_some()
+            && match self.evidence.as_mut() {
+                Some(evidence) => evidence.refresh_reloadable(&paths).unwrap_or(false),
+                None => false,
+            };
+        if patched {
+            #[cfg(test)]
+            PATCHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let fingerprint = self.evidence.as_ref().map(|e| e.fingerprint.clone()).unwrap_or_default();
+            if let Some(engine) = self.engine.as_mut() { engine.0 = fingerprint; }
+        } else {
+            self.engine = None;
+            self.runtime_env = None;
+            self.projects.clear();
+            self.evidence = None;
+        }
+        patched
+    }
+
     fn reset(&mut self, _reason: String) {
+        self.patch.clear();
         self.engine = None;
         self.runtime_env = None;
         self.projects.clear();
@@ -630,16 +682,31 @@ impl State {
     }
 
     fn apply_dirty(&mut self) {
+        let files = std::mem::take(&mut self.watch.files);
+        let structural = std::mem::replace(&mut self.watch.structural, false);
         if self.dirty & (SCOPE_ENGINE | SCOPE_RUNTIME) != 0 {
-            self.engine = None;
-            self.runtime_env = None;
-            self.projects.clear();
-            self.evidence = None;
+            if !structural && !files.is_empty() && self.engine.is_some() && self.patch.len() + files.len() <= 64 {
+                // Kept until the next answer re-reads them (`refresh_patch`);
+                // the tokens that depend on them are recomputed from there.
+                self.patch.extend(files);
+                self.projects.clear();
+            } else {
+                self.patch.clear();
+                self.engine = None;
+                self.runtime_env = None;
+                self.projects.clear();
+                self.evidence = None;
+            }
         }
         if self.dirty & SCOPE_PROJECT != 0 { self.projects.clear(); }
         // A new directory or a bigger manifest may need watches the walk has
-        // not placed yet; re-walk on the next query.
-        self.inputs_key = None;
+        // not placed yet; re-walk on the next query. A plain file event in a
+        // watched directory needs no new watch (the manifest's growth changes
+        // `watch_key` itself), unless an input missing at the last walk is
+        // there now (one stat each).
+        if structural || self.missing_appeared() {
+            self.inputs_key = None;
+        }
         self.dirty = 0;
     }
 
@@ -753,6 +820,9 @@ impl State {
 /// What `watch_inputs` walked last: the project, its extra roots and the
 /// realm's manifest (token plus recorded paths). Re-walking 1612 directories
 /// per request was the service's own 100 ms; it happens only when this changes.
+#[cfg(all(test, target_os = "linux"))]
+static PATCHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(target_os = "linux")]
 fn watch_key(project: &Path, extra: &[PathBuf]) -> String {
     use sha2::{Digest, Sha256};
@@ -963,6 +1033,39 @@ mod generation_tests {
         std::fs::write(f.root.join("priv/host/helper.bl"), "helper 3\n").unwrap();
         let engine = ask_settled(&socket, &f);
         assert_ne!(engine.engine, first.engine, "an engine edit moves the engine token");
+    }
+
+    /// M4: an edit to a reloadable library source is answered from the
+    /// snapshot by re-reading that file only, and the answer is the local one.
+    /// A non-reloadable engine edit still captures the tree.
+    #[test]
+    fn a_reloadable_edit_is_answered_by_rereading_that_file() {
+        let _serial = serialized();
+        let f = fixture("reloadable");
+        std::fs::create_dir_all(f.root.join("priv/lib/split")).unwrap();
+        std::fs::write(f.root.join("nix/dev-reload.json"), r#"{"version":1,"roots":["priv/lib"],
+            "extensions":[".bl"],"compiler":[],"restart":[]}"#).unwrap();
+        let wire = f.root.join("priv/lib/split/wire.bl");
+        std::fs::write(&wire, "(ns split.wire) (defn n [] 1)\n").unwrap();
+        let Some(socket) = service(&f) else { return; };
+        let first = ask_settled(&socket, &f);
+        assert_eq!(first, tokens(&f));
+        let patched = PATCHED.load(std::sync::atomic::Ordering::SeqCst);
+        for k in 2..5 {
+            std::fs::write(&wire, format!("(ns split.wire) (defn n [] {k})\n")).unwrap();
+            let after = ask_settled(&socket, &f);
+            assert_eq!(after, tokens(&f), "the patched answer equals the local one");
+            assert_ne!(after.engine, first.engine);
+            assert_ne!(after.project, first.project, "the realm retires");
+            assert_eq!(after.runtime, first.runtime, "the VM stays");
+        }
+        assert!(PATCHED.load(std::sync::atomic::Ordering::SeqCst) > patched, "the service re-read only the edited file");
+        std::fs::write(f.root.join("priv/host/helper.bl"), "helper 9\n").unwrap();
+        let engine = ask_settled(&socket, &f);
+        assert_eq!(engine, tokens(&f));
+        assert_ne!(engine.runtime, first.runtime, "a runtime edit retires the VM");
+        std::fs::write(f.root.join("priv/lib/split/new.bl"), "(ns split.new)\n").unwrap();
+        assert_eq!(ask_settled(&socket, &f), tokens(&f), "a new library file captures again");
     }
 
     /// U13: a caller's exported engine pin must never select or key the VM.
