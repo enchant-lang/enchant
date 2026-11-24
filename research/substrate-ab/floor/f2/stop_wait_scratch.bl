@@ -1,0 +1,146 @@
+(ns stopwait-scratch (:require [vm.paths :as paths] [vm.wire :as wire]))
+(def CONNECT-TIMEOUT 500)
+(defn- do-connect [sock-path]
+  (let [r (gen_tcp/connect (tuple :local (erlang/binary_to_list sock-path)) 0
+            (to-list [(tuple :inet_backend :inet) :local :binary
+                      (tuple :packet 4) (tuple :active false)])
+            CONNECT-TIMEOUT)]
+    (if (= :ok (elem r 0)) {:ok (elem r 1)} {:error (elem r 1)})))
+
+(defn- recv-frame [sock]
+  (let [r (gen_tcp/recv sock 0 10000)]
+    (if (= :ok (elem r 0))
+      {:ok (BeamLisp.Env/decode_data_term! (elem r 1))}
+      {:error (elem r 1)})))
+
+(defn- connect-hello*
+  "The handshake against an endpoint. `shared` picks the build's shared endpoint,
+   which needs no `root`; the 2-arity asks the project's own declaration."
+  ([root build] (connect-hello* root build (paths/shared? root (or build (paths/build-id)))))
+  ([root build shared]
+  (let [ep (paths/endpoints root (or build (paths/build-id)) shared)]
+    (if (not (contains? ep :ok))
+      {:error :no_endpoints}
+      (let [em (:ok ep)]
+        (if (not (File/exists? (:sock em)))
+          {:error :no_socket}
+          (let [token (File/read! (:token em))
+                c (do-connect (:sock em))]
+            (if (not (contains? c :ok))
+              {:error (:error c)}
+              (let [sock (:ok c)]
+                (gen_tcp/send sock (erlang/apply :erlang :term_to_binary
+                                     (list (tuple :bl 1 :hello {:tree (paths/hello-fingerprint root (:build em) (:shared em)) :token token
+                                                                :build (:build em)}))))
+                (let [f (recv-frame sock)]
+                  (if (not (contains? f :ok))
+                    (do (gen_tcp/close sock) {:error (:error f)})
+                    (let [frame (:ok f) tag (elem frame 2)]
+                      (cond
+                        (= tag :ready) {:ok sock :ready (elem frame 3)}
+                        (= tag :reject) (do (gen_tcp/close sock) {:error (tuple :reject (elem frame 3))})
+                        :else (do (gen_tcp/close sock) {:error frame}))))))))))))))
+
+(defn- connect-hello [root] (connect-hello* root nil false))
+
+(defn- drain-to-exit
+  "Read frames for request `id`, writing stdout/stderr, until :exit. Answers HOW it
+   ended: {:ok :exit :code n} when the VM answered, {:error reason} when the
+   connection ended without it (`:closed` when the VM went away, `:timeout` when it
+   went quiet). Callers decide what each means for them (see `outcome`)."
+  [sock id]
+  (let [f (recv-frame sock)]
+    (if (not (contains? f :ok))
+      f
+      (let [frame (:ok f) tag (elem frame 2)]
+        (cond
+          (and (= tag :stdout) (= (elem frame 3) id)) (do (IO/write (elem frame 5)) (drain-to-exit sock id))
+          (and (= tag :stderr) (= (elem frame 3) id)) (do (IO/write :stderr (elem frame 5)) (drain-to-exit sock id))
+          (and (= tag :exit) (= (elem frame 3) id)) {:ok :exit :code (elem frame 4)}
+          :else (drain-to-exit sock id))))))
+
+(defn outcome
+  "The exit code of a control operation `op`, from how its connection `ended`
+   (what `drain-to-exit` answered). Pure.
+
+   `:stop` asks the VM to leave, so the VM closing the connection IS its answer: it
+   is gone. Anything that asks the VM to do something and KEEP RUNNING (`{:close
+   root}`) is only done when the VM says so with an exit frame; a closed connection
+   there means it died or refused, and reporting success would be a lie. Silence is
+   never confirmation. Explicit exit frames preserve their numeric failure code;
+   a frame receipt without a code is incomplete and cannot report success."
+  [op ended]
+  (cond
+    (= :exit (:ok ended)) (if (erlang/is_integer (:code ended)) (:code ended) 1)
+    (and (= op :stop) (= :closed (:error ended))) 0
+    :else 1))
+
+(def STOP-RETIRE-MS
+  "How long `stop` waits, after the VM answered the stop, for it to retire."
+  30000)
+(def STOP-POLL-MS 50)
+
+(defn- os-process-gone?
+  "Whether OS process `pid` (a decimal binary, the hello's :pid) has exited.
+   Without /proc it cannot be told; the socket alone then decides."
+  [pid]
+  (cond
+    (not (File/dir? "/proc/self")) true
+    (not (erlang/is_binary pid)) true
+    :else (not (File/dir? (str "/proc/" pid)))))
+
+(defn- retired?
+  "The VM at `root` no longer accepts a hello, and its process `pid` is gone or
+   its socket file is."
+  [root pid]
+  (let [c (connect-hello root)]
+    (when (contains? c :ok) (gen_tcp/close (:ok c)))
+    (and (not (contains? c :ok))
+         (or (os-process-gone? pid)
+             (let [ep (paths/endpoints root (paths/build-id) false)]
+               (or (not (contains? ep :ok)) (not (File/exists? (:sock (:ok ep))))))))))
+
+(defn await-retired
+  "Wait, at most `limit-ms`, until the VM at `root` (OS pid `pid`) has retired:
+   `:retired` or `:timeout`. A VM answers its stop before it leaves: it drains,
+   raises its stop flag and only then closes its listener and exits. A command
+   sent in that window reached the stopping VM and was told \"retirement
+   pending\" instead of starting a fresh one (batch 22, a checkout-root VM on
+   most stop → run cycles)."
+  [root pid limit-ms]
+  (let [deadline (+ (erlang/monotonic_time :millisecond) limit-ms)]
+    (loop []
+      (cond
+        (retired? root pid) :retired
+        (> (erlang/monotonic_time :millisecond) deadline) :timeout
+        :else (do (Process/sleep STOP-POLL-MS) (recur))))))
+
+(defn- stop-own
+  "Stop the VM `root` owns and return only once it has retired (see
+   `await-retired`). Returns an exit code, or the connection error."
+  [root]
+  (let [c (connect-hello root)]
+    (if (not (contains? c :ok))
+      c
+      (let [sock (:ok c)
+            pid (get (:ready c) :pid)
+            id (erlang/apply :crypto :strong_rand_bytes (list 16))]
+        (gen_tcp/send sock (erlang/apply :erlang :term_to_binary
+                             (list (tuple :bl 1 :control id :stop))))
+        (let [ended (drain-to-exit sock id)
+              code (outcome :stop ended)]
+          (gen_tcp/close sock)
+          (cond
+            (not= 0 code) code
+            (= :retired (await-retired root pid STOP-RETIRE-MS))
+            (do (println (str "bl realm: stopped (" root ")")) 0)
+            :else
+            (do (println (str "bl realm: the VM for " root " (pid " pid ") accepted the stop but still answers after "
+                              (quot STOP-RETIRE-MS 1000) " s; it has not retired"))
+                1)))))))
+
+
+(let [root (first (BeamLisp/argv))
+      t0 (erlang/monotonic_time :millisecond)
+      r (stop-own root)]
+  (println "STOP-RESULT" (pr-str r) "ms" (- (erlang/monotonic_time :millisecond) t0)))

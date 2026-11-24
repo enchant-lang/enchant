@@ -467,6 +467,11 @@
 (defn- app-tree-size []
   (erlang/map_get :specs (erlang/apply :Elixir.Supervisor :count_children (list live))))
 
+; Env and Loader, plus the owner collector once the first managed actor has
+; started it (K1b: the collector is no longer started at application start).
+(defn- app-tree-intact? []
+  (contains? #{2 3} (app-tree-size)))
+
 ; ── the surface: exactly the live module's public functions ──────────────
 
 (deftest supervisor-pinned-surface-is-the-live-module
@@ -604,7 +609,7 @@
       ; OTP application's registered NAME; these trees were unregistered pids
       ; and none of them renamed or stopped that process.
       (is (= before (app-supervisor)) "the application's supervisor is the same pid")
-      (is (= 3 (app-tree-size)) "the application tree retains Env, Loader and the owner collector")
+      (is (app-tree-intact?) "the application tree retains Env, Loader and (once started) the owner collector")
       (is (= 3 (BeamLisp/eval "(+ 1 2)")) "the language still answers")
 
       (File/rm_rf! dir))))
@@ -656,7 +661,7 @@
         ; THE RUNTIME'S OWN TREE IS STILL THE RUNTIME'S. Load nothing over the
         ; registered process; only a module shared an atom with its NAME.
         (is (= app-sup (app-supervisor)) "the application's supervisor is untouched")
-        (is (= 3 (app-tree-size)))
+        (is (app-tree-intact?))
         (is (= 3 (BeamLisp/eval "(+ 1 2)")))
         (finally
           (drop! live)
@@ -666,7 +671,7 @@
       (is (= orig-path (erlang/apply :code :which (list live))))
       (is (= before-pure (pure-corpus live)) "the restored live beam answers as before")
       (is (= app-sup (app-supervisor)))
-      (is (= 3 (app-tree-size)))
+      (is (app-tree-intact?))
       (File/rm_rf! dir))))
 
 ; ── a cold child VM: the pinned beam, no warm-VM trust ───────────────────
@@ -692,6 +697,8 @@
     "sup0 = Process.whereis(BeamLisp.Supervisor)\n"
     "IO.puts(\"app-sup=\" <> inspect(is_pid(sup0)))\n"
     "IO.puts(\"app-kids=\" <> inspect(Supervisor.which_children(sup0) |> Enum.map(&elem(&1, 0)) |> Enum.sort()))\n"
+    "IO.puts(\"on-demand=\" <> inspect(BeamLisp.Env.ensure_sdk_owner_registry!()))\n"
+    "IO.puts(\"app-kids-on-demand=\" <> inspect(Supervisor.which_children(sup0) |> Enum.map(&elem(&1, 0)) |> Enum.sort()))\n"
     "IO.puts(\"exports=\" <> inspect(Enum.sort(BeamLisp.Supervisor.module_info(:exports))))\n"
     "IO.puts(\"surface=\" <> inspect(Enum.all?([child_start_result: 1, init: 1, managed_children: 5, module_info: 0, module_info: 1, pool: 5, server: 2, server: 3, server: 4, server_name?: 1, start_link: 1, start_managed_tree: 3, start_named_sup: 2, start_native_link: 2, start_server: 3, supervise: 2, supervise: 3, worker: 2, worker: 3], fn {name, arity} -> function_exported?(BeamLisp.Supervisor, name, arity) end) and not function_exported?(BeamLisp.Supervisor, :__info__, 1)))\n"
     "free = BeamLisp.Supervisor.supervise(:\"one-for-one\", [BeamLisp.Supervisor.worker(:c, fn -> Process.sleep(60000) end)])\n"
@@ -738,7 +745,11 @@
         ; THE APPLICATION CAME UP ON ITS OWN supervisor, which is registered
         ; under the very name this module shares.
         (is (includes? text "app-sup=true") text)
-        (is (includes? text "app-kids=[BeamLisp.Env, BeamLisp.Loader.Server, :beam_lisp_owner_registry]") text)
+        ; K1b: the owner registry starts with the first managed actor, through
+        ; this pinned module's start_server, not with the application.
+        (is (includes? text "app-kids=[BeamLisp.Env, BeamLisp.Loader.Server]\n") text)
+        (is (includes? text "on-demand=:ok") text)
+        (is (includes? text "app-kids-on-demand=[BeamLisp.Env, BeamLisp.Loader.Server, :beam_lisp_owner_registry]") text)
 
         ; The pinned surface really is functions-only at the production atom.
         (is (includes? text

@@ -1,0 +1,41 @@
+(ns start-race-scratch-test)
+;; the shape of vm.manager/start before and after lane/dupstart, on a scratch
+;; server name, with a sleep standing in for `prepare-drain!` between the check
+;; and the start
+(defserver probe
+  (init [_] (ok {}))
+  (handle-call [:ping] [_from st] (reply :pong st)))
+
+(defn- old-start [name]
+  (if (nil? (Process/whereis name))
+    (do (Process/sleep 50) (core/start probe nil {:name name}))
+    (Process/whereis name)))
+
+(defn- new-start [name]
+  (or (Process/whereis name)
+      (global/trans (tuple :scratch-start (erlang/self))
+        (fn []
+          (or (Process/whereis name)
+              (do (Process/sleep 50) (core/start probe nil {:name name})))))))
+
+(defn- race [start name]
+  (let [parent (erlang/self)
+        go (fn [] (spawn (fn [] (erlang/send parent [:done (try [:ok (start name)] (catch e [:error (ex-message e)]))]))))]
+    (go) (go)
+    (let [a (receive [:done r] r (after 5000 :timeout))
+          b (receive [:done r] r (after 5000 :timeout))]
+      (when-let [p (Process/whereis name)] (erlang/exit p :kill))
+      [a b])))
+
+(deftest the-old-check-then-start-loses-a-race
+  (let [[a b] (race old-start (erlang/binary_to_atom (str "race-old-" (System/unique_integer (list :positive)))))]
+    (is (some (fn [r] (and (= :error (first r)) (String/contains? (second r) "already_started"))) [a b])
+        (pr-str [a b]))))
+
+(deftest the-locked-start-answers-the-winner
+  (doseq [i (range 5)]
+    (let [[a b] (race new-start (erlang/binary_to_atom (str "race-new-" (System/unique_integer (list :positive)))))]
+      (is (= :ok (first a)) (pr-str a))
+      (is (= :ok (first b)) (pr-str b))
+      (is (= (second a) (second b)) "both callers get the one server"))))
+(run-tests)

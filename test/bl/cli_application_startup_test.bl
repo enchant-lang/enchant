@@ -11,12 +11,18 @@
  (str
  "(ns cli.application-probe (:require [proc.inventory :as inv] [reload.generation :as g]))
   (when-not (and (Process/whereis :Elixir.BeamLisp.Supervisor)
-                 (Process/whereis :beam_lisp_owner_registry)
                  (= (Process/whereis :Elixir.BeamLisp.Env) (ets/info :beam_lisp_owner_index :owner)))
    (throw (ex-info \"CLI omitted supervised runtime startup\" {})))
+  ;; K1b: a plain run does not start the owner collector; the first actor does.
+  (when (Process/whereis :beam_lisp_owner_registry)
+   (throw (ex-info \"CLI paid for the owner registry before any actor\" {})))
   (let [generation (g/prepare! {:application-id \"cli-application-probe\"
          :sources {\"cli.managed-probe\" " (pr-str managed-source) "}})
         pid (g/invoke! generation \"cli.managed-probe/start-owner\" [])]
+   (when-not (and (ets/member :beam_lisp_vars :bl_sdk_runtime_lease)
+                  (some (fn [child] (= :beam_lisp_owner_registry (elem child 0)))
+                        (Supervisor/which_children :Elixir.BeamLisp.Supervisor)))
+    (throw (ex-info \"the first managed actor did not start the supervised registry\" {})))
    (try
     (let [result (inv/snapshot \"cli-application-probe\")]
      (when-not (and (= :valid (:status result)) (= [pid] (mapv :pid (:participants result))))

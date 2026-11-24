@@ -361,15 +361,26 @@
   (let [h (elem row 1)]
    (when (and (:ready h) (= (:pid h) (Process/whereis NAME))
               (= (:environment h) (Process/whereis :Elixir.BeamLisp.Env))) h)))))
+(defn- started-header
+ ;; K1b: the collector starts with the first managed actor, not with the
+ ;; application. Before then the index is empty by construction (only the
+ ;; collector registers), so an inventory read starts it rather than answer
+ ;; :unavailable for a registry that was simply never needed.
+ []
+ (or (header)
+     (when (and (nil? (Process/whereis NAME)) (some? (Process/whereis :Elixir.BeamLisp.Supervisor)))
+      (try (BeamLisp.Env/ensure_sdk_owner_registry!) (catch _ nil))
+      (header))))
 (defn- in-app? [key app]
  (and (tuple? key) (= 3 (erlang/tuple_size key)) (= app (elem key 0))))
 (defn page
  "Bounded app-local ordered scan. Seqlock/registry incarnation changes refuse
   stale cursors. Counts include all registered roles, not all possible producers.
-  Dead owners refuse until monitor cleanup catches up. No callbacks/RPCs run."
+  Dead owners refuse until monitor cleanup catches up. No callbacks/RPCs run,
+  except starting a never-started collector once."
  [app after limit]
  (when-not (and (valid-app? app) (erlang/is_integer limit) (<= 1 limit 1000)) (fail :invalid-inventory-page))
- (let [h (header) [rev total] (if h (revision app) [0 0])]
+ (let [h (started-header) [rev total] (if h (revision app) [0 0])]
   (cond
    (nil? h) {:status :unavailable :kind :owner-registry-unavailable}
    (not (zero? (erlang/rem rev 2))) {:status :stale :kind :inventory-changing}
