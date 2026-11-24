@@ -340,6 +340,17 @@
         k (if (and (string? v) (Regex/match? (Regex/compile! "^[1-9][0-9]?$") v)) (String/to_integer v) 1)]
     (if (and (> k 1) (not= "1" (System/get_env "BL_SDK_SHARD_VERIFY")) (previous-store-current?)) 1 k)))
 
+(defn- link-tree!
+  "`dst` as hard links to `src`'s regular files (a copy where a link cannot go).
+   Unit stores are immutable once written: every writer unlinks before writing."
+  [src dst]
+  (File/mkdir_p! dst)
+  (doseq [name (File/ls! src)]
+    (let [from (Path/join src name) to (Path/join dst name)]
+      (if (File/dir? from)
+        (link-tree! from to)
+        (when-not (= :ok (prim_file/make_link from to)) (File/cp! from to))))))
+
 (defn- merge-unit-stores!
   "One unit store holding the previous store's units and every shard's, a
    shard's unit replacing an older one. The index fields that decide reuse
@@ -357,7 +368,7 @@
                           (doseq [ns (keys (get index "units"))]
                             (let [src (Path/join (Path/join store ".units") ns)
                                   dst (Path/join (Path/join merged ".units") ns)]
-                              (when (File/dir? src) (File/rm_rf! dst) (File/cp_r! src dst))))
+                              (when (File/dir? src) (File/rm_rf! dst) (link-tree! src dst))))
                           (merge acc (get index "units")))
                         {} indexes)
           [_ head] (last indexes)]
