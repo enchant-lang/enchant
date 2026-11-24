@@ -236,17 +236,30 @@
 
 (defn start
   "Boot the global daemon (idempotent by name). Returns its pid. The owner
-   registry must exist before any VM spawns a member, so start it first."
+   registry must exist before any VM spawns a member, so start it first.
+
+   Two callers race the first start in every warm VM: the boot
+   (`vm.session/boot-realm-services!`) and the first request
+   (`bl.daemon/handle-in-vm`), since the listener accepts before the services
+   are up. Checking the name and then starting let both start; the loser's
+   request failed with `server failed to start: {:already_started, <manager>}`
+   (about 1 in 3 fresh VMs once `prepare-drain!` widened the window). The
+   check and the start now run under one lock, and the loser answers the
+   winner's pid. Starting the owner registry stays the first step inside it,
+   whether that start is eager or on demand."
   []
-  (if (nil? (Process/whereis MANAGER))
-    (do (owner/start)
-        ;; What a drain calls is loaded now, before any request: loading an SDK
-        ;; namespace later can need a compile (a checkout VM's dev overlay,
-        ;; U15), and a drain must not depend on one succeeding.
-        ;; If it cannot load here, `drain` loads it itself, as it always did.
-        (try (vmc/prepare-drain!) (catch _ nil))
-        (core/start daemon nil {:name MANAGER}))
-    (Process/whereis MANAGER)))
+  (or (Process/whereis MANAGER)
+      (global/trans (tuple :vm-manager-start (erlang/self))
+        (fn []
+          (or (Process/whereis MANAGER)
+              (do (owner/start)
+                  ;; What a drain calls is loaded now, before any request:
+                  ;; loading an SDK namespace later can need a compile (a
+                  ;; checkout VM's dev overlay, U15), and a drain must not
+                  ;; depend on one succeeding. If it cannot load here, `drain`
+                  ;; loads it itself, as it always did.
+                  (try (vmc/prepare-drain!) (catch _ nil))
+                  (core/start daemon nil {:name MANAGER})))))))
 
 (defn ensure
   "Get-or-spawn the VM for `spec` (keyed by :id). Returns the VM value."
