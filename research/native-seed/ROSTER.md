@@ -250,6 +250,30 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - **Change.** Key each library unit on its own inputs plus the bytes of the compiler and host modules that compiling it actually loads. Codegen modules (`emit`, `lower`, `aot`, …) stay in every key. A host module that changes no unit's compiled output therefore restores every unit. Alternatively, use early cutoff: recompile, compare the emitted bytes, and stop when they are equal. That needs the native front end or a cheap compile, so it is weaker.
 - **Done when.** A `priv/host/delay.bl` comment's SDK restores ≥ 95% of library units, and preparation is ≤ 600 s end to end.
 
+#### Batch 28 (`48aab0e08`): M3 and M4 (M2 follows in batch 29)
+- **m1.py on SDK `bckrfcnx`, against batch 26 (5 cycles, load ~17):**
+
+  | Case | Before | After |
+  |---|---|---|
+  | body/first/test | 351 ms | 291 ms |
+  | macro/first | 355 ms | 320 ms |
+  | lib/first | 1,304 ms | 903 ms (client 119 → 10 ms) |
+  | revert | 1,153 ms | 913 ms |
+  | first-in-fresh-vm/test | 6.25 s | 6.1 s, with cold/test 3.2 → 3.4 s at higher load, so not conclusive |
+- **M4.**
+  - The 15.5 s client stall was a 12 MB shared digest cache that stat-checked 63k rows on every save. It is now a cache per checkout root.
+  - After a reloadable file edit, the generation service re-reads only that file.
+  - The overlay scan reads a file only when its stamp moved.
+  - An install patches the runtime inventory for the replaced unit instead of walking the SDK.
+- **M3.**
+  - The client sends the first request as soon as the socket accepts.
+  - A request that arrives during boot waits on a flag instead of racing the boot's `:global` locks.
+  - The manager and realm locks poll every 2 ms instead of `:global.trans` backoff, which was 147–497 ms.
+  - The remaining surplus over `--cold` is about 1 s of daemon namespaces loaded one by one, plus the per-load inventory.
+- **M2** fixed its key: it had included VM publication counters that tick on ordinary commands. An unchanged realm restores and drops from 285 to 170 ms, with no regression. It lands as batch 29.
+- **T5 ⏳** `loader_path_test` `a-configured-path-shadows-priv` writes into the store SDK (`erofs`). It only passed on check-runtime-hosts' writable image.
+- **E1 ⏳ (new)** The compile of the one edited unit is now the floor of an edit: frame-plan takes 80–150 ms, and `core.bl` ~350 ms for a lib edit. Profile `compile_file`/`eval_string` on real units and cut it.
+
 #### Batch 26 (`d6c48cc33`): T3, F2 item 4 + F3, K2 + init trims
 - **T3.**
   - Restored unit links are now read-only, or a copy is made. A write to a restored path unlinks first, so a write can never reach a store the user owns. That was a real hazard from N4a.
@@ -377,7 +401,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - **Branch change.** The client sends the command as soon as the VM listens (no readiness poll, no reconnect). In the VM a command that arrives during `boot-realm-services!` waits on a per-session flag (`await-boot!`), and the manager start and realm lifecycle use `vm.manager/trans` (2 ms poll) instead of `:global.trans`. The client change alone, on the old VM code, measured worse (median 6.5 s vs 5.5 s, 6 rounds), so the two land together. Expected gain 100–300 ms; the done-when needs the daemon's namespaces off the first command's path (sealed into the boot image, K-style) and M4.
 - **Gate.** `test/bl/vm/manager_trans_test.bl`, `test/bl/vm/manager_start_race_test.bl`; `test/scripts/checkout_transport.py`, `test/scripts/warm_cancel.py`, `test/scripts/realm_stop_after_overlay.py` (strict); then `m1.py --cycles 5 --cold 5` and compare `first-in-fresh-vm/test` with `cold/test` (expected still above).
 
-#### M4 ⏳ A `priv/lib` edit costs its compile, not an SDK inventory · S+ · `priv/std/bl/dev-overlay.bl`, `priv/host/env.bl` (`retain_sdk_runtime!`), `tooling/drop/src/generation.rs`
+#### M4 ✅ A `priv/lib` edit costs its compile, not an SDK inventory · landed batch 28 (`48aab0e08`): client 119 → 10 ms, edit 1,304 → 903 ms; ≤ 400 ms needs a cheaper compile
 - **Why.** A one-function `priv/lib/scene/core.bl` edit costs 1.1–1.5 s, and so does its revert. About 1.1 s is in the VM handler before the command runs: the sampler shows `AOT/sdk_runtime_inventory_uncached!`, `Env/retain_sdk_runtime!` and `install_dev_sdk_unit!`. Before that, the generation service declines at its 150 ms read timeout and the client inventories the tree locally (118–404 ms). Once, after a project edit, that local inventory took 15.5 s.
 - **Change.** Re-derive only the replaced unit's rows in the runtime inventory, not the whole SDK closure. Have the generation service answer a reloadable-source change, or answer "changed" within a few ms, instead of timing out. Find and bound the 15 s local inventory (cold digest cache?).
 - **Done when.** In `m1.py`, `lib/first` and `lib/repeat` ≤ 400 ms median, the client ≤ 20 ms on those rows, and no client row over 1 s across 5 cycles.
