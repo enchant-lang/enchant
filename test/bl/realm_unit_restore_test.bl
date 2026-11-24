@@ -1,0 +1,161 @@
+; M2: a new realm restores unchanged project units instead of recompiling them,
+; and recompiles exactly what a fresh compile would change. Each `load` below
+; is a new realm env on the same realm key, as after a retirement.
+(ns realm-unit-restore-test)
+
+(defn- trace-compiles
+  "Run `action` and answer [value files]: the sources the loader compiled,
+   through either compiler entry (`AOT/compile_source` or `Compiler/eval_string`)."
+  [action]
+  (let [parent (erlang/self)
+        drain (fn drain [files]
+                (receive
+                  [:trace _ :call mfa]
+                  (let [args (elem mfa 2)
+                        file (if (= :compile_source (elem mfa 1))
+                               (Keyword/get (second args) :file)
+                               (nth args 2))]
+                    (drain (if (and (string? file) (String/contains? file "/m2/")) (conj files (Path/basename file)) files)))
+                  :finish (erlang/send parent [:compiled files])
+                  _ (drain files)))
+        tracer (erlang/spawn (fn [] (drain #{})))
+        pid (Process/whereis :Elixir.BeamLisp.Loader.Server)
+        patterns [(tuple :Elixir.BeamLisp.AOT :compile_source 2)
+                  (tuple :Elixir.BeamLisp.Compiler :eval_string 3)]]
+    (doseq [p patterns] (erlang/trace_pattern p true (list :local)))
+    (erlang/trace :all true (list :call (tuple :tracer tracer)))
+    (let [value (try (action)
+                  (finally
+                    (erlang/trace :all false (list :call))
+                    (doseq [p patterns] (erlang/trace_pattern p false (list :local)))
+                    (erlang/trace_delivered :all)
+                    (receive [:trace_delivered _ _] nil (after 5000 (throw :trace-timeout)))
+                    (erlang/send tracer :finish)))]
+      [value (receive [:compiled files] files (after 5000 :no-files))])))
+
+(def ^:private sources
+  {"m2/guard.bl" "(ns m2.guard)\n(defmacro mark [] \"G0\")\n(defmacro within? [x lo hi] `(let [v# ~x] (and (int? v#) (<= ~lo v#) (< v# ~hi))))\n"
+   "m2/util.bl" "(ns m2.util)\n(defn fail [m d] (throw (ex-info m d)))\n"
+   "m2/plan.bl" "(ns m2.plan (:require [m2.util :as u] [m2.guard :as guard]))\n(defn sel [x] (when-not (guard/within? x 0 10) (u/fail \"P0\" {})) x)\n(defn mark [] (guard/mark))\n"
+   "m2/film.bl" "(ns m2.film (:require [m2.guard :as guard]))\n(def duration 12)\n(defn mark [] (guard/mark))\n"
+   "m2/impl.bl" "(ns m2.impl)\n(defn mark [] (m2.guard/mark))\n"
+   "m2/deep.bl" "(ns m2.deep)\n(defn label [] \"D0\")\n"
+   "m2/mid.bl" "(ns m2.mid (:require [m2.deep :as deep]))\n(defn label [] (deep/label))\n"
+   "m2/gen.bl" "(ns m2.gen (:require [m2.mid :as mid]))\n(defmacro label [] (mid/label))\n"
+   "m2/use.bl" "(ns m2.use (:require [m2.gen :as gen]))\n(defn label [] (gen/label))\n"
+   "m2/top.bl" "(ns m2.top)\n(def hits (atom 0))\n(swap! hits inc)\n(defn hit-count [] @hits)\n"})
+
+(defn- call [ns f & args]
+  (BeamLisp.Ns.Rt/invoke (BeamLisp.Env/fetch! ns f) (Enum/to_list args)))
+
+(defn- outcome [f]
+  (try (f) (catch e (ex-message e))))
+
+(defn- realm-env [key opts]
+  (let [e (if opts (BeamLisp.Env/fork :global opts) (BeamLisp.Env/fork :global))]
+    (BeamLisp.Env/with_env e
+      (fn []
+        (BeamLisp.Env/put_key (tuple :realm_key) key)
+        (BeamLisp.Env/put_key (tuple :realm_decl) {:shadow [] :uses {}})))
+    e))
+
+(defn- open-realm
+  "A fresh realm env on `key`: load `names`, then answer [results compiled ms]."
+  ([root key names] (open-realm root key names nil nil))
+  ([root key names opts before]
+   (let [e (realm-env key opts)]
+     (try
+       (BeamLisp.Env/with_env e
+         (fn []
+           (BeamLisp.Loader/with_search_dir root
+             (fn []
+               (when before (before))
+               (let [t0 (System/monotonic_time :microsecond)
+                     has? (fn [n] (some #{n} names))
+                     [results compiled]
+                     (trace-compiles
+                       (fn []
+                         (doseq [n names] (BeamLisp.Loader/ensure_loaded n))
+                         ;; Requires load on first use: call inside the window.
+                         {:plan-sel (when (has? "m2.plan") (outcome #(call "m2.plan" "sel" 99)))
+                          :plan (when (has? "m2.plan") (call "m2.plan" "mark"))
+                          :film (when (has? "m2.film") (call "m2.film" "mark"))
+                          :impl (when (has? "m2.impl") (call "m2.impl" "mark"))
+                          :use (when (has? "m2.use") (call "m2.use" "label"))
+                          :top (when (has? "m2.top") (call "m2.top" "hit-count"))}))
+                     ms (/ (- (System/monotonic_time :microsecond) t0) 1000.0)]
+                 [results compiled ms])))))
+       (catch error
+         (println :M2-LOAD-ERROR names (pr-str error) (pr-str __STACKTRACE__))
+         (erlang/raise __EXCEPTION_KIND__ error __STACKTRACE__))
+       (finally (BeamLisp.Env/destroy e))))))
+
+(defn- edit! [root rel from to]
+  (let [path (Path/join root rel) text (File/read! path)]
+    (when-not (String/contains? text from) (throw (ex-info (str rel " lacks " from) {})))
+    (File/write! path (String/replace text from to))))
+
+(def ^:private every-ns ["m2.plan" "m2.film" "m2.impl" "m2.use" "m2.top"])
+
+(deftest unchanged-units-restore-and-edits-recompile-exactly-their-dependents
+  (let [root (Path/join (System/tmp_dir!) (str "realm-unit-" (erlang/unique_integer (list :positive))))
+        key (str "Unit" (erlang/unique_integer (list :positive)))
+        every #{"guard.bl" "util.bl" "plan.bl" "film.bl" "impl.bl" "deep.bl" "mid.bl" "gen.bl" "use.bl" "top.bl"}]
+    (doseq [[rel text] sources]
+      (File/mkdir_p! (Path/dirname (Path/join root rel)))
+      (File/write! (Path/join root rel) text))
+    (try
+      (let [[r1 c1 ms1] (open-realm root key every-ns)
+            [r2 c2 ms2] (open-realm root key every-ns)]
+        (println "M2-TIMING first" ms1 "restored" ms2)
+        (is (= every c1) "the first realm compiles every unit")
+        (is (= {:plan-sel "P0" :plan "G0" :film "G0" :impl "G0" :use "D0" :top 1} r1))
+        (is (= #{"top.bl"} c2) "a new realm restores every unit but the one with a top-level effect")
+        (is (= r1 r2) "restored units behave as compiled ones; the effect ran again"))
+
+      (edit! root "m2/plan.bl" "\"P0\"" "\"P1\"")
+      (let [[r c ms] (open-realm root key every-ns)]
+        (println "M2-TIMING body-edit" ms)
+        (is (= #{"plan.bl" "top.bl"} c) "a body edit recompiles that unit alone")
+        (is (= "P1" (:plan-sel r))))
+
+      (edit! root "m2/guard.bl" "\"G0\"" "\"G1\"")
+      (let [[r c ms] (open-realm root key every-ns)]
+        (println "M2-TIMING macro-edit" ms)
+        (is (= #{"guard.bl" "plan.bl" "film.bl" "impl.bl" "top.bl"} c)
+            "a macro edit recompiles the provider and its expanding dependents, implicit ones included")
+        (is (= ["G1" "G1" "G1"] [(:plan r) (:film r) (:impl r)]) "every dependent shows the new expansion"))
+
+      (edit! root "m2/util.bl" "(ex-info m d)" "(ex-info (str \"U:\" m) d)")
+      (let [[r c _] (open-realm root key every-ns)]
+        (is (= #{"util.bl" "top.bl"} c) "a callee's body edit leaves its callers' bytes alone")
+        (is (= "U:P1" (:plan-sel r))))
+
+      (edit! root "m2/deep.bl" "\"D0\"" "\"D1\"")
+      (let [[r c _] (open-realm root key every-ns)]
+        (is (= #{"deep.bl" "gen.bl" "use.bl" "top.bl"} c)
+            "a helper two requires below a macro is keyed by its body for the expanding unit")
+        (is (= "D1" (:use r)) "the expansion reads the new helper"))
+
+      (let [[r c _] (open-realm root key ["m2.film"] nil
+                      (fn [] (BeamLisp.Loader/ensure_loaded "m2.guard")
+                             (BeamLisp.Compiler/eval_string "(ns m2.guard) (defmacro mark [] \"REPL\")"
+                               (BeamLisp.Compiler/new_env "user") "repl")))]
+        (is (contains? c "film.bl") "a provider redefined in this realm compiles its dependent fresh")
+        (is (= "REPL" (:film r))))
+
+      (let [[r c _] (open-realm root key ["m2.film"] (list (tuple :caps (list :Elixir.String))) nil)]
+        (is (= #{"film.bl" "guard.bl"} c) "another capability set is another key")
+        (is (= "G1" (:film r))))
+
+      (let [previous (System/get_env "BL_REALM_UNIT_RESTORE")]
+        (System/put_env "BL_REALM_UNIT_RESTORE" "0")
+        (try
+          (let [[_ c _] (open-realm root key ["m2.film"])]
+            (is (= #{"film.bl" "guard.bl"} c) "BL_REALM_UNIT_RESTORE=0 compiles from source")
+            (let [[_ _ ms] (open-realm root key every-ns)]
+              (println "M2-TIMING restore-off" ms)))
+          (finally
+            (if previous (System/put_env "BL_REALM_UNIT_RESTORE" previous)
+              (System/delete_env "BL_REALM_UNIT_RESTORE")))))
+      (finally (File/rm_rf! root)))))
