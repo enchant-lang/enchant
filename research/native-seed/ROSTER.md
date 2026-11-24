@@ -252,10 +252,22 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - **Change.** Key each library unit on its own inputs plus the bytes of the compiler and host modules that compiling it actually loads. Codegen modules (`emit`, `lower`, `aot`, …) stay in every key. A host module that changes no unit's compiled output therefore restores every unit. Alternatively, use early cutoff: recompile, compare the emitted bytes, and stop when they are equal. That needs the native front end or a cheap compile, so it is weaker.
 - **Done when.** A `priv/host/delay.bl` comment's SDK restores ≥ 95% of library units, and preparation is ≤ 600 s end to end.
 
-#### K1b ⏳ Cold start below 1.2 s · S+ · `priv/host/env.bl`, owner registry
+#### K1b 🧪 Cold start below 1.2 s · S+ · `priv/host/env.bl`, owner registry · branch `lane/cold2`
 - After K1, the remaining app start (~1.3 s) is code running, not values recomputed: namespace loads and initializers (~1/3 of samples), the owner registry leasing the whole SDK runtime closure (~15%), native stub compiles (~3%). See the journal section "K1: sealed boot state, and what a seal cannot reach" and `research/checked-tiles/evidence/cold-start-k1.json`.
 - **Change.** Start the owner registry and the SDK lease lazily, so the first actor pays and a plain `bl run` does not. Load `bl.cli`'s namespaces on demand (~300 ms).
 - **Done when.** Cold `$SDK/bin/bl --cold run` of `(println 1)` ≤ 1.2 s median, paired with the batch-21 SDK.
+- **Branch result (scratch store image, not an SDK).** 2,159 → 1,170 ms median over 6 alternating pairs against the batch-22 SDK at load 18–22 (`research/checked-tiles/evidence/cold-start-k1b.json`); app start 1,405 → 552 ms.
+  - No owner registry and no SDK lease at app start. The first managed actor starts the collector (`Env/ensure_sdk_owner_registry!`, fresh process, same supervisor); the lease comes from its existing on-demand callers, plus `sdk_runtime_retained_modules?` for a native adapter.
+  - The first lease batch-loads its closure and plans the requires of pre-lease namespaces. Without that a cold managed-app run was +6.7 s; with it, level with the eager lease.
+  - Pre-lease image loads publish the sealed image's unit rows instead of going through the per-user AOT cache. On a `/nix/store` root, `sdk-code.term`, the image-table path and the preinit directory stamps are read once per VM.
+  - `package_module_identity` loads what it fingerprints; the eager lease used to have loaded it (`realm_package_test` caught this).
+  - Left: erts/Elixir/boot.exs 290 ms (the `elixir -e :ok` floor is 190), `BeamLisp.init` 550, the rest about 300.
+- **Gate.** Build the SDK, then `scripts/sealed-boot/measure $OLD_SDK 4 OLD=$OLD_SDK NEW=$NEW_SDK`, expecting ≤ 1.2 s. Run in one `bl test`:
+  - the ten files;
+  - `host_application`, `host_supervisor`, `host_loader_server`, `cli_application_startup` and `native_owner_registry_start`: the collector absent at start and started on demand;
+  - `proc/owner_registry`, `proc/inventory`, `proc_framework` and `sdk_loading_batch`;
+  - `aot_implicit_dependencies`, which fails on a scratch image only because its child runs the SDK's own `bin/bl`;
+  - the seed/aot suites. Four of their files fail on a scratch cwd for the old SDK as well.
 
 #### T3 ⏳ `codegen_provenance_test` writes into the store SDK · H
 - (Fixed in batch 22: the U15 scenario now stops its probe VM.)
