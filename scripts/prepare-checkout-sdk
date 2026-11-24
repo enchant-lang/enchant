@@ -22,6 +22,44 @@ emit_selection() {
   if "$selection"; then printf '%s %s\n' "$1" "$fingerprint"
   else printf '%s\n' "$1"; fi
 }
+# K2: a settled tree selects its SDK without Python. The checkout client's
+# engine inventory (`drop-launcher --engine-inputs`, the fingerprint every warm
+# request already sends as BL_CHECKOUT_SDK_INPUTS) reuses its digest cache, so
+# an unchanged tree costs a stat walk instead of three Python walks. Only a
+# fingerprint whose exact retained SDK this script verified before is taken
+# here: `selection.v1` records the SDK, coordinator and immutable engine source
+# that verify_selection and the frozen-bytes check accepted, and every symlink
+# must still resolve to those store paths, with current-sdk already naming the
+# SDK. Anything else (a new fingerprint, a moved link, an unrecorded or older
+# directory, BL_CHECKOUT_DIGEST_CACHE=0, no checkout client) takes the full
+# path below, which re-verifies with Python and writes the record again.
+verified_record() {
+  printf 'v1 %s %s %s %s\n' "$fingerprint" "$1" "$2" "$3"
+}
+record_verified_selection() {
+  local record="$root/.bl/sdks/$fingerprint/selection.v1"
+  verified_record "$1" "$2" "$3" >"$record.$$" 2>/dev/null && mv -f "$record.$$" "$record" 2>/dev/null || true
+}
+settled_selection() {
+  local client directory recorded output coordinator source current
+  [ "${BL_CHECKOUT_DIGEST_CACHE:-1}" != 0 ] || return 1
+  client=${BL_CHECKOUT_PLATFORM:-}/bin/drop-launcher
+  [ -n "${BL_CHECKOUT_PLATFORM:-}" ] && [ -x "$client" ] || return 1
+  fingerprint=$("$client" --engine-inputs "$root" 2>/dev/null) || return 1
+  [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]] || return 1
+  directory="$root/.bl/sdks/$fingerprint"
+  [ -f "$directory/selection.v1" ] || return 1
+  IFS= read -r recorded <"$directory/selection.v1" || return 1
+  output=$(readlink -f "$directory/result-sdk") || return 1
+  coordinator=$(readlink -f "$output/preparation-coordinator") || return 1
+  source=$(readlink -f "$directory/source-engine") || return 1
+  current=$(readlink -f "$root/.bl/sdks/current-sdk") || return 1
+  [ "$recorded" = "$(verified_record "$output" "$coordinator" "$source")" ] || return 1
+  [ "$current" = "$output" ] && [ -f "$output/artifact.json" ] || return 1
+  emit_selection "$output"
+}
+if "$selection" && settled_selection; then exit 0; fi
+fingerprint=
 for prerequisite in nix-build systemd-run python3 flock; do
   command -v "$prerequisite" >/dev/null || { echo "bl: required preparation tool missing: $prerequisite" >&2; exit 69; }
 done
@@ -256,6 +294,7 @@ if [ -f "$retained/artifact.json" ]; then
     echo 'bl: retained SDK engine bytes differ from current inputs' >&2
     exit 69
   fi
+  record_verified_selection "$output" "$coordinator" "$source"
   ln -sfn "$output" "$root/.bl/sdks/current-sdk.tmp"
   mv -T "$root/.bl/sdks/current-sdk.tmp" "$root/.bl/sdks/current-sdk"
   prune_preparations
@@ -422,6 +461,7 @@ ln -sfn "$engine" "$directory/source-engine.tmp"
 mv -T "$directory/source-engine.tmp" "$directory/source-engine"
 ln -sfn "$output" "$directory/result-sdk.tmp"
 mv -T "$directory/result-sdk.tmp" "$retained"
+record_verified_selection "$output" "$(readlink -f "$output/preparation-coordinator")" "$engine"
 ln -sfn "$output" "$root/.bl/sdks/current-sdk.tmp"
 mv -T "$root/.bl/sdks/current-sdk.tmp" "$root/.bl/sdks/current-sdk"
 prune_preparations

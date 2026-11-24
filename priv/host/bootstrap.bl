@@ -176,9 +176,15 @@
    Parsing that captured snapshot prevents a concurrent writer from giving the
    cache a value derived from different bytes."
   [path]
-  (let [input (File/read path)
-        key (tup (erlang/element 2 (erlang/fun_info (fn [] nil) :module)) :manifest-parse)
-        cached (persistent_term/get key nil)]
+  (let [module (erlang/element 2 (erlang/fun_info (fn [] nil) :module))
+        ;; K2: a manifest under /nix/store/ cannot change, so its parse stands
+        ;; for the VM, one entry per such path, without re-reading the file
+        ;; (18 reads of two manifests in a cold start). Other paths keep one
+        ;; entry and the byte comparison.
+        store (String/starts_with? path "/nix/store/")
+        key (if store (tup module :manifest-parse path) (tup module :manifest-parse))
+        cached (persistent_term/get key nil)
+        input (if (and store cached) (tup :ok (erlang/element 2 cached)) (File/read path))]
     (if (and cached (erlang/== path (erlang/element 1 cached))
                    (erlang/== :ok (erlang/element 1 input))
                    (erlang/== (erlang/element 2 input) (erlang/element 2 cached)))
