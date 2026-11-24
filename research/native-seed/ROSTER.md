@@ -43,7 +43,7 @@ build pipeline. The native compiler comes after a go/no-go measurement (N0).
 | ✅ | **F1** One exec to the client (batch 21: 19.4 → 11.5 ms; gate 12 ms at load 21) | Warm `./bin/bl run` median ≤ 12 ms over 15 runs, load recorded |
 | 🔨 | **F2** One request, one process (items 1–3 landed batch 21; item 4 open) | VM handler ≤ 3 ms; client total ≤ 6 ms; ten files and `checkout_transport.py` pass |
 | ✅ | **U15** std/lib edits reload in the warm VM (batch 21: edit seen in 1.0 s, revert 0.86 s) | A `priv/lib` edit is seen by the next `bl test` in < 10 s with no SDK |
-| ✅/🔨 | **K1** Sealed boot state (batch 21: −27%, 3.4 → 2.6 s paired; ≤ 1.2 s needs K1b) | Cold `$SDK/bin/bl --cold run` ≤ 1.2 s median |
+| ✅ | **K1 + K1b** Sealed boot state, lazy owner registry and lease (batch 25: cold `bl run` ~1.19 s median, was 2.06–2.44 s) | Cold `$SDK/bin/bl --cold run` ≤ 1.2 s median |
 | 3 | **F3** Keep-alive client, compact request | Warm unchanged request ≤ 2 ms on a quiet machine |
 | 3 | **K2** The checkout's cold path | `./bin/bl --cold` adds ≤ 100 ms over `$SDK/bin/bl --cold` |
 | 3 | **M1** A real edit benchmark | Enchant edit-to-result, cold and warm, recorded |
@@ -247,12 +247,30 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - Going back to the base reuses the SDK in 0 s.
   - Two layered preparations in a row, across a rotation, both succeeded.
 
-#### N4c ⏳ Per-unit compiler key for library units · S+ · `priv/build/unit-store.bl`, `priv/host/aot.bl`
+#### N4c ✅ Per-unit compiler key for library units · landed batch 25 (`1023d1519`)
 - **Why.** After N4b, a `priv/host` edit costs ~50 s of compiler work and ~1,000 s of library recompiling, because every library unit's key includes the whole compiler key.
 - **Change.** Key each library unit on its own inputs plus the bytes of the compiler and host modules that compiling it actually loads. Codegen modules (`emit`, `lower`, `aot`, …) stay in every key. A host module that changes no unit's compiled output therefore restores every unit. Alternatively, use early cutoff: recompile, compare the emitted bytes, and stop when they are equal. That needs the native front end or a cheap compile, so it is weaker.
 - **Done when.** A `priv/host/delay.bl` comment's SDK restores ≥ 95% of library units, and preparation is ≤ 600 s end to end.
 
-#### K1b 🧪 Cold start below 1.2 s · S+ · `priv/host/env.bl`, owner registry · branch `lane/cold2`
+#### Batch 25 (`1023d1519`): K1b, N4c, and the fresh-VM start and stop races
+- **dupstart.**
+  - A fresh VM's boot and its first request both started `vm-manager`, and the check-then-start wasn't atomic. It now runs under a `:global` lock, and the loser gets the winner's pid. This removes `server failed to start: {:already_started …}`, which hit 1 in 3 fresh VMs on main and every other one with K1b.
+  - `realm stop` now waits, up to 30 s, until the VM no longer answers and its process or socket is gone. Before, the next run reached the stopping VM in 4–7 of 10 cycles.
+  - `test/scripts/realm_stop_after_overlay.py` is strict by default and passes 10 of 10 fresh cycles. `test/bl/vm/manager_start_race_test.bl` races 8 first starts.
+- **K1b.**
+  - The owner registry and the SDK lease start with the first managed actor, not at app start.
+  - A namespace loaded before the lease takes the sealed image's unit rows.
+  - `sdk-code.term` is read once per VM on a store root.
+  - Cold `bl run` of `(println 1)`: 1123–1261 ms (median ~1.19 s) at load ~5, against 2.06–2.44 s before.
+  - Next lever: `BeamLisp.init` (rt, core, reader, compiler, multi, sugar), ~550 ms.
+- **N4c.**
+  - The card's premise was wrong. A `priv/host` comment does not change the compiler key. It changes the exact runtime image key, which hashes every floor BEAM, and the edited BEAM differs only in its `bl_source_hash` attribute.
+  - The `library-runtime-key` is that key with each floor module's digest taken without `bl_source_hash`. A unit is reused on it unless its compile read a whole-floor identity; the four functions that return one are counted.
+  - Gate: a `priv/host/delay.bl` comment restored 668 of 668 units (`"reuse":"library-runtime"`). Unit work took 21.6 s, with `verify-restored` 1.8 s and `copy-restored` 0.8 s, so N4a holds in the VM. The SDK took 611 s end to end, against 1175 s before.
+  - The rest is the fixed pipeline: Nix, P/B, and the library's fixed phases. That is N4d.
+- **Pre-existing failures on main's SDK, now T3.** `sdk_loading_batch` (`sealed-dependency-admission-…`), `aot_implicit_dependencies` (a missing `Implicit.Consumer.beam` in the package ebin), and `build_pipeline_image` (`eacces` writing a restored-unit path, which is likely N4a's hard links on a 0444 file).
+
+#### K1b ✅ Cold start below 1.2 s · landed batch 25 (`1023d1519`): ~1.19 s median on SDK rvjj1lps
 - After K1, the remaining app start (~1.3 s) is code running, not values recomputed: namespace loads and initializers (~1/3 of samples), the owner registry leasing the whole SDK runtime closure (~15%), native stub compiles (~3%). See the journal section "K1: sealed boot state, and what a seal cannot reach" and `research/checked-tiles/evidence/cold-start-k1.json`.
 - **Change.** Start the owner registry and the SDK lease lazily, so the first actor pays and a plain `bl run` does not. Load `bl.cli`'s namespaces on demand (~300 ms).
 - **Done when.** Cold `$SDK/bin/bl --cold run` of `(println 1)` ≤ 1.2 s median, paired with the batch-21 SDK.
@@ -269,7 +287,12 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - `aot_implicit_dependencies`, which fails on a scratch image only because its child runs the SDK's own `bin/bl`;
   - the seed/aot suites. Four of their files fail on a scratch cwd for the old SDK as well.
 
-#### T3 ⏳ `codegen_provenance_test` writes into the store SDK · H
+#### T3 ⏳ Tests that fail on main's SDK · H
+- `build_pipeline_image_test` `restored-units-feed-byte-identical-serial-and-parallel-images`: `eacces` writing `/tmp/build-image-*/parallel-units/…beam`. Likely a hard-linked read-only restored file (N4a) that is written in place.
+- `aot_implicit_dependencies_test`: `Implicit.Consumer.beam` is missing from the package ebin.
+- `sdk_loading_batch_test` `sealed-dependency-admission-preserves-deferred-initializers-and-converges`: intermittent.
+- `scripts/tests/test_test_prerequisites.py`: 5 preflight failures.
+- `codegen_provenance_test`:
 - (Fixed in batch 22: the U15 scenario now stops its probe VM.)
 - Two tests error with `erofs` writing `.../lib/beam_lisp-0.1.0/priv/codegen.sources` on any store SDK (same on main's `2nvkh1n5` and batch 21's `0nzlyz01`). Point them at a scratch copy.
 
