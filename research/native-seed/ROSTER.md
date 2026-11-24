@@ -51,7 +51,7 @@ build pipeline. The native compiler comes after a go/no-go measurement (N0).
 | ✅ | **N4a** Restored units by reference (batch 23) | Std-edit SDK unit work 40 s → < 8 s |
 | ✅ | **N4b** Compiler-edit bootstrap (batch 23: P/B/C for a host edit ~1,500 s → ~50 s; C elided) | P boots the previous qualified compiler; C skipped when B = P; a `priv/host` edit's SDK ≤ 15 min |
 | 5 | **N4d** Dev SDK outside QEMU | Beams path-normalized so they match the store; a `priv/host` edit runnable in ≤ 3 min |
-| 🧪 | **N0** Native go/no-go (branch `lane/n0`: **no-go**, native 1.86× *slower* at the median unit) | Per-unit native vs BEAM front-end time, `aot.bl` compiled into the image; N3, N4c, N5 and C3 go ahead only at ≥ 2× |
+| ✅ | **N0** Native go/no-go (landed `d7a9487d1`: **no-go**, native 1.86× *slower* at the median unit) | Per-unit native vs BEAM front-end time, `aot.bl` compiled into the image; N3, N4c, N5 and C3 go ahead only at ≥ 2× |
 | — | W4 | As written below |
 | — | C2 | Dropped: its prototype measured 0.4%, within noise |
 
@@ -568,7 +568,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
 ### N — the native compiler on the default path
 
-#### N0 🧪 Native go/no-go · branch `lane/n0` · measurement only · **no-go**
+#### N0 ✅ Native go/no-go · landed `d7a9487d1` · measurement only · **no-go**: N3, N5 and C3 stay parked
 - **Measured (2026-11-24, SDK `8as75r…`, all 668 units).** Same units, same SDK, one process each side. Native ran 4 times and the BEAM 3, in pairs under the same load (1-min load 4.5–10).
   - **Native** compiles the front end into the image. `front-end/n0/compose.py` makes `lower-core`, `lower`, the hook, `host.record` and `host.aot` (hooked `aot.bl` + `stage.bl` + a timed driver) into units. `qualify.bl candidate --additions --codegen` qualifies the result 13/13.
   - **BEAM** runs `prepare_unit` up to `lower/module->core`. The generated-module beam compile inside `prepare_unit` is timed and removed.
