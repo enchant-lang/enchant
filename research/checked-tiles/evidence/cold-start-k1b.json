@@ -1,0 +1,57 @@
+{
+ "card": "K1b cold start below 1.2 s",
+ "date": "2026-11-24",
+ "branch": "lane/cold2",
+ "sdk": "/nix/store/l731wr3hq0dddirc59yz97gz9dzymxfl-beam-lisp-sdk-selection (batch 22 main SDK)",
+ "method": "scripts/sealed-boot/measure: alternating paired cold `bl run` of (println 1) through the SDK's own boot path (boot-at.exs). O = the SDK itself; C = scratch copy, unchanged hosts (control); L = scratch copy with the branch's edited hosts (application.bl, env.bl, aot.bl, package_authority.bl) compiled by the SDK's compiler, restamped, image-metadata resealed (scripts/sealed-boot/build-image ... image-metadata). Not an SDK: priv/std/proc/owner-registry.bl is the SDK's own in L.",
+ "baseline_profile": {
+  "how": "call-timeline tracer (return_trace on chosen host functions) + deep-stack sampler, 1 run each on the SDK",
+  "app_start_traced_ms": 1452,
+  "BeamLisp.init": 558,
+  "owner registry start-child! -> prepare_sdk_class! -> retain_sdk_runtime!": 798,
+  "  bootstrap_sdk_native_hosts!": 336,
+  "  sdk_runtime_inventory (closure walk)": 454,
+  "later lease refreshes at vm.native and bl.cli loads": 200,
+  "experiment": "same SDK, app start by hand without the owner registry child: 2,372 -> 1,518 / 2,408 -> 1,592 / 2,118 -> 1,342 ms paired (load 15-18)"
+ },
+ "changes": [
+  "Application start no longer loads or starts proc.owner-registry; Env/ensure_sdk_owner_registry! loads and starts it (fresh process, same supervisor) for the first managed actor; proc.owner-registry/page starts a never-started collector instead of answering :unavailable",
+  "No SDK lease at app start. The lease is established by its existing on-demand callers (ensure_sdk_runtime! from generation prepare/ward/build/execution, prepare_sdk_class!, adopt_*), and sdk_runtime_retained_modules? establishes a never-taken lease for a native adapter (outside Source, outside the Env owner, outside held publication/capacity fences, in a fresh process)",
+  "First lease after many pre-lease loads: complete_image_sdk_closure! walks metadata, then loads the selected members in one code:ensure_modules_loaded batch; the first loader batch after the lease also plans the requires of namespaces loaded before it (one lease extension instead of ~12)",
+  "Pre-lease image namespace loads publish the sealed image's complete-unit rows (artifact sha256 vs inventory row, Source digest, complete-unit check, loaded MD5) instead of recovering them through the per-user AOT cache",
+  "Once per VM on a root that resolves into /nix/store: sdk-code.term bytes (3.5 MB, ~35 reads), the sealed image table path, the preinit floor's seed/host directory stamps",
+  "package_module_identity loads a compiler dependency from the code path before fingerprinting it (the eager lease's closure walk used to have loaded it)"
+ ],
+ "measured": {
+  "final_load": "17.5-22.0 (02:28-02:29)",
+  "cold_ms": {"O": [2640, 2146, 2172, 2120, 2194, 2058], "C": [2112, 2104, 2135, 2217, 2168, 2165], "L": [1171, 1150, 1148, 1186, 1257, 1170]},
+  "cold_median_ms": {"O": 2159, "C": 2150, "L": 1170},
+  "phase_medians_ms": {
+   "O": {"beam_lisp_app_start": 1405, "vm.native_build_all": 80, "bl.cli_load": 222, "run": 61},
+   "L": {"beam_lisp_app_start": 552, "vm.native_build_all": 54, "bl.cli_load": 80, "run": 72}
+  },
+  "earlier_round_load_15.7": {"C": [2109, 2160, 2038, 2090, 2050], "L": [1160, 1204, 1138, 1127, 1156], "C_median": 2090, "L_median": 1156},
+  "first_actor_path": {
+   "probe": "bl run of a file that prepares a generation, snapshots its inventory, starts a managed defserver and pings it",
+   "C_ms": [7770, 9080, 7310], "L_after_batching_ms": [7189, 7333], "L_without_batching_ms": [14306, 14507],
+   "note": "without the batched closure load and deferred-require planning the first lease cost +6.7 s; with them it is level with the eager lease"
+  },
+  "plain_actor_datom_probe_ms": {"C": [6593, 6493, 6658], "L": [3306, 5330, 5365]},
+  "summary": "cold bl run 2,159 -> 1,170 ms median (-46%) against the unchanged SDK, 6 alternating pairs at load ~18-22; the :beam_lisp app start 1,405 -> 552 ms"
+ },
+ "what_remains_ms": {
+  "erts + elixir CLI + boot.exs (floor `elixir -e :ok` = 190)": 290,
+  "dependency apps": 75,
+  "BeamLisp.init (rt, core, reader, compiler, lower, anf, multi, sugar loads and initializers)": 550,
+  "vm.native load + build-all": 54,
+  "bl.cli + bl.util": 80,
+  "run (bl.env, vm.osenv, loading-policy, compile + eval)": 72,
+  "halt": 30
+ },
+ "tests_on_scratch_images": {
+  "how": "cold `bl test` through boot-at.exs on L and C, cwd a scratch copy of test/ and priv/host (no env.bl)",
+  "ten_files_L9": "realm_package fixed by the package_authority change (112 passed); the other nine passed on L7/L8",
+  "seed_and_aot_74_files": "L8: 69 passed, 5 failed; C: 70 passed, 4 failed. The 4 shared failures are the scratch cwd (no build/, no research/, no reader source). The extra L failure, aot_implicit_dependencies, is the harness: its child runs the SDK's own bin/bl, whose Env/AOT md5 differ from the overlaid hosts",
+  "owner/host tests": "native_owner_registry_start, host_application (except a surface check: the harness compiles application.bl without :behaviour), host_supervisor, host_loader_server, cli_application_startup pass on L7; the four that encode the new start fail on C, as they should"
+ }
+}

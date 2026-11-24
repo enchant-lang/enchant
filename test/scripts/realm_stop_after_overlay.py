@@ -6,15 +6,26 @@ VM running (`./bin/bl realm stop` after preparing):
 
     python3 test/scripts/realm_stop_after_overlay.py
 
-Two phases, each in a VM of its own:
+Three phases, each in VMs of their own:
 
+0. Fresh starts: 10 cycles of `bl realm stop`, then two `bl run`. A fresh VM's
+   boot and its first request both start `vm-manager`; neither run may print
+   `server failed to start` (batch 22: `{:already_started, <vm-manager>}` in
+   about 1 of 3 fresh VMs, from a check-then-start in `vm.manager/start`).
+   The first run after the stop must not reach the stopping VM ("retirement
+   pending"; most cycles of a checkout-root VM before `vm.client/stop` waited
+   for the VM to retire). `--lenient-stop` reports that as a WARN instead.
+   Each cycle's stop of the VM the previous cycle started is checked like
+   phases 1 and 2 (K1b: after the lazy app start, every other fresh VM lost
+   the `vm-manager` race).
 1. Plain: 23 warm `bl run` of `(println 1)`, then `bl realm stop`.
 2. Overlay (U15): an edit to `priv/lib/data/bounded-cache.bl` is present when
    the VM starts, so the warm VM compiles it over the SDK; a few runs, then
    `bl realm stop`. The edit is reverted in `finally`.
 
-Pass (exit 0): in both phases the stop exits 0, prints neither "retirement
-pending" nor "retirement failed", and the VM's OS process is gone within 15 s.
+Pass (exit 0): every stop exits 0, prints neither "retirement pending" nor
+"retirement failed", the run right after a stop starts a fresh VM rather than
+reaching the stopping one, and the VM's OS process is gone within 15 s.
 
 Batch 21 failed phase 2: the first stop loaded `reload.generation` inside the
 VM manager, that load was refused (`:sdk_runtime_loaded_code_changed`) and
@@ -88,10 +99,44 @@ def main():
         sys.exit(f"a VM already serves {ROOT}; run `./bin/bl realm stop` first")
     original = EDITED.read_bytes()
     failures = []
+    # A run that reaches a VM `realm stop` answered for but that still serves
+    # fails the gate. `--lenient-stop` prints those as warnings instead, for
+    # checking the other phases on an SDK from before `vm.client/stop` waited.
+    strict_stop = "--lenient-stop" not in sys.argv[1:]
+    warnings = []
     with tempfile.TemporaryDirectory(prefix="bl-realm-stop-") as scratch:
         program = Path(scratch) / "one.bl"
         program.write_text("(println 1)\n")
         try:
+            for cycle in range(10):
+                before = checkout_vms()
+                # K1b: each cycle's stop must also retire the VM the previous
+                # cycle's runs started (exit 0, no pending, process gone).
+                if before:
+                    failures += stop_and_check(f"fresh: cycle {cycle}")
+                else:
+                    bl("realm", "stop")
+                runs = [bl("run", str(program))]
+                # A stop that answers while its VM still serves sends the next
+                # run into a draining VM. Reported on its own; that cycle's
+                # fresh-start check runs once the old VM is gone.
+                if "retirement pending" in runs[0].stdout + runs[0].stderr:
+                    warnings.append(f"stop-then-run: cycle {cycle}: the run after realm stop reached the stopping VM")
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline and any(pid in checkout_vms() for pid in before):
+                        time.sleep(0.2)
+                    runs = [bl("run", str(program))]
+                runs.append(bl("run", str(program)))
+                for r in runs:
+                    output = r.stdout + r.stderr
+                    if "server failed to start" in output:
+                        failures.append(f"fresh: cycle {cycle}: {output.strip()}")
+                    elif r.returncode != 0:
+                        failures.append(f"fresh: cycle {cycle}: run exit {r.returncode}:\n{output}")
+            print(f"fresh: 10 stop/run/run cycles, {len(failures)} failure(s)", flush=True)
+            bl("realm", "stop")
+            kill_vms()
+
             for _ in range(23):
                 r = bl("run", str(program))
                 if r.returncode != 0:
@@ -111,6 +156,10 @@ def main():
         finally:
             EDITED.write_bytes(original)
             kill_vms()
+    for warning in warnings:
+        print("WARN " + warning)
+    if strict_stop:
+        failures += warnings
     if failures:
         print("FAIL\n" + "\n".join(failures))
         sys.exit(1)

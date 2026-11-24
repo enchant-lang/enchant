@@ -549,3 +549,21 @@ all of the branch | 2,163 ms (2,079–2,366) | 1,326 ms
 That is −27% against the SDK and −24% against the control. It does not reach the card's 1.2 s. After the change the same sampler puts the remaining app start in three places. Namespace loading (=compile_sdk_source!='s retention, preload and callable checks, then the namespace initializers that publish ~1,400 definitions) is about a third of the samples. The owner registry's =prepare_sdk_class!= walks and leases the whole SDK runtime closure, loading the modules it proves; that is about 15%. The native host stubs are compiled at every start (=compile:*=, 3%), because their bytes embed the image's physical =.so= path. Those are executions, not derivations: what they leave behind holds loaded code, pids, leases and ETS custody rows, so it cannot be written to a file and read back the way a decode can. Getting to 1.2 s needs either a lazy owner registry and SDK lease (the first actor pays, a =bl run= does not), or a restorable Env snapshot that carries no process identity. Both are design changes, and neither is a seal.
 
 Evidence: =research/checked-tiles/evidence/cold-start-k1.json=.
+
+* K1b: the lease the first actor pays for
+
+After K1 the batch-22 SDK cold-runs =(println 1)= in 2,159 ms median. A call timeline (return traces on the host functions) put 798 of the app start's 1,452 traced ms in one place: the owner registry's =start-child!=, whose =prepare_sdk_class!= bootstraps the native host stubs and leases the whole SDK runtime closure. Every later namespace load then re-extends that lease. Starting the application by hand without that child cut 2.37 → 1.52 s in a first paired run.
+
+The branch takes neither at start. The collector starts with the first managed actor (=Env/ensure_sdk_owner_registry!=). The lease comes from the callers that already asked for it on demand (=ensure_sdk_runtime!= in generation preparation, the test ward, builds and execution; =prepare_sdk_class!=). =sdk_runtime_retained_modules?= also establishes a never-taken lease for a native adapter, but only outside Source and in a fresh process. Before the lease, loads take the path =BeamLisp.init= always took. That path already refuses to republish an SDK module with other bytes (=unretained_sdk_forwarders!=), and the first lease re-checks every loaded MD5.
+
+Moving the lease exposed three costs, each measured and fixed:
+- The first lease found many roots loaded and walked their closure one code-server load at a time. A cold managed-app probe took 14.3 s against 7.8 s eager. The walk now reads metadata first and loads members in one batch. The first loader batch after the lease also plans the requires of namespaces loaded before it, so the 12 lease extensions become one: 7.2 s.
+- Pre-lease image loads recovered their compiler rows through the per-user AOT cache, about 20 ms a namespace. They now publish the sealed image's rows, with the same checks a post-lease batch makes.
+- The package authority fingerprinted compiler modules the eager lease had happened to load, so a fresh consumer declined (=realm_package_test=). It now loads them first.
+
+On a =/nix/store= root, =sdk-code.term= (3.5 MB, read about 35 times), the image-table path and the preinit directory stamps are read once per VM.
+
+Six alternating pairs at load 18–22 give 2,159 → 1,170 ms, with the app start at 552 ms. The rest is erts, Elixir and =boot.exs= at 290 ms (=elixir -e :ok= alone is 190), =BeamLisp.init= at 550 (rt, core, reader, compiler, multi and sugar loads and initializers), and about 300 for =vm.native=, =bl.cli= and the run. The next lever is the init namespaces themselves.
+
+Evidence: =research/checked-tiles/evidence/cold-start-k1b.json=.
+
