@@ -29,6 +29,7 @@
       (is (= s (:state d))))))
 
 (deftest values-and-revisions-are-exact-and-nil-is-cacheable
+  (is (cache/ready! NAME))
   (cache/clear! NAME)
   (is (cache/put! NAME :key 1 nil))
   (is (= {:hit? true :value nil} (cache/lookup NAME :key 1)))
@@ -73,11 +74,18 @@
 (deftest cache-owner-survives-the-reader-that-created-it
   (let [name :navigation_cache_transient_reader
         parent (erlang/self)
-        pid (spawn (fn [] (cache/put! name :key 1 "survives")
-                          (erlang/send parent :cache-reader-done)
+        pid (spawn (fn []
+                     ;; This reader still creates the named owner. Prepare it
+                     ;; before capturing validity evidence, as ready! requires.
+                     (let [ready (cache/ready! name)
+                           admitted (cache/put! name :key 1 "survives")]
+                      (erlang/send parent (tuple :cache-reader-done ready admitted)))
                           (receive :finish nil (after 5000 nil))))
         monitor (erlang/monitor :process pid)]
-    (receive :cache-reader-done :ok (after 5000 (assert false "reader timed out")))
+    (receive [:cache-reader-done ready admitted]
+      (do (is ready "the creating reader initializes the owner")
+          (is admitted "lifetime checks require a positively admitted entry"))
+      (after 5000 (assert false "reader timed out")))
     (erlang/exit pid :kill)
     (receive [:DOWN ref :process dead why]
       (is (= [monitor pid :killed] [ref dead why]))
