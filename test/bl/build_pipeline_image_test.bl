@@ -15,6 +15,9 @@
   (into {} (map (fn [path] [(Path/basename path) (crypto/hash :sha256 (File/read! path))])
                 (filter (fn [path] (File/regular? path)) (Path/wildcard (Path/join directory "*"))))))
 
+(defn- read-only? [path]
+  (= 0 (erlang/band (:mode (File/stat! path)) 146)))   ; no 0o222 bit
+
 (deftest restored-units-feed-byte-identical-serial-and-parallel-images
   (let [scratch (Path/join (System/tmp_dir!) (str "build-image-" (System/unique_integer (list :positive))))
         root (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
@@ -44,16 +47,42 @@
         (is (pos? (invoke "build-image" "assemble!"
                     (list manifest manifest root parallel-out parallel inventory index 4))))
         (is (= (contents serial) (contents parallel)))
+        ;; A restored file shares its store file's inode or is a copy of it;
+        ;; either way it is read-only, so a write in place cannot reach the
+        ;; store. Writers unlink first.
+        (when (= 0 (:compiled b))
+          (doseq [module (mapcat :modules (vals manifest))]
+            (is (read-only? (Path/join parallel-out (str (Atom/to_string module) ".beam")))
+                (str module " is restored read-only"))))
         ;; A changed producer object must fail before metadata publication.
         (let [before (File/read! inventory)
               module (first (:modules (second (first manifest))))
               path (Path/join parallel-out (str (Atom/to_string module) ".beam"))]
+          (File/rm! path)
           (File/write! path "corrupt")
           (is (= :refused (try (invoke "build-image" "assemble!"
                                (list manifest manifest root parallel-out parallel inventory index 4))
                              :accepted (catch _ :refused))))
           (is (= before (File/read! inventory))))
-        (is (= [] (vec (Path/wildcard (str inventory ".units-*"))))))
+        (is (= [] (vec (Path/wildcard (str inventory ".units-*")))))
+        ;; A writable store this user owns links for real: restoring from it
+        ;; must leave no writable path into it (N4a hard links, T3).
+        (let [store (Path/join scratch "linked-units")
+              c (invoke "unit-store" "produce!" (list (assoc opts :out store :jobs 2 :previous serial-out)))
+              module (first (:modules (second (first manifest))))
+              name (str (Atom/to_string module) ".beam")
+              original (File/read! (Path/join serial-out name))]
+          (is (= 0 (:compiled c)))
+          (is (= (count sources) (:cached c)))
+          (is (= (:manifest a) (:manifest c)))
+          (is (< 1 (:links (File/stat! (Path/join store name)))) "the restored unit is a hard link")
+          (is (= :eacces (try (File/write! (Path/join store name) "corrupt") :written
+                           (catch e (:reason e))))
+              "an in-place write to a linked unit is refused")
+          (File/rm! (Path/join store name))
+          (File/write! (Path/join store name) "corrupt")
+          (is (= original (File/read! (Path/join serial-out name)))
+              "writing an unlinked path leaves the store it came from unchanged")))
       (finally (File/rm_rf! scratch)))))
 
 (deftest parsed-facts-cross-stages-only-for-exact-content-and-generation

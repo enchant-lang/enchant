@@ -1,10 +1,12 @@
 import contextlib
+import hashlib
 import io
 import importlib.util
 import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,6 +16,32 @@ ROOT = Path(__file__).resolve().parents[2]
 GATE = ROOT / "scripts/test_prerequisites.py"
 REQUIRE = runpy.run_path(str(GATE))["require"]
 WATCHER = "test/bl/host_reload_watcher_test.bl"
+RUN = subprocess.run
+
+
+def references(command):
+    found = RUN(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, check=False)
+    rows = []
+    for line in found.stdout.splitlines():
+        path, number, text = line.split(':', 2)
+        rows.append({'path': path, 'line': int(number), 'text': text.strip()})
+    return rows
+
+
+def current(value):
+    """The committed consumer inventories with their coordinates as the tree has
+    them now. The map's line coordinates move with every edit under priv/; a test
+    of what the preflight does after mapping must not fail on that drift. The
+    drift refusal itself is tested on its own below."""
+    if isinstance(value, dict) and 'boundaries' in value and 'source_globs' in value:
+        globs = [arg for pattern in value['source_globs'] for arg in ('--glob', pattern)]
+        for boundary in value['boundaries']:
+            boundary['references'] = references(['rg', '-n', *globs, boundary['search'], 'priv'])
+    if isinstance(value, dict) and isinstance(value.get('external_writers'), list):
+        for writer in value['external_writers']:
+            writer['source_sha256'] = hashlib.sha256((ROOT / writer['path']).read_bytes()).hexdigest()
+            writer['references'] = references(['rg', '-n', '-H', writer['search'], writer['path']])
+    return value
 
 
 def load(name, path):
@@ -140,7 +168,7 @@ class Prerequisites(unittest.TestCase):
 
         for edit in ["missing", "empty", "source", "consumer"]:
             def decode(text, *args, **kwargs):
-                value = original_loads(text, *args, **kwargs)
+                value = current(original_loads(text, *args, **kwargs))
                 if isinstance(value, dict) and "external_writers" in value:
                     if edit == "missing":
                         value.pop("external_writers")
@@ -165,9 +193,36 @@ class Prerequisites(unittest.TestCase):
                     self.assertRegex(errors.getvalue(), "bootstrap writer inventory|external writer source drift|external consumer map drift")
                     self.assertFalse(output.exists())
 
+    def test_preflight_refuses_a_drifted_boundary_consumer_map_before_vm_start(self):
+        module = load("boundary_map_preflight", ROOT / "scripts/preflight-sdk-boundaries")
+        original_loads, run = module.json.loads, module.subprocess.run
+
+        def only_discovery(command, **kwargs):
+            self.assertEqual("rg", command[0], "no candidate subprocess may start")
+            return run(command, **kwargs)
+
+        def decode(text, *args, **kwargs):
+            value = current(original_loads(text, *args, **kwargs))
+            if isinstance(value, dict) and "boundaries" in value:
+                value["boundaries"][0]["references"].pop()
+            return value
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "not-created"
+            argv = ["preflight", "--root", str(ROOT), "--out", str(output),
+                    "--boundaries", "vector-lookup-default"]
+            with patch.object(sys, "argv", argv), patch.object(module.json, "loads", side_effect=decode), \
+                    patch.object(module.subprocess, "run", side_effect=only_discovery), \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                with self.assertRaises(SystemExit) as exit:
+                    module.main()
+                self.assertEqual(2, exit.exception.code)
+                self.assertIn("consumer map drift: update ", errors.getvalue())
+                self.assertFalse(output.exists())
+
     def test_E63_preflight_refuses_after_mapping_before_freezing_or_starting_a_vm(self):
         module = load("prerequisite_preflight", ROOT / "scripts/preflight-sdk-boundaries")
-        run = module.subprocess.run
+        original_loads, run = module.json.loads, module.subprocess.run
 
         def only_discovery(command, **kwargs):
             self.assertEqual("rg", command[0], "no candidate subprocess may start")
@@ -177,6 +232,7 @@ class Prerequisites(unittest.TestCase):
             output = Path(directory) / "not-created"
             argv = ["preflight", "--root", str(ROOT), "--out", str(output), "--boundaries", "native-custody"]
             with patch.object(sys, "argv", argv), patch.object(sys, "platform", "linux"), \
+                    patch.object(module.json, "loads", side_effect=lambda text, *a, **k: current(original_loads(text, *a, **k))), \
                     patch("shutil.which", return_value=None), \
                     patch.object(module.subprocess, "run", side_effect=only_discovery), \
                     contextlib.redirect_stderr(io.StringIO()) as errors:
