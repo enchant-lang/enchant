@@ -1,0 +1,53 @@
+(ns dev-overlay-sync-test (:require [bl.dev-overlay :as o]))
+
+;; Bug 1 (U15 regression): a file that fails to compile is compiled once per
+;; digest, and every later command re-raises its error from state, cheaply.
+
+(defn- checkout []
+  (let [root (str (System/tmp_dir!) "/bl-dev-overlay-sync-" (System/unique_integer (list :positive)))]
+    (File/mkdir_p! (str root "/priv/bootstrap/seed"))
+    (File/mkdir_p! (str root "/priv/lib/split"))
+    (File/mkdir_p! (str root "/nix"))
+    (File/write! (str root "/priv/bootstrap/seed/manifest.term") "#{}.\n")
+    (File/write! (str root "/nix/dev-reload.json")
+      "{\"version\":1,\"roots\":[\"priv/lib\"],\"extensions\":[\".bl\"],\"compiler\":[],\"restart\":[]}")
+    root))
+
+(defn- timed [f]
+  (let [t (erlang/monotonic_time :microsecond)
+        r (try {:ok (f)} (catch e {:error (ex-message e)}))]
+    (assoc r :us (- (erlang/monotonic_time :microsecond) t))))
+
+(deftest a-broken-file-compiles-once-and-blocks-cheaply
+  (let [root (checkout)
+        wire (str root "/priv/lib/split/wire.bl")
+        sdk (File/read! (Path/join (BeamLisp.Tiers/priv_root) "lib/split/wire.bl"))
+        prior (System/get_env "BL_CHECKOUT_ROOT")
+        trace (tuple :Elixir.BeamLisp.AOT :compile_file 2)]
+    (System/put_env "BL_CHECKOUT_ROOT" root)
+    (erlang/trace_pattern trace true (list :local :call_count))
+    (try
+      (File/write! wire (str sdk "\n(defn broken [x] (+ x \n"))
+      (let [first (timed #(o/sync! "g1"))
+            n1 (elem (erlang/trace_info trace :call_count) 1)
+            again (timed #(o/sync! "g1"))
+            other (timed #(o/sync! "g2"))
+            n2 (elem (erlang/trace_info trace :call_count) 1)]
+        (println "dev-overlay-sync: first" (:us first) "us, same generation" (:us again) "us, new generation" (:us other) "us; compiles" n1 n2)
+        (is (some? (:error first)) "the broken file blocks the command")
+        (is (String/contains? (str (:error first)) "priv/lib/split/wire.bl"))
+        (is (= (:error first) (:error again)) "the same error, re-raised")
+        (is (= (:error first) (:error other)) "a new generation with the same bytes: the same error")
+        (is (= n1 n2) "an unchanged failed file is not compiled again")
+        (is (< (:us again) 5000) "re-raising costs about nothing"))
+      (File/write! wire (str sdk "\n(defn u15fix-probe [] :fixed)\n"))
+      (let [fixed (timed #(o/sync! "g3"))]
+        (println "dev-overlay-sync: fixed" (:us fixed) "us" (pr-str fixed))
+        (is (= 1 (:applied (:ok fixed))) "a new edit is retried and applies")
+        (is (nil? (:error (timed #(o/sync! "g3"))))))
+      (File/write! wire sdk)
+      (is (= 1 (:reverted (:ok (timed #(o/sync! "g4"))))))
+      (finally
+        (erlang/trace_pattern trace false (list :local :call_count))
+        (if prior (System/put_env "BL_CHECKOUT_ROOT" prior) (System/delete_env "BL_CHECKOUT_ROOT"))
+        (File/rm_rf! root)))))
