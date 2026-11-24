@@ -32,7 +32,8 @@
 
 (ns selfbuild
   (:require [release :as rel] [drop :as d] [build :as b] [substrate :as sub] [claim :as c]
-            [provenance :as prov] [build-plan :as bp] [build-image :as image] [seed] [app-resource :as ar]))
+            [provenance :as prov] [build-plan :as bp] [build-image :as image] [seed] [app-resource :as ar]
+            [unit-store :as units]))
 
 (defn timed
   "Log producer wall time without putting volatile measurements in artifacts."
@@ -322,14 +323,17 @@
 
 (defn- previous-store-current?
   "Whether the previous unit store was produced by this compiler for this
-   runtime, so its units are reusable and shard children would only restore."
+   runtime, or for one whose floor executes the same code (N4c), so its units
+   are reusable and shard children would only restore. A unit that read the
+   floor's exact identity still recompiles in the single producer."
   []
   (let [previous (System/get_env "BL_PREVIOUS_UNIT_STORE")
         f (when previous (Path/join previous "unit-index.json"))
         index (when (and f (File/regular? f)) (Jason/decode! (File/read! f)))]
-    (and index
-         (= (get index "compiler") (BeamLisp.AOTCache/compiler_key))
-         (= (get index "runtime") (Base/encode16 (BeamLisp.AOT/runtime_image_key) (list (tuple :case :lower)))))))
+    (boolean (and index
+      (units/reusable-index index (BeamLisp.AOTCache/compiler_key)
+        (Base/encode16 (BeamLisp.AOT/runtime_image_key) (list (tuple :case :lower)))
+        (units/library-runtime-key))))))
 
 (defn- shard-count
   "BL_SDK_SHARDS when there is compilation to share: a store this compiler
@@ -361,7 +365,8 @@
   (let [indexes (keep (fn [store] (let [f (Path/join store "unit-index.json")]
                                     (when (File/regular? f) [store (Jason/decode! (File/read! f))])))
                       stores)
-        shard-heads (set (map (fn [[_ i]] [(get i "version") (get i "compiler") (get i "runtime")]) (rest indexes)))]
+        shard-heads (set (map (fn [[_ i]] [(get i "version") (get i "compiler") (get i "runtime")
+                                           (get i "library-runtime")]) (rest indexes)))]
     (when (> (count shard-heads) 1)
       (throw (ex-info "SDK shards disagree on their unit index identity" {:heads shard-heads})))
     (let [units (reduce (fn [acc [store index]]
@@ -374,7 +379,8 @@
           [_ head] (last indexes)]
       (File/write! (Path/join merged "unit-index.json")
         (Jason/encode! {"version" (get head "version") "compiler" (get head "compiler")
-                        "runtime" (get head "runtime") "units" units}))
+                        "runtime" (get head "runtime") "library-runtime" (get head "library-runtime")
+                        "units" units}))
       merged)))
 
 (defn- tree-bytes

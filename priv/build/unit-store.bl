@@ -127,6 +127,143 @@
   (when-not (= :ok (prim_file/make_dir directory)) (File/mkdir_p! directory))
   (doseq [name files] (link-or-copy! (Path/join source name) (Path/join directory name))))
 
+;; ── The library runtime identity (N4c) ──────────────────────────────────────
+;;
+;; A library unit's bytes are a function of its captured inputs, the compiler
+;; key and the CODE its compile executes on the floor (macros, the reader, Env,
+;; the data structures). The exact runtime image key hashes every floor BEAM's
+;; bytes, and a pinned host BEAM carries `-bl_source_hash`, the digest of its
+;; Source text, so a comment in `priv/host/delay.bl` rotates it although no
+;; executed instruction changed. `floor-code-digest` is the floor module with
+;; exactly that attribute value removed: every other chunk (code, atoms,
+;; literals, imports, exports, funs, lines, every other attribute) is kept, so
+;; two floors with the same library runtime key execute identical code and
+;; differ at most in the provenance labels of their pinned host modules.
+;;
+;; The labels stay observable. Which reads matter (audited 2026-11-24):
+;;  * Labels of boot units and codegen hosts are digests of sources the
+;;    compiler key already hashes, so reading them (the seed metadata and SDK
+;;    binding rows for core/rt, `module_info(:md5)` of AOT) cannot differ
+;;    between two floors with one compiler key.
+;;  * Floor manifest reads in `priv/host/aot.bl` (seed proofs, the constructor
+;;    kernel manifest, memo keys) are denial checks that pass on both floors
+;;    alike; their digests are not emitted. A first compile in a VM makes ~70
+;;    of them, later compiles none: they are memoized per VM.
+;;  * The whole-floor keys are emitted: contextual class module names hash
+;;    `AOT/runtime_image_key` (`priv/boot/expand.bl` link-class), computed per
+;;    call. Each fresh compile counts calls to the whole-floor identity
+;;    functions (`floor-identity-reads`); a unit that made one, or has no
+;;    record of it, is reused only on the exact runtime it was compiled on.
+;; Evidence: in batch 23's delay.bl-comment SDK every one of 668 units was
+;; compiled fresh on the edited floor; 500 equal the previous SDK's bytes and
+;; 168 differ only in `bl_source_hash`, which those restored units carried
+;; stale from an older closure (their unit-key and inputs do not cover it).
+
+(defn floor-code-digest
+  "A floor BEAM's digest without its `bl_source_hash` attribute value."
+  [bytes]
+  (let [chunks (beam_lib/all_chunks bytes)
+        attr (erlang/binary_to_list "Attr")]
+    (when-not (= :ok (elem chunks 0))
+      (throw (ex-info "Runtime floor member is not a BEAM" {:kind :floor-member})))
+    (digest (erlang/term_to_binary
+              (mapv (fn [chunk]
+                      (let [id (elem chunk 0) data (elem chunk 1)]
+                        (if (= id attr)
+                          [id (to-list (remove #(and (erlang/is_tuple %) (= 2 (erlang/tuple_size %))
+                                                     (= :bl_source_hash (elem % 0)))
+                                               (erlang/binary_to_term data)))]
+                          [id data])))
+                    (elem chunks 2))
+              (list :deterministic)))))
+
+(defn library-runtime-key
+  "The runtime identity a library unit's reuse depends on, or nil when the
+   floor cannot be read and verified (reuse then needs the exact runtime key).
+   The same tuple as `BeamLisp.AOT/runtime_image_key`, with each floor
+   member's byte digest replaced by its `floor-code-digest`. Every member's
+   bytes are verified against the floor manifest by `AOT/runtime_floor!`."
+  []
+  (try
+    (let [manifest (BeamLisp.Bootstrap/manifest)
+          floor (BeamLisp.AOT/runtime_floor!)
+          members (sort (map (fn [entry] (let [beam (elem entry 0)]
+                                           [(str (Atom/to_string (elem beam 0)) ".beam")
+                                            (floor-code-digest (elem beam 1))]))
+                             (:prepared floor)))]
+      (when-not (= (sort (keys (Map/get manifest "modules"))) (map first members))
+        (throw (ex-info "Runtime floor members disagree with the manifest" {})))
+      (digest (erlang/term_to_binary
+                (tuple :library_runtime_v1 (Map/get manifest "otp") (Map/get manifest "elixir")
+                       (erlang/system_info :version) (erlang/system_info :system_architecture)
+                       (erlang/system_info :nif_version) (BeamLisp.LazyMemo/runtime_identity!)
+                       members)
+                (list :deterministic))))
+    (catch _ nil)))
+
+(defn- floor-identity-entries
+  "The functions that answer an identity of the whole floor, its bytes and
+   labels included: the exact runtime image key (direct and from a manifest),
+   the verified floor capture, and the packaged keys."
+  []
+  [[:Elixir.BeamLisp.AOT :runtime_image_key 0] [:Elixir.BeamLisp.AOT :runtime_image_key_for 1]
+   [:Elixir.BeamLisp.AOT :runtime_floor! 0] [:Elixir.BeamLisp.Bootstrap :packaged_keys! 0]])
+
+(defn floor-identity-watch
+  "Arm call counting on every floor identity entry point. Answers a watch, or
+   nil when any entry point cannot be counted (then nothing is witnessed)."
+  []
+  (try
+    (let [entries (floor-identity-entries)]
+      (doseq [[module _ _] entries] (code/ensure_loaded module))
+      (when (every? (fn [[module function arity]]
+                      (pos? (erlang/trace_pattern (tuple module function arity) true (list :local :call_count))))
+                    entries)
+        {:entries entries}))
+    (catch _ nil)))
+
+(defn- floor-identity-count [watch]
+  (reduce (fn [total [module function arity]]
+            (let [r (erlang/trace_info (tuple module function arity) :call_count)]
+              (if (erlang/is_integer (elem r 1)) (+ total (elem r 1))
+                (throw (ex-info "Floor identity watch was disarmed" {:kind :floor-watch})))))
+          0 (:entries watch)))
+
+(defn floor-identity-reads
+  "Run `thunk`, answering [result reads?]. `reads?` is true unless the armed
+   watch shows that no whole-floor identity function was called, by any process,
+   while it ran: a missing or disarmed watch counts as a read."
+  [watch thunk]
+  (let [before (when watch (try (floor-identity-count watch) (catch _ nil)))
+        result (thunk)
+        after (when before (try (floor-identity-count watch) (catch _ nil)))]
+    [result (not (and before after (= before after)))]))
+
+(defn floor-identity-unwatch! [watch]
+  (when watch
+    (doseq [[module function arity] (:entries watch)]
+      (erlang/trace_pattern (tuple module function arity) false (list :local :call_count)))))
+
+(defn reusable-index
+  "The previous unit index's units when its compiler key matches and its
+   runtime is the exact current runtime or the same library runtime, with
+   `:exact?` saying which. Nil otherwise. A version 1 index has no record of
+   its units' floor identity reads, so it is not reused: the first version 2
+   store compiles every unit once."
+  [candidate key runtime library]
+  (when (and (erlang/is_map candidate) (= key (get candidate "compiler")))
+    (let [exact? (and (= 2 (get candidate "version")) (= runtime (get candidate "runtime")))
+          code? (and (= 2 (get candidate "version")) (string? library)
+                     (= library (get candidate "library-runtime")))]
+      (when (or exact? code?)
+        {:units (get candidate "units") :exact? exact?}))))
+
+(defn- unit-runtime-current?
+  "A unit compiled with reads of the floor's exact identity, or without a
+   record of them, is current only on the exact runtime it was compiled on."
+  [prior exact?]
+  (or exact? (= false (get prior "floor-identity"))))
+
 (defn artifact-key [prepared]
  (digest (erlang/term_to_binary
            {:namespace (:namespace prepared) :world (:world prepared) :phase-world (:phase-world prepared)
@@ -344,12 +481,7 @@
                   :phase-world (Base/decode16! (String/upcase (get row "phase-world")))
                   :modules (get-in verified [:manifest :modules])}})))))))
 
-(defn produce!
-  "Produce complete units under the caller's output custody. Prior products
-   are data: verification and source re-resolution precede every restoration."
-  [opts]
-  (when-not (contains? #{nil :full} (:scope opts))
-    (throw (ex-info "SDK unit production requires its complete source selection" {})))
+(defn- produce-watched! [opts watch]
   (let [started (erlang/monotonic_time :microsecond) timings (atom {})
         out (:out opts) root (BeamLisp.AOT/physical_sdk_path (:root opts))
         sdk (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
@@ -364,10 +496,12 @@
             (throw (ex-info "SDK unit selection contains duplicate or invalid namespaces" {})))
         key (BeamLisp.AOTCache/compiler_key)
         runtime (hex (BeamLisp.AOT/runtime_image_key))
+        library (measure timings :library-runtime (fn [] (library-runtime-key)))
         previous (or (:previous opts) (System/get_env "BL_PREVIOUS_UNIT_STORE") out)
         candidate (read-index previous)
-        old (when (and (= 1 (get candidate "version")) (= key (get candidate "compiler"))
-                       (= runtime (get candidate "runtime"))) (get candidate "units"))
+        reusable-old (reusable-index candidate key runtime library)
+        old (:units reusable-old)
+        exact? (:exact? reusable-old)
         _ (when-not (every? #(and (string? %) (Regex/match?
                                  (Regex/compile! "^[A-Za-z_][A-Za-z0-9_.-]*$") %)) (keys old))
             (throw (ex-info "Unit reuse index has an invalid namespace" {})))
@@ -385,6 +519,7 @@
                   prior (get old namespace)
                   directory (Path/join (Path/join out ".units") namespace)
                   reusable (and (not (:force? opts)) prior (= unit-key (get prior "key"))
+                                (unit-runtime-current? prior exact?)
                                 (measure timings :reuse-inputs
                                   (fn [] (inputs/current? snapshot (get prior "inputs")))))
                   prepared
@@ -393,14 +528,17 @@
                             {:version 2 :phase-imports (list 'core 'sugar) :roots (list root)
                              :sources (list {:namespace (symbol namespace) :file path})} {})]
                       (try
-                        (let [prepared (BeamLisp.AOT/prepare_unit workspace (symbol namespace))
-                              _ (File/rm_rf! directory)
-                              _ (BeamLisp.AOT/emit_unit prepared directory)
+                        (let [[prepared reads?]
+                              (floor-identity-reads watch (fn []
+                                (let [prepared (BeamLisp.AOT/prepare_unit workspace (symbol namespace))]
+                                  (File/rm_rf! directory)
+                                  (BeamLisp.AOT/emit_unit prepared directory)
+                                  prepared)))
                               actual (to-list (sort-by #(get % "namespace")
                                         (map #(relative-input % root) (vals (:inputs prepared)))))
                               verified (BeamLisp.AOT/verify_unit directory)]
                           (verify-inputs! verified actual namespace)
-                          {:verified verified :inputs actual})
+                          {:verified verified :inputs actual :floor-identity reads?})
                         (finally (BeamLisp.AOT/close_workspace! workspace)))))]
               {:path path :namespace namespace :key unit-key :prior prior :directory directory
                :prepared prepared :reusable reusable
@@ -466,7 +604,10 @@
                 (update :module-owners merge (into {} (map (fn [module] [module namespace]) modules)))
                 (assoc-in [:manifest (:path plan)] entry)
                 (assoc-in [:units namespace] {"file" (Path/relative_to (:path plan) root)
-                                              "key" (:key plan) "inputs" actual}))))
+                                              "key" (:key plan) "inputs" actual
+                                              ;; A restored unit's record carries over.
+                                              "floor-identity" (if (:compiled? plan) (:floor-identity plan)
+                                                                 (get (:prior plan) "floor-identity"))}))))
           {:built 0 :compiled 0 :cached 0 :errors [] :manifest {} :units {} :module-owners {} :ex-built 0
            :lock-wait-us 0 :native {:built 0 :cached 0 :artifacts [] :errors []}} plans)
         final-receipts (mapcat #(get % "inputs") (vals (:units result)))
@@ -487,13 +628,27 @@
               (File/rm (Path/join out (str (Atom/to_string module) ".beam")))))
           (File/rm_rf! directory))))
     (File/write! (Path/join out "unit-index.json")
-      (Jason/encode! {"version" 1 "compiler" key "runtime" runtime "units" (:units result)}))
+      (Jason/encode! {"version" 2 "compiler" key "runtime" runtime "library-runtime" library
+                      "units" (:units result)}))
     (when-let [manifest (:manifest opts)] (File/write! manifest (erlang/term_to_binary (:manifest result))))
     (when-let [log (:log-path opts)]
       (blog/write! log (blog/facts-of (blog/state-of-manifest (:manifest result)))))
     (println (str "SDK-UNIT-PHASES " (Jason/encode!
       {:elapsed-us (- (erlang/monotonic_time :microsecond) started)
        :phases-us @timings :compiled (:compiled result) :cached (:cached result) :jobs width
+       :reuse (cond (nil? reusable-old) "none" exact? "exact-runtime" :else "library-runtime")
+       :floor-identity-reads (count (filter #(not= false (get % "floor-identity")) (vals (:units result))))
        :input-reads {:initial (:reads snapshot) :final (:reads final-snapshot)
                      :references (count final-receipts)}})))
     (dissoc result :units :module-owners)))
+
+(defn produce!
+  "Produce complete units under the caller's output custody. Prior products
+   are data: verification and source re-resolution precede every restoration.
+   Fresh compiles run under the floor identity watch, disarmed on every exit."
+  [opts]
+  (when-not (contains? #{nil :full} (:scope opts))
+    (throw (ex-info "SDK unit production requires its complete source selection" {})))
+  (let [watch (floor-identity-watch)]
+    (try (produce-watched! opts watch)
+      (finally (floor-identity-unwatch! watch)))))
