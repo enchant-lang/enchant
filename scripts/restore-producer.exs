@@ -12,7 +12,8 @@ case System.get_env("BL_PRODUCTION_CACHE") do
     unless File.stat!(index_file).size <= 33_554_432, do: raise("producer index exceeds bound")
     index = Jason.decode!(File.read!(index_file))
     runtime = Base.encode16(BeamLisp.AOT.runtime_image_key(), case: :lower)
-    eligible = index["version"] == 1 and index["compiler"] == BeamLisp.AOTCache.compiler_key() and index["runtime"] == runtime
+    # Exact runtime only: this restore is not the library producer's N4c reuse.
+    eligible = index["version"] in [1, 2] and index["compiler"] == BeamLisp.AOTCache.compiler_key() and index["runtime"] == runtime
     selected = if eligible, do: index["units"], else: %{}
     inputs = selected |> Map.values() |> Enum.flat_map(& &1["inputs"])
     observations = inputs |> Enum.uniq_by(&{&1["scope"], &1["file"]}) |> Map.new(fn input ->

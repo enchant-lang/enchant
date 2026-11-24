@@ -1,0 +1,119 @@
+(ns library-runtime-key-test)
+
+;; N4c: library units are reused across a runtime floor change that changes no
+;; executed code. Exercise the tree's unit store under a private name, with
+;; the selected SDK's compiler and floor; nothing replaces the SDK's modules.
+(let [root (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd))
+      source (File/read! (Path/join root "priv/build/unit-store.bl"))]
+ (BeamLisp/eval (String/replace source "(ns unit-store " "(ns library-runtime-key-under-test ")))
+
+(ns library-runtime-key-test)
+
+(defn- call [function & args]
+ (BeamLisp.Ns.Rt/invoke (BeamLisp.Env/fetch_exact! "library-runtime-key-under-test" function) args))
+
+(defn- floor-beam [module]
+ (File/read! (Path/join (BeamLisp.Bootstrap/seed_dir) (str (Atom/to_string module) ".beam"))))
+
+(defn- with-attributes
+ "The same BEAM with its attribute list replaced by `(edit attributes)`."
+ [bytes edit]
+ (let [chunks (elem (beam_lib/all_chunks bytes) 2)
+       attr (erlang/binary_to_list "Attr")
+       rebuilt (map (fn [chunk] (if (= attr (elem chunk 0))
+                                  (tuple attr (erlang/term_to_binary (edit (erlang/binary_to_term (elem chunk 1)))))
+                                  chunk)) chunks)]
+  (elem (beam_lib/build_module (to-list rebuilt)) 1)))
+
+(defn- relabel [attributes]
+ (to-list (map #(if (= :bl_source_hash (elem % 0))
+                  (tuple :bl_source_hash (String/duplicate "0" 64)) %) attributes)))
+
+(deftest a-source-hash-relabel-keeps-the-floor-code-digest-and-nothing-else-does
+ (let [bytes (floor-beam :Elixir.BeamLisp.Delay)
+       relabelled (with-attributes bytes relabel)
+       extra (with-attributes bytes #(cons (tuple :bl_probe_attribute 1) %))
+       digest #(call "floor-code-digest" %)]
+  (is (some #(= :bl_source_hash (elem % 0))
+            (Keyword/get (elem (elem (beam_lib/chunks bytes (list :attributes)) 1) 1) :attributes))
+      "the pinned host beam carries its source digest")
+  (is (not= (crypto/hash :sha256 bytes) (crypto/hash :sha256 relabelled)) "the bytes differ")
+  (is (= (digest bytes) (digest relabelled)) "the source digest alone is not code")
+  (is (not= (digest bytes) (digest extra)) "any other attribute is part of the identity")
+  (is (not= (digest bytes) (digest (floor-beam :Elixir.BeamLisp.LazySeq))))
+  (let [key (call "library-runtime-key")]
+   (is (string? key))
+   (is (= key (call "library-runtime-key")) "a constant of the floor"))))
+
+(deftest reuse-needs-the-compiler-and-the-exact-or-library-runtime
+ (let [index {"version" 2 "compiler" "k" "runtime" "r" "library-runtime" "l" "units" {"a" {}}}
+       reuse #(call "reusable-index" %1 %2 %3 %4)]
+  (is (= {:units {"a" {}} :exact? true} (reuse index "k" "r" "l")))
+  (is (= {:units {"a" {}} :exact? false} (reuse index "k" "r2" "l")))
+  (is (nil? (reuse index "k" "r2" "l2")))
+  (is (nil? (reuse index "k" "r2" nil)) "an unreadable floor needs the exact runtime")
+  (is (nil? (reuse index "k2" "r" "l")) "the compiler key still covers every unit")
+  (is (nil? (reuse (assoc index "version" 1) "k" "r" "l"))
+      "a version 1 store has no floor identity records")))
+
+(deftest the-watch-sees-floor-identity-reads-in-any-process
+ (let [watch (call "floor-identity-watch")]
+  (try
+   (is (some? watch) "every entry point can be counted")
+   (is (= [3 false] (call "floor-identity-reads" watch (fn [] (+ 1 2)))))
+   (is (= true (second (call "floor-identity-reads" watch (fn [] (BeamLisp.AOT/runtime_image_key))))))
+   (is (= true (second (call "floor-identity-reads" watch
+                         (fn [] (BeamLisp.AOT/runtime_image_key_for (BeamLisp.Bootstrap/manifest)))))))
+   (is (= false (second (call "floor-identity-reads" watch (fn [] (BeamLisp.Bootstrap/manifest)))))
+       "a manifest row read is not a whole-floor identity")
+   (is (= true (second (call "floor-identity-reads" watch
+                         (fn [] (Task/await (Task/async (fn [] (BeamLisp.AOT/runtime_image_key)))))))))
+   (is (= true (second (call "floor-identity-reads" nil (fn [] 1)))) "no watch, no witness")
+   (finally (call "floor-identity-unwatch!" watch)))))
+
+(defn- unit-bytes [store namespace]
+ (let [directory (Path/join (Path/join store ".units") namespace)]
+  (into {} (map (fn [name] [name (File/read! (Path/join directory name))]) (File/ls! directory)))))
+
+(defn- rewrite-index! [store edit]
+ (let [file (Path/join store "unit-index.json")]
+  (File/write! file (Jason/encode! (edit (Jason/decode! (File/read! file)))))))
+
+(deftest units-restore-across-a-runtime-change-that-keeps-the-floor-code
+ (let [scratch (Path/join (System/tmp_dir!) (str "library-runtime-" (System/unique_integer (list :positive))))
+       root (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
+       names ["reload.public-binding-counter" "reload.preinit-counter" "scene.picture" "data.derivation"]
+       sdk-index (get (Jason/decode! (File/read! (Path/join (System/fetch_env! "BL_SDK_PRODUCT")
+                                                            "unit-store/unit-index.json"))) "units")
+       sources (mapv #(Path/join root (get-in sdk-index [% "file"])) names)
+       produce (fn [out previous] (call "produce!" {:root root :sources sources :out out :previous previous :jobs 1}))
+       fresh (Path/join scratch "fresh") moved (Path/join scratch "moved") changed (Path/join scratch "changed")]
+  (File/mkdir_p! scratch)
+  (try
+   (let [first (produce fresh nil)
+         index (Jason/decode! (File/read! (Path/join fresh "unit-index.json")))]
+    (is (= (count names) (:compiled first)))
+    (is (= 2 (get index "version")))
+    (is (string? (get index "library-runtime")))
+    (is (every? #(= false (get-in index ["units" % "floor-identity"])) names)
+        "these compiles execute the floor without reading its identity")
+    ;; The same library runtime under another exact runtime image: restore,
+    ;; and the restored bytes are the fresh compile's.
+    (File/cp_r! fresh moved)
+    (rewrite-index! moved #(assoc % "runtime" (String/duplicate "e" 64)))
+    (let [again (produce moved moved)]
+     (is (= 0 (:compiled again)))
+     (is (every? #(= (unit-bytes fresh %) (unit-bytes moved %)) names)))
+    ;; A unit recorded as reading the floor's identity, or with no record,
+    ;; recompiles; a changed library runtime recompiles every unit.
+    (File/cp_r! fresh changed)
+    (rewrite-index! changed (fn [i] (-> i (assoc "runtime" (String/duplicate "e" 64))
+                                       (assoc-in ["units" (nth names 0) "floor-identity"] true)
+                                       (update-in ["units" (nth names 1)] dissoc "floor-identity"))))
+    (let [partial (produce (Path/join scratch "partial") changed)]
+     (is (= 2 (:compiled partial)))
+     (is (every? #(= (unit-bytes fresh %) (unit-bytes (Path/join scratch "partial") %)) names)
+         "a recompile reproduces the restored bytes"))
+    (rewrite-index! changed #(assoc % "library-runtime" (String/duplicate "f" 64)))
+    (is (= (count names) (:compiled (produce (Path/join scratch "rotated") changed)))))
+   (finally (File/rm_rf! scratch)))))
