@@ -127,9 +127,38 @@
         (to-list (filter (fn [r] (contains? mine r)) (realm/roots)))))))
 
 (defn- register-session! [k root]
-  (update-live! (fn [m] (assoc m k {:cell (erlang/apply :atomics :new (list 2 (to-list [(tuple :signed false)])))
-                                    :root root :started-at (erlang/system_time :second)
-                                    :realms #{} :primary (empty? m)}))))
+  ;; cell slots: 1 the requests it accepted, 2 its draining flag, 3 booting
+  ;; (`await-boot!`): set until `boot-realm-services!` has returned
+  (let [c (erlang/apply :atomics :new (list 3 (to-list [(tuple :signed false)])))]
+    (erlang/apply :atomics :put (list c 3 1))
+    (update-live! (fn [m] (assoc m k {:cell c
+                                      :root root :started-at (erlang/system_time :second)
+                                      :realms #{} :primary (empty? m)})))))
+
+(def ^:private BOOT-POLL-MS 2)
+(def ^:private BOOT-WAIT-MS 360000)
+
+(defn- boot-done! [k]
+  (when-let [c (cell k)] (erlang/apply :atomics :put (list c 3 0))))
+
+(defn- await-boot!
+  "Hold a command that arrived while session `k` was still starting its services
+   until they are up. The listener accepts before the services start (`start`),
+   and the launcher sends its first command as soon as the socket exists (M3).
+   Run alongside the boot, that command took the same locks the boot held (the
+   manager's start, a realm's lifecycle, the live table, the loader's per-file
+   locks), all `:global`, which sleeps 0-250 ms and then up to 0.5, 1, 2 s
+   between attempts: it woke a few hundred ms after the boot had released them.
+   Everything it would have overlapped runs through the one loader process
+   anyway. Polls one atomics slot, so a command that arrives later pays one
+   read. Bounded like the launcher's own start deadline; a boot that raised
+   cleared the flag on its way out."
+  [k]
+  (when-let [c (cell k)]
+    (loop [waited 0]
+      (when (and (= 1 (erlang/apply :atomics :get (list c 3))) (< waited BOOT-WAIT-MS))
+        (Process/sleep BOOT-POLL-MS)
+        (recur (+ waited BOOT-POLL-MS))))))
 
 (defn- unregister-session! [k] (update-live! (fn [m] (dissoc m k))))
 
@@ -278,7 +307,8 @@
   ;; :control (status/stop) vs :request (a command)
   (if (= :control (elem frame 0))
     (control-handler frame conn-send)
-    (let [k (session-key)]
+    (let [k (session-key)
+          _ (await-boot! k)]
     (if (draining? k) (pending! conn-send (elem frame 1))
      (do
       ;; Double-check after entering the existing counter: a stop either sees
@@ -493,7 +523,8 @@
            (when (and (= true (get opts :commands-only))
                       (put-if-absent! (tuple :vm_session :commands-only) true))
              (update-live! (fn [m] (assoc-in m [k :commands-only] true))))
-           (boot-realm-services! (if shared nil root) k)
+           (try (boot-realm-services! (if shared nil root) k)
+             (finally (boot-done! k)))
            ;; the HTTP face on :ui, a view over the same read-model. A failure
            ;; here does NOT stop the daemon: its job is serving commands, the
            ;; page is a view.

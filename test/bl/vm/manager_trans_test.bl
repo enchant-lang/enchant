@@ -1,0 +1,42 @@
+; `vm.manager/trans` is `:global.trans` without its retry backoff (M3). A fresh
+; VM's boot and its first command take the manager's start lock and a realm's
+; lifecycle lock; under `:global.trans` the command slept 0-250 ms, then up to
+; 0.5 and 1 s, after the boot released them.
+(ns vm.manager-trans-test
+  (:require [vm.manager :as mgr]))
+
+(defn- now [] (erlang/monotonic_time :millisecond))
+
+(defn- contend
+  "A holder keeps the lock 200 ms; a second requester asks 20 ms in. How long
+   after the release the second got it, and whether the two ever overlapped."
+  [locker]
+  (let [parent (erlang/self)
+        inside (atom 0) overlap (atom false)
+        body (fn [ms] (when (> (swap! inside inc) 1) (reset! overlap true))
+               (Process/sleep ms) (swap! inside dec))]
+    (spawn (fn [] (locker (tuple ::lock (erlang/self))
+                          (fn [] (body 200) (erlang/send parent [:released (now)])))))
+    (Process/sleep 20)
+    (spawn (fn [] (locker (tuple ::lock (erlang/self))
+                          (fn [] (erlang/send parent [:got (now)]) (body 1)))))
+    (let [released (receive [:released t] t (after 5000 nil))
+          got (receive [:got t] t (after 10000 nil))]
+      {:after-release (when (and released got) (- got released)) :overlap @overlap})))
+
+(deftest a-waiter-takes-the-lock-right-after-its-release
+  (let [runs (vec (map (fn [_] (contend mgr/trans)) (range 5)))
+        waits (map :after-release runs)]
+    (is (every? some? waits) (pr-str runs))
+    (is (not-any? :overlap runs) (pr-str runs))
+    ;; `:global.trans` measured 0-250 ms here; this polls every 2 ms
+    (is (< (apply max waits) 60) (pr-str waits))))
+
+(deftest it-is-reentrant-and-a-raise-releases-it
+  (is (= :inner (mgr/trans (tuple ::nested (erlang/self))
+                  (fn [] (mgr/trans (tuple ::nested (erlang/self)) (fn [] :inner))))))
+  (is (= "boom" (try (mgr/trans (tuple ::raised (erlang/self)) (fn [] (throw (ex-info "boom" {}))))
+                     (catch e (ex-message e)))))
+  (let [parent (erlang/self)]
+    (spawn (fn [] (mgr/trans (tuple ::raised (erlang/self)) (fn [] (erlang/send parent :took)))))
+    (is (= :took (receive :took :took (after 1000 :timeout))))))

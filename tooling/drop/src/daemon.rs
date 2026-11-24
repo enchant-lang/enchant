@@ -670,6 +670,43 @@ fn wait_for_vm(
     VmWait::TimedOut
 }
 
+/// M3: send a command to a VM that is starting, as soon as it listens.
+///
+/// `attempt` sends the request and answers `None` while no VM read it: no
+/// socket yet, a connection refused, or a hello closed or rejected before the
+/// request was read (`hello_exchange`: only silence after `ready` is
+/// ambiguous, and that is an outcome). The VM binds its socket before its
+/// services start and a request that arrives first waits for them inside the
+/// VM (`vm.session/start`), so the client neither polls a separate readiness
+/// hello nor reconnects after it: the first request is the readiness check,
+/// and the booting VM serves it the moment it accepts. A started VM that exits
+/// unsuccessfully ends the wait at once, as in `wait_for_vm`.
+#[cfg(unix)]
+fn attach_when_listening<T>(
+    mut attempt: impl FnMut() -> Option<T>,
+    mut vm: Option<&mut std::process::Child>,
+    deadline: std::time::Duration,
+    interval: std::time::Duration,
+) -> Result<T, VmWait> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(outcome) = attempt() {
+            return Ok(outcome);
+        }
+        if let Some(Ok(Some(status))) = vm.as_mut().map(|c| c.try_wait()) {
+            if !status.success() {
+                // it may have started listening just before exiting
+                return attempt().ok_or(VmWait::Died(status.code()));
+            }
+            vm = None;
+        }
+        if started.elapsed() >= deadline {
+            return Err(VmWait::TimedOut);
+        }
+        std::thread::sleep(interval);
+    }
+}
+
 /// The last `lines` lines of the log from byte `section` on: what the VM said
 /// since this start's header.
 #[cfg(unix)]
@@ -905,6 +942,14 @@ pub fn daemon_ready(root: &Path, shared: bool) -> bool {
 
 #[cfg(unix)]
 pub fn try_attach(root: &Path, argv: &[String], shared: bool) -> Attach {
+    attach_request(root, shared, &request_frame(root, argv))
+}
+
+/// The request frame `try_attach` sends: argv, the cwd to act in, and the
+/// caller's environment. Built once by a caller that may send it repeatedly
+/// until a VM reads it.
+#[cfg(unix)]
+fn request_frame(root: &Path, argv: &[String]) -> Vec<u8> {
     let here = std::env::current_dir().unwrap_or_else(|_| root.to_path_buf());
     // The request carries the cwd the command should act in: the process cwd,
     // or `--root DIR`'s realpath. An own VM serves DIR's tree; a shared VM
@@ -917,11 +962,17 @@ pub fn try_attach(root: &Path, argv: &[String], shared: bool) -> Attach {
     // and why callers used to force a cold VM. Carrying it here makes a warm run
     // and a cold run the same program, so those workarounds can go back to being
     // performance choices.
-    let req = encode_request(argv, &cwd, &env_paths, &collect_env());
+    encode_request(argv, &cwd, &env_paths, &collect_env())
+}
+
+/// Send `req` behind the hello and stream the command to its exit.
+/// `Attach::Fallback` means no VM read the request.
+#[cfg(unix)]
+fn attach_request(root: &Path, shared: bool, req: &[u8]) -> Attach {
     // The request rides behind the hello (see `hello_exchange`). From a
     // `ready` on, NEVER fall back: the command may have side effects.
     let generation = std::env::var("BL_CHECKOUT_GENERATION").ok();
-    let mut stream = match hello_exchange(root, &hello_build(), shared, generation.as_deref(), Some(&req)) {
+    let mut stream = match hello_exchange(root, &hello_build(), shared, generation.as_deref(), Some(req)) {
         Hello::Ready(s, _) => s,
         Hello::RestartRequired => return Attach::RestartRequired,
         Hello::No => return Attach::Fallback,
@@ -1337,6 +1388,40 @@ mod tests {
         let _ = live.kill();
         let _ = live.wait();
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_first_request_is_sent_once_the_vm_listens_and_a_dead_vm_ends_the_wait() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+        // Not read yet twice (no socket, refused), then read: sent on the third
+        // try, one 10 ms poll apart, with no separate readiness round.
+        let mut tries = 0;
+        let started = Instant::now();
+        let got = attach_when_listening(
+            || { tries += 1; (tries == 3).then_some(tries) },
+            None, Duration::from_secs(60), Duration::from_millis(10));
+        assert_eq!(got, Ok(3));
+        assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
+        // A VM that exits unsuccessfully before it listens ends the wait at once.
+        let mut dead = Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+        let started = Instant::now();
+        let got: Result<(), VmWait> = attach_when_listening(
+            || None, Some(&mut dead), Duration::from_secs(600), Duration::from_millis(10));
+        assert_eq!(got, Err(VmWait::Died(Some(3))));
+        assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+        // A start command that exits 0 handed the VM off: keep trying until it
+        // answers, or the deadline.
+        let mut handoff = Command::new("true").spawn().unwrap();
+        let mut tries = 0;
+        let got = attach_when_listening(
+            || { tries += 1; (tries == 20).then_some(()) },
+            Some(&mut handoff), Duration::from_secs(60), Duration::from_millis(5));
+        assert_eq!(got, Ok(()));
+        let got: Result<(), VmWait> = attach_when_listening(
+            || None, None, Duration::from_millis(30), Duration::from_millis(10));
+        assert_eq!(got, Err(VmWait::TimedOut));
     }
 
     #[test]
