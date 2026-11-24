@@ -46,7 +46,7 @@ build pipeline. The native compiler comes after a go/no-go measurement (N0).
 | ✅ | **K1 + K1b** Sealed boot state, lazy owner registry and lease (batch 25: cold `bl run` ~1.19 s median, was 2.06–2.44 s) | Cold `$SDK/bin/bl --cold run` ≤ 1.2 s median |
 | 🔨 | **F3** Fast entry and request (batch 26: `.bl/bin/bl` 4.7 ms warm at the repo root; ≤ 2 ms needs a resident client) | Warm unchanged request ≤ 2 ms on a quiet machine |
 | ✅ | **K2** The checkout's cold path (batch 26: +55 ms over the SDK's own, was +570) | `./bin/bl --cold` adds ≤ 100 ms over `$SDK/bin/bl --cold` |
-| 🧪 | **M2** Project units restored on realm retirement (`lane/m2`; fixture: unchanged realm 207 → 122 ms, body edit 167 ms) | `m1.py` body edit ≤ 200 ms, 1 recompile; macro edit recompiles provider + dependents; `run` after `test` recompiles nothing |
+| 🔨 | **M2** Project units restored on realm retirement (`lane/m2`; gate 28 found keys never matched; fixed: unchanged realm 285–310 → 170 ms, body edit seen by `run` −55 ms, `body/first/test` unchanged ~290–335 ms) | `m1.py` body edit ≤ 200 ms, 1 recompile; macro edit recompiles provider + dependents; `run` after `test` recompiles nothing |
 | 🧪 | **M1** A real edit benchmark (2026-11-24: body edit 448–500 ms, macro edit 395–423 ms, `priv/lib` edit 1.1–1.5 s, warm test 159 ms, first command in a fresh VM 5.8 s; next M2, M3, M4) | Enchant edit-to-result, cold and warm, recorded |
 | 4 | **R1** Ship it | Installed `bl` rebuilt from main through the release gate, remeasured |
 | ✅ | **N4a** Restored units by reference (batch 23) | Std-edit SDK unit work 40 s → < 8 s |
@@ -384,7 +384,7 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - The 2026-11-20 numbers (body 170–269 ms, macro 167–169 ms) were a two-file scratch project on the October drop and are not comparable.
 - **Gate.** None (measurement only). To reproduce it: `bash research/substrate-ab/m1/copy.sh $MAIN /tmp/m1-$USER/enchant`, then `cd /tmp/m1-$USER/enchant && work run --memory 4G --timeout 2400 -- python3 -I $WT/research/substrate-ab/m1/m1.py --checkout /tmp/m1-$USER/enchant --out OUT --cycles 5 --cold 5`; remove it with `copy.sh --remove`.
 
-#### M2 🧪 Project namespaces restored, not recompiled, when a realm retires · branch `lane/m2` · S+ · BL runtime (`priv/host/aot.bl` `ensure_loaded_local`, `priv/host/loader.bl` `do_load`) · from M1
+#### M2 🔨 Project namespaces restored, not recompiled, when a realm retires · branch `lane/m2` · S+ · BL runtime (`priv/host/aot.bl` `ensure_loaded_local`, `priv/host/loader.bl` `do_load`) · from M1
 - **Why.** An edit to one 18-line namespace costs 450–500 ms, because the new realm recompiles every loaded project namespace (`ensure_loaded_local` always misses). The cost scales with the project, not the edit. `bl run` and `bl test` also don't share loaded project code, so alternating them recompiles each time.
 - **Change.** Keep compiled project units keyed by source digest plus the digests of the macro providers and `:require`d declarations each unit read (the U12a replay and the N4c reuse rule are the precedents). A new realm restores unchanged units and recompiles only the edited namespace and those whose recorded macro inputs changed. Share the key across `run` and `test` realms of one project generation.
 - **Done when.** In `m1.py`, a body edit's first command is ≤ 200 ms median and recompiles 1 namespace; a macro-provider edit recompiles the provider and its expanding dependents only, and both still show the new expansion (15/15). The first `bl run` after a `bl test` recompiles nothing.
@@ -396,6 +396,21 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - **Fixture timings** (10 small namespaces, one with a top-level effect; ms, median [min–max] of 3): today's eval path, every unit compiled 207 [195–210]; M2 unchanged realm 122 [113–126]; body edit (1 recompiled) 167 [166–181]; macro edit (provider + 3 dependents) 231 [223–250]; first compile of all 377 [347–383]. Per unit: restore 12–17 ms (init replay 6–9 of it), key 0.6–2.5, `compile_source` 30–45 vs ~20–28 through `eval_string`. So a macro edit that recompiles most of a small project is ~10% slower than today; see what's left.
   - **Gate (integrator, on the integration SDK).** The ten files, `realm_shared`, `session`, the overlay tests, `test/scripts/checkout_transport.py`, `realm_stop_after_overlay.py` (strict), plus `test/bl/realm_unit_restore_test.bl`, `realm_aot_reuse_test.bl`, `realm_package_test.bl`, `realm_code_lifetime_test.bl`. Then `m1.py --cycles 5`: `body/first` and `body/repeat` rows should compile only `frame-plan` (trace: `ensure_loaded_local` `:loaded` for film and m1-guard), `macro` rows compile 3 of 3 and show the new expansion 15/15, and the first `run` after a `test` compiles nothing.
   - **Left.** Whether `body/first` reaches ≤ 200 ms is for m1.py to say: frame-plan alone compiled in 80–133 ms in M1, and realm open is 47–67 ms. The next costs are `run_init_modules` (6–9 ms per restored unit for a 3-line namespace) and `compile_source` against `eval_string`.
+- **Gate 28 (2026-11-24, SDK `sf819y5q`): not landed.** `m1.py` showed no gain (body/first/test 351 → 334 ms) and slower macro edits (355 → 584 ms). Cause, found on a private copy with `BL_REALM_UNIT_TIMES=1`: the key folded the VM's global publication counters for `core` and the other compiler namespaces, and `core` advances on ordinary commands (2498 → 2500 → 2504 over three requests). So no key ever matched in a later realm, and every miss paid `compile_source`, ~1.8× the eval path on real units (frame-plan 150–240 ms against 80–133).
+- **Fix (`c35b388bf`).** Compiler code is named by the compiler key, the SDK root and the overlay only. A miss on a key seen once in the VM takes the old eval path and stores nothing; a key asked for again pays `compile_source` once, then restores. SDK closure nodes are remembered per VM, which cuts the key from 12–45 ms to 1.5–5 ms (film 3.4, frame-plan 4.7, guard 1.5 ms mean over 40–55 keys). Restores now hit: film 25/40 loads, frame-plan 35/55, guard 15/25, 11–14 ms each.
+- **Measured** on a private copy of the integration tree (SDK `sf819y5q`), the fixed `BeamLisp.AOT` hot-loaded into its warm VM. The base is the same VM image with `BL_REALM_UNIT_RESTORE=0`. Rounds interleaved fix/base ×2, 5 cycles each, unique edit text per run, load 16–18; ms, medians of the two rounds:
+
+  | `m1.py` case | base | M2 |
+  |---|---|---|
+  | body/first/test | 290 / 337 | 293 / 335 |
+  | body/repeat/run-probe | 302 / 323 | 248 / 260 |
+  | body/repeat/test | 293 / 318 | 307 / 348 |
+  | macro/first/run-probe | 309 / 316 | 324 / 377 |
+  | macro/repeat/test | 321 / 300 | 285 / 317 |
+  | macro/repeat/run-probe | 338 / 320 | 315 / 381 |
+  | revert (unchanged units) / run-probe | 285 / 310 | 170 / 173 |
+
+  An unchanged realm restores (−120 ms), and a body edit seen from `run` saves ~55 ms. Macro edits are within noise of the base (fix round 2 ran high across every row, warm/test included). **body/first/test ≤ 200 ms is out of M2's reach:** that command loads only the edited `frame-plan` (which must compile, 80–150 ms on the eval path at this load) and the 3-line guard. The rest is the warm test floor (~128 ms) and realm open. Reaching 200 needs a cheaper compile of the edited unit, not restoration.
 
 #### M3 🔨 The first command in a fresh checkout VM costs what `--cold` costs · S · `tooling/drop` (cold child), `priv/std/vm/manager.bl` · branch `lane/m3`, waits on the gate
 - **Why.** The first `bl test` after `realm stop` takes 5.2–6.5 s, 1.7 s more than `bl --cold test` of the same file (3.3–5.4 s). Every user pays it once per VM: after a reboot, after `realm stop`, after a runtime edit.
