@@ -76,12 +76,18 @@ def verify_proof(compiler, image_floor):
     qualification = compiler / 'qualification'
     require(qualification.is_dir() and not qualification.is_symlink(),
             'Missing compiler qualification directory')
+    report = read_json(qualification / 'result.json')
+    stages = report.get('stages') if isinstance(report, dict) else None
+    # C proves that B, booted, reproduces B. When P's bytes equal B's, B's own
+    # run booted that byte-identical compiler, so C is recorded as elided and
+    # has no producer/boot receipts of its own; every other check still holds.
+    elided = (isinstance(stages, list) and len(stages) == 2 and isinstance(stages[1], dict)
+              and stages[1].get('elided') is True)
     expected = {'inputs.json', 'result.json'} | {
-        f'{label}.{suffix}' for label in 'PBC'
+        f'{label}.{suffix}' for label in ('PB' if elided else 'PBC')
         for suffix in ('bootstrap.json', 'boot.log', 'producer.log')}
     require({path.name for path in qualification.iterdir()} == expected,
             'Incomplete or unexpected compiler qualification files')
-    report = read_json(qualification / 'result.json')
     require(isinstance(report, dict) and type(report.get('version')) is int
             and report['version'] == 1 and report.get('kind') == 'artifact-generation-qualification',
             'Unsupported compiler qualification report')
@@ -91,10 +97,19 @@ def verify_proof(compiler, image_floor):
     require(report.get('floor_installed') is False
             and report.get('native_execution_admission') is False,
             'Compiler qualification has invalid trust boundaries')
-    stages = report.get('stages')
     require(isinstance(stages, list) and len(stages) == 2,
             'Compiler qualification must contain exactly B and C')
     generations = [report.get('preparation'), *stages]
+    if elided:
+        c = stages[1]
+        require(c.get('generation') == 'C' and c.get('produced') is False
+                and c.get('fresh_boot_qualified') is False
+                and isinstance(c.get('fixpoint'), dict)
+                and c['fixpoint'].get('kind') == 'byte-identical-predecessor'
+                and isinstance(generations[0], dict) and isinstance(stages[0], dict)
+                and inventory(c.get('files'), 'C') == inventory(stages[0].get('files'), 'B')
+                == inventory(generations[0].get('files'), 'P'),
+                'Elided generation C requires byte-identical P and B')
     initial = inventory(report.get('initial_seed_files'), 'initial seed')
     inputs = read_json(qualification / 'inputs.json')
     require(isinstance(inputs, dict) and inputs, 'Missing compiler input inventory')
@@ -112,7 +127,7 @@ def verify_proof(compiler, image_floor):
 
     boot_seeds = []
     boot_runtimes = []
-    for label, generation in zip('PBC', generations):
+    for label, generation in zip('PB' if elided else 'PBC', generations):
         require(isinstance(generation, dict) and generation.get('generation') == label
                 and generation.get('produced') is True
                 and generation.get('fresh_boot_qualified') is True,
@@ -147,18 +162,21 @@ def verify_proof(compiler, image_floor):
                 f'Generation {label} has an invalid fresh-boot receipt')
         boot_seeds.append(Path(boot['seed']))
         boot_runtimes.append(boot['runtime'])
+    booted = generations[:2] if elided else generations
     require(len(set(boot_runtimes)) == 1,
             'Generation fresh-boot receipts use different runtimes')
     products = report.get('generation_products')
+    require(products is not None or not elided, 'An elided generation C requires retained products')
     if products is None:
         require(len({path.parent for path in boot_seeds}) == 1,
                 'Generation fresh-boot receipts use different output roots')
     else:
         require(isinstance(products, dict) and set(products) == set('PBC'),
                 'Invalid retained generation products')
-        for label, boot_seed, generation in zip('PBC', boot_seeds, generations):
+        for label, generation in zip('PBC', generations):
             product = Path(products[label])
-            require(STORE.fullmatch(str(product)) and boot_seed == product / label,
+            require(STORE.fullmatch(str(product)) and (
+                        (elided and label == 'C') or boot_seeds['PBC'.index(label)] == product / label),
                     'Retained generation product differs from fresh-boot receipt')
             require((compiler / 'generations' / label).resolve(strict=True) == product,
                     'Retained generation product link differs')
@@ -168,20 +186,21 @@ def verify_proof(compiler, image_floor):
             and isinstance(report.get('initial_seed'), str)
             and Path(report['initial_seed']).is_absolute()
             and all(stage.get('producer_floor') == str(floor)
-                    for stage, floor in zip(generations[1:], boot_seeds[:-1])),
+                    for stage, floor in zip(generations[1:], boot_seeds[:2])),
             'Compiler generation predecessor chain differs')
     require(len({(g['bootstrap']['input_build_key'], g['bootstrap']['input_compiler_key'])
-                 for g in generations}) == 1, 'Compiler inputs changed between generations')
+                 for g in booted}) == 1, 'Compiler inputs changed between generations')
     require(generations[1]['files'] == generations[2]['files'], 'B and C byte inventories differ')
     final = generations[2]['files']
     require(actual_inventory(compiler / 'seed') == final,
             'Installed compiler seed differs from complete generation C inventory')
     keys = manifest_keys(compiler / 'seed/manifest.term')
-    require(all(keys[key] == generations[2]['bootstrap']['input_' + key] for key in keys),
+    require(all(keys[key] == booted[-1]['bootstrap']['input_' + key] for key in keys),
             'Installed compiler manifest differs from qualified compiler keys')
     require(actual_inventory(image_floor) == final,
             'SDK image floor differs from complete qualified compiler seed')
     return {'status': 'passed', 'files': len(final), 'generations': ['P', 'B', 'C'],
+            'fixpoint': 'elided-C: P = B' if elided else 'C = B',
             'manifest_sha256': final['manifest.term'],
             'qualification_sha256': digest(qualification / 'result.json'),
             'inputs_sha256': digest(qualification / 'inputs.json'), **keys}

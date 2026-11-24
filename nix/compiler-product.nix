@@ -35,7 +35,17 @@ let
     commandManager = false;
     trace = true;
   };
-  generation = label: predecessor: planning: worker (pkgs.stdenv.mkDerivation {
+  # P boots the previous qualified compiler whenever that floor's own startup
+  # accepts this source (a startup probe in qualify-artifact-generation). Its
+  # phase identity then equals the previous C's, so unchanged units restore and
+  # only edited units compile. With equal compiler/build keys the floor must
+  # prove its producer hosts (env, loader, bootstrap, ...) came from these
+  # exact host files; an edit there refuses, and P falls back to the committed
+  # foundation as before (443080e95). A toolchain change has no candidate.
+  bootstrapCandidate = if cacheCompatible && previousCompiler != null
+      && builtins.pathExists (previousCompiler + "/seed/manifest.term")
+    then previousCompiler + "/seed" else null;
+  generation = label: predecessor: planning: extra: worker (pkgs.stdenv.mkDerivation {
     pname = "beam-lisp-compiler-generation-${label}";
     version = "1";
     inherit src;
@@ -66,7 +76,7 @@ let
       # particular C cannot fetch newly emitted B units as reproduction proof.
       python3 scripts/qualify-artifact-generation --root "$PWD" --out "$out" \
         --generation ${label} --producer-timeout 1200 --stream \
-        ${pkgs.lib.optionalString (predecessor != null) "--seed ${predecessor}"} \
+        ${pkgs.lib.optionalString (predecessor != null) "--seed ${predecessor}"} ${extra} \
         ${pkgs.lib.optionalString (planning != null) "--planning-units ${planning}/unit-store"} \
         ${pkgs.lib.optionalString (cacheCompatible && previousCompiler != null && previousSource != null)
           ''--baseline "$TMPDIR/baseline.json"''} \
@@ -76,14 +86,14 @@ let
         ''}
     '';
   });
-  # P always boots the committed foundation. A retained current-key floor may
-  # have different runtime-host Source (Env is not an emitter-key input), so
-  # it cannot authenticate against the new producer tree during startup.
-  # Incrementality comes from the verified baseline/units above, independently
-  # of this bootstrap choice. B and C still boot their actual predecessors.
-  p = generation "P" null previousPreparation;
-  b = generation "B" (p + "/P") p;
-  c = generation "C" (b + "/B") p;
+  # B and C boot their actual predecessors. C exists to show that B, booted,
+  # reproduces B. When P's complete bytes equal B's, B's own run booted that
+  # byte-identical compiler and produced B, so C records an elided fixpoint
+  # from the retained P and B products instead of a third full compile.
+  p = generation "P" null previousPreparation
+    (pkgs.lib.optionalString (bootstrapCandidate != null) "--bootstrap-candidate ${bootstrapCandidate}");
+  b = generation "B" (p + "/P") p "";
+  c = generation "C" (b + "/B") p "--elide-when-equal ${p} ${b}";
 in if previousIdentity == identity then previousCompiler else
 pkgs.runCommand "beam-lisp-compiler-1" { nativeBuildInputs = [ pkgs.python3 ]; } ''
   python3 ${src}/scripts/assemble-compiler-generations.py --products ${p} ${b} ${c} --out "$out"

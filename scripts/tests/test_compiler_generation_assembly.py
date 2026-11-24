@@ -76,6 +76,45 @@ class CompilerGenerationAssemblyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Incomplete compiler generation C'):
             ASSEMBLY.assemble(self.products, self.output)
 
+    def elide_c(self, preparation=b'reproduction'):
+        (self.products[0] / 'P/fixture.beam').write_bytes(preparation)
+        path = self.products[0] / 'result.json'
+        report = json.loads(path.read_text())
+        report['generation']['files'] = ASSEMBLY.inventory(self.products[0] / 'P')
+        path.write_text(json.dumps(report))
+        product = self.products[2]
+        for suffix in ('bootstrap.json', 'boot.log', 'producer.log'):
+            (product / f'C.{suffix}').unlink()
+        path = product / 'result.json'
+        report = json.loads(path.read_text())
+        report['generation'].update(produced=False, fresh_boot_qualified=False, elided=True,
+                                    fixpoint={'kind': 'byte-identical-predecessor'})
+        path.write_text(json.dumps(report))
+
+    def test_an_elided_c_is_assembled_from_byte_identical_p_and_b(self):
+        self.elide_c()
+        ASSEMBLY.assemble(self.products, self.output)
+        report = json.loads((self.output / 'qualification/result.json').read_text())
+        self.assertTrue(report['stages'][1]['elided'])
+        self.assertEqual(ASSEMBLY.inventory(self.products[1] / 'B'), ASSEMBLY.inventory(self.output / 'seed'))
+        self.assertFalse((self.output / 'qualification/C.boot.log').exists())
+        self.assertTrue((self.output / 'qualification/B.boot.log').exists())
+
+    def test_c_cannot_be_elided_when_p_and_b_differ(self):
+        self.elide_c(preparation=b'preparation')
+        with self.assertRaisesRegex(ValueError, 'Elided C requires P and B'):
+            ASSEMBLY.assemble(self.products, self.output)
+        self.assertFalse((self.output / 'seed').exists())
+
+    def test_an_unelided_c_still_requires_its_own_fresh_boot(self):
+        self.elide_c()
+        path = self.products[2] / 'result.json'
+        report = json.loads(path.read_text())
+        report['generation']['elided'] = 'true'
+        path.write_text(json.dumps(report))
+        with self.assertRaisesRegex(ValueError, 'Incomplete compiler generation C'):
+            ASSEMBLY.assemble(self.products, self.output)
+
 
 if __name__ == '__main__':
     unittest.main()
