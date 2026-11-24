@@ -48,8 +48,8 @@ build pipeline. The native compiler comes after a go/no-go measurement (N0).
 | 3 | **K2** The checkout's cold path | `./bin/bl --cold` adds ≤ 100 ms over `$SDK/bin/bl --cold` |
 | 3 | **M1** A real edit benchmark | Enchant edit-to-result, cold and warm, recorded |
 | 4 | **R1** Ship it | Installed `bl` rebuilt from main through the release gate, remeasured |
-| 5 | **N4a** Restored units by reference | Std-edit SDK unit work 40 s → < 8 s |
-| 5 | **N4b** Compiler-edit bootstrap | P boots the previous qualified compiler; C skipped when B = P; a `priv/host` edit's SDK ≤ 15 min |
+| ✅ | **N4a** Restored units by reference (batch 23) | Std-edit SDK unit work 40 s → < 8 s |
+| ✅ | **N4b** Compiler-edit bootstrap (batch 23: P/B/C for a host edit ~1,500 s → ~50 s; C elided) | P boots the previous qualified compiler; C skipped when B = P; a `priv/host` edit's SDK ≤ 15 min |
 | 5 | **N4d** Dev SDK outside QEMU | Beams path-normalized so they match the store; a `priv/host` edit runnable in ≤ 3 min |
 | 6 | **N0** Native go/no-go | Per-unit native vs BEAM front-end time, `aot.bl` compiled into the image; N3, N4c, N5 and C3 go ahead only at ≥ 2× |
 | — | W4 | As written below |
@@ -232,6 +232,25 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - `session`, `realm_shared` and the ten files pass; `checkout_transport` exits 0.
   - Warm median: 13 ms in the gate at load 16; 6 ms on main at load 19 before.
 
+
+#### Batch 23 (`423e3c8ee`): N4a and N4b, measured on consecutive preparations
+- **N4a.** Restored units are checked only for what could change (manifest identity, compiler key, exact file list, regular files in bounds) and hard-linked rather than copied. Their bytes are hashed once, at assembly. Locally, unit work for 668 restored units went from ~7.4 s to ~1.2 s, with identical outputs. Tampering is still refused.
+- **N4b.**
+  - P boots the previous qualified compiler when a startup probe (3–15 s) accepts it; otherwise it falls back to the committed seed.
+  - Generation C is elided when P = B byte for byte, because B's own run already is C's proof. When P ≠ B, C runs as before.
+  - Edits to `env.bl`, `loader.bl`, `compiler.bl`, `bootstrap.bl` and `aot_cache.bl` make the probe refuse, and those still take the seed path.
+- **Gate (load ~17, `prepare-checkout-sdk` wall time).**
+  - The batch itself: 674 s.
+  - A `priv/host/delay.bl` comment: 1175 s. P took 40 s (1 compiled, 90 cached), B 8 s, and C was elided.
+    - **But the library recompiled all 668 units (cached 0), in 4 shards of ~415–505 s each.** Every library unit is keyed on the whole compiler key, and any `priv/host` edit rotates it. That is N4c.
+  - A `priv/boot` comment, which rotates the key: 1732 s, against 2967 s in batch 21. The previous compiler was accepted and all 91 compiled.
+  - Going back to the base reuses the SDK in 0 s.
+  - Two layered preparations in a row, across a rotation, both succeeded.
+
+#### N4c ⏳ Per-unit compiler key for library units · S+ · `priv/build/unit-store.bl`, `priv/host/aot.bl`
+- **Why.** After N4b, a `priv/host` edit costs ~50 s of compiler work and ~1,000 s of library recompiling, because every library unit's key includes the whole compiler key.
+- **Change.** Key each library unit on its own inputs plus the bytes of the compiler and host modules that compiling it actually loads. Codegen modules (`emit`, `lower`, `aot`, …) stay in every key. A host module that changes no unit's compiled output therefore restores every unit. Alternatively, use early cutoff: recompile, compare the emitted bytes, and stop when they are equal. That needs the native front end or a cheap compile, so it is weaker.
+- **Done when.** A `priv/host/delay.bl` comment's SDK restores ≥ 95% of library units, and preparation is ≤ 600 s end to end.
 
 #### K1b ⏳ Cold start below 1.2 s · S+ · `priv/host/env.bl`, owner registry
 - After K1, the remaining app start (~1.3 s) is code running, not values recomputed: namespace loads and initializers (~1/3 of samples), the owner registry leasing the whole SDK runtime closure (~15%), native stub compiles (~3%). See the journal section "K1: sealed boot state, and what a seal cannot reach" and `research/checked-tiles/evidence/cold-start-k1.json`.
