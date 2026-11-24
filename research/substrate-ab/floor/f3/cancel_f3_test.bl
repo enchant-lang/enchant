@@ -1,0 +1,125 @@
+; cancel_f3_test.bl — F2 item 4: the command runs in the connection's process.
+;
+; Drives a real AF_UNIX session (the scratch copies `vm.session-f3` / `vm.net-f3`
+; of this branch's priv/std/vm/session.bl and net.bl) and checks what moving the
+; command out of its own child must keep:
+;   - a client that leaves ends the command (no side effect after it) and the
+;     request's custody (the session's in-flight count) is released;
+;   - a command whose process dies on its own is reported (stderr + exit 1);
+;   - a quiet command still sends heartbeats;
+;   - the next request is served normally after each.
+
+(ns f3-cancel-test
+  (:require [vm.session-f3 :as session] [vm.paths :as paths] [vm.idle :as idle] [vm.gateway :as gw]))
+
+(gw/set-starter! (fn [_bin] :not-started))
+
+(defn- setup-tree []
+  (let [root (str "/tmp/bl-f3-cancel-" (erlang/apply :erlang :unique_integer (list (to-list [:positive]))))]
+    (File/mkdir_p! (str root "/priv/boot"))
+    (File/write! (str root "/priv/boot/core.bl") "")
+    root))
+
+(defn- send-request [root argv]
+  (let [ep (:ok (paths/endpoints root))
+        token (File/read! (:token ep))
+        conn (elem (gen_tcp/connect (tuple :local (erlang/binary_to_list (:sock ep))) 0
+                     (list (tuple :inet_backend :inet) :local :binary (tuple :packet 4) (tuple :active false))) 1)]
+    (gen_tcp/send conn (erlang/term_to_binary (tuple :bl 1 :hello {:tree (paths/fingerprint root) :token token})))
+    (gen_tcp/recv conn 0 5000)
+    (gen_tcp/send conn (erlang/term_to_binary
+                         (tuple :bl 1 :request (erlang/apply :crypto :strong_rand_bytes (list 16))
+                                {:argv argv :cwd root :env {}})))
+    conn))
+
+(defn- read-all [conn timeout-ms]
+  (loop [outs [] errs [] beats 0]
+    (let [r (gen_tcp/recv conn 0 timeout-ms)]
+      (if (not= :ok (elem r 0))
+        {:outs outs :errs errs :beats beats :code nil :closed (elem r 1)}
+        (let [f (erlang/binary_to_term (elem r 1)) tag (elem f 2)]
+          (cond
+            (= tag :stdout) (recur (conj outs (elem f 5)) errs beats)
+            (= tag :stderr) (recur outs (conj errs (elem f 5)) beats)
+            (= tag :heartbeat) (recur outs errs (inc beats))
+            (= tag :exit) (do (gen_tcp/close conn) {:outs outs :errs errs :beats beats :code (elem f 4)})
+            :else (recur outs errs beats)))))))
+
+(defn- run [root argv] (read-all (send-request root argv) 20000))
+
+(defn- settle [pred]
+  (loop [n 0] (cond (pred) true (> n 100) false :else (do (Process/sleep 50) (recur (inc n))))))
+
+(defn- served? [root]
+  (let [r (run root (list "eval" "(println (* 6 7))"))]
+    (and (= 0 (:code r)) (some (fn [o] (clojure.string/includes? o "42")) (:outs r)))))
+
+(deftest a-client-that-leaves-ends-the-command-and-releases-the-request
+  (let [root (setup-tree)
+        marker (str root "/marker")
+        listener (:ok (session/start root))
+        before (idle/running)]
+    (try
+      (File/write! (str root "/sleepy.bl")
+                   (str "(Process/sleep 2500) (File/write! \"" marker "\" \"ran\")"))
+      (is (served? root) "a first request is served")
+      (testing "the client closes its socket 400 ms into a 2.5 s command"
+        (let [conn (send-request root (list "run" "sleepy.bl"))]
+          (Process/sleep 400)
+          (gen_tcp/close conn))
+        (Process/sleep 3500)
+        (is (not (File/exists? marker)) "nothing the command would have done after the cancel happened")
+        (is (settle (fn [] (= before (idle/running)))) "the in-flight count is released"))
+      (testing "a client that leaves in the first poll window (before the handler armed) still cancels"
+        (let [conn (send-request root (list "run" "sleepy.bl"))]
+          (gen_tcp/close conn))
+        (Process/sleep 3500)
+        (is (not (File/exists? marker)))
+        (is (settle (fn [] (= before (idle/running))))))
+      (is (served? root) "the VM serves the next request")
+      (finally (session/stop listener)))))
+
+(deftest a-command-whose-process-dies-is-reported-and-released
+  (let [root (setup-tree)
+        listener (:ok (session/start root))
+        before (idle/running)]
+    (try
+      (let [r (run root (list "eval" "(erlang/exit (erlang/self) :boom)"))]
+        (is (= 1 (:code r)) "exit 1")
+        (is (some (fn [e] (clojure.string/includes? e "ended abnormally")) (:errs r)) "with the reason on stderr")
+        (is (some (fn [e] (clojure.string/includes? e "boom")) (:errs r))))
+      (is (settle (fn [] (= before (idle/running)))) "the in-flight count is released")
+      (is (served? root))
+      (finally (session/stop listener)))))
+
+(deftest an-ordinary-error-is-still-the-command-s-own
+  (let [root (setup-tree)
+        listener (:ok (session/start root))]
+    (try
+      (let [r (run root (list "eval" "(throw (ex-info \"nope\" {}))"))]
+        (is (= 1 (:code r)))
+        (is (not (some (fn [e] (clojure.string/includes? e "ended abnormally")) (:errs r)))))
+      (is (served? root))
+      (finally (session/stop listener)))))
+
+(deftest a-quiet-command-still-beats
+  (let [root (setup-tree)
+        listener (:ok (session/start root))]
+    (try
+      (let [r (run root (list "eval" "(do (Process/sleep 6000) (println :done))"))]
+        (is (= 0 (:code r)))
+        (is (>= (:beats r) 1) "a heartbeat arrived during the 6 s silence"))
+      (finally (session/stop listener)))))
+
+(deftest concurrent-requests-each-answer-and-release
+  (let [root (setup-tree)
+        listener (:ok (session/start root))
+        before (idle/running)
+        me (erlang/self)]
+    (try
+      (doseq [i (range 8)]
+        (spawn (fn [] (erlang/send me (tuple :f3-done (run root (list "eval" (str "(println " i ")"))))))))
+      (let [codes (for [_ (range 8)] (receive [:f3-done r] (:code r) (after 20000 :timeout)))]
+        (is (= (repeat 8 0) (vec codes))))
+      (is (settle (fn [] (= before (idle/running)))))
+      (finally (session/stop listener)))))

@@ -1,0 +1,94 @@
+; util_f3_test.bl — scratch copies of this branch's `bl.cli/project-of` memo and
+; `bl.daemon/client-environment` merge (both need an SDK to run for real), checked
+; against the code they replace on the current SDK.
+
+(ns f3-util-test (:require [bl.env :as env]))
+
+;; ── project-of (priv/std/bl/cli.bl), verbatim but for the memo key ──────────
+(def ^:private PROJECT-MEMO (tuple :f3-util-test :project-memo))
+(def ^:private PROJECT-MEMO-LIMIT 64)
+(defn- read-bytes [path]
+  (let [r (erlang/apply :file :read_file (list path))]
+    (when (= :ok (elem r 0)) (elem r 1))))
+(defn project-of [cwd]
+  (let [path (env/find cwd)
+        bytes (when path (read-bytes path))]
+    (if (nil? bytes)
+      (env/project cwd)
+      (let [memo (erlang/apply :persistent_term :get (list PROJECT-MEMO {}))
+            hit (get memo path)]
+        (if (and (some? hit) (= bytes (first hit)))
+          (second hit)
+          (let [p (env/project cwd)]
+            (when (and (not= :dynamic (env/literal path)) (= bytes (read-bytes path)))
+              (erlang/apply :persistent_term :put
+                (list PROJECT-MEMO (assoc (if (>= (count memo) PROJECT-MEMO-LIMIT) {} memo)
+                                          path [bytes p]))))
+            p))))))
+(defn- memo-size [] (count (erlang/apply :persistent_term :get (list PROJECT-MEMO {}))))
+
+(defn- tree []
+  (let [d (str "/tmp/f3-util-" (erlang/unique_integer (list :positive)))]
+    (File/mkdir_p! (str d "/sub/deeper")) d))
+
+(deftest the-memo-answers-what-env-project-answers
+  (let [d (tree)]
+    (File/write! (str d "/env.bl") "{:name \"one\" :paths [\"src\"] :tasks {:hi \"hi.bl\"}}")
+    (doseq [cwd [d (str d "/sub") (str d "/sub/deeper")]]
+      (is (= (env/project cwd) (project-of cwd)))
+      (is (= (env/project cwd) (project-of cwd)) "a hit is the same value"))
+    (testing "an edit is seen at once, a same-size edit too"
+      (File/write! (str d "/env.bl") "{:name \"two\" :paths [\"src\"] :tasks {:hi \"hi.bl\"}}")
+      (is (= "two" (:name (project-of d))))
+      (is (= (env/project d) (project-of d))))
+    (testing "a shape error stays an error value"
+      (File/write! (str d "/env.bl") "{:name 3 :bogus 1}")
+      (is (= (env/project d) (project-of d)))
+      (is (seq (:errors (project-of d)))))
+    (testing "a deleted env.bl is no project"
+      (File/rm! (str d "/env.bl"))
+      (is (nil? (:path (project-of d))))
+      (is (= (env/project d) (project-of d))))))
+
+(deftest a-computed-env-bl-is-evaluated-every-time
+  (let [d (tree)
+        counter (str d "/count")]
+    (File/write! counter "")
+    (File/write! (str d "/env.bl")
+                 (str "(File/write! \"" counter "\" \"x\" (list :append))\n(merge {:name \"dyn\"} {})"))
+    (project-of d) (project-of d) (project-of d)
+    (is (= 3 (count (File/read! counter))) "three reads ran the file three times")
+    (is (= "dyn" (:name (project-of d))))))
+
+(deftest the-memo-is-bounded
+  (dotimes [_ 70]
+    (let [d (tree)] (File/write! (str d "/env.bl") "{:name \"b\"}") (project-of d)))
+  (is (<= (memo-size) 64)))
+
+;; ── client-environment (priv/std/bl/daemon.bl) ─────────────────────────────
+(def owned-names ["BL_ROOT" "BL_EBIN" "BL_SDK_PRODUCT" "BL_SDK_INPUTS" "BL_BUILD_ID"
+                  "BL_CHECKOUT_ROOT" "BL_CHECKOUT_GENERATION" "BL_CHECKOUT_SDK_INPUTS"
+                  "BL_CHECKOUT_SOURCE_GENERATION" "BL_PREPARED_NATIVES" "BL_ARTIFACT_PLATFORM" "BL_BIN"])
+(defn old-ce [os-env vm-env]
+  (let [owned (set owned-names)]
+    (reduce (fn [result key]
+              (cond (contains? owned key) (dissoc result key)
+                    (contains? result key) result
+                    :else (assoc result key nil)))
+            (or os-env {}) (keys vm-env))))
+(defn new-ce [os-env vm-env]
+  (let [tombstones (erlang/apply :maps :from_keys (list (erlang/apply :maps :keys (list vm-env)) nil))
+        owned (filter (fn [k] (erlang/apply :maps :is_key (list k vm-env))) owned-names)]
+    (erlang/apply :maps :without
+      (list (to-list owned) (erlang/apply :maps :merge (list tombstones (or os-env {})))))))
+
+(deftest the-merge-is-the-reduce
+  (let [vm (into {} (System/get_env))
+        cases [nil {} vm {"A" "1"} (assoc vm "BL_ROOT" "/elsewhere" "NEW" "v")
+               (dissoc vm "PATH" "HOME") {"BL_BIN" "x" "BL_NOT_OWNED" "y"}
+               (assoc {} "BL_ROOT" "r") ]]
+    (doseq [c cases]
+      (is (= (old-ce c vm) (new-ce c vm))))
+    (testing "an owned name the VM lacks stays as the client sent it"
+      (let [vm2 (dissoc vm "BL_SDK_PRODUCT")]
+        (is (= (old-ce {"BL_SDK_PRODUCT" "p"} vm2) (new-ce {"BL_SDK_PRODUCT" "p"} vm2)))))))
