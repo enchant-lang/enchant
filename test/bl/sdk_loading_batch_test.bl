@@ -1,41 +1,72 @@
 (ns sdk-loading-batch-test)
 
+;; The admission check, as Source. It needs `data.bounded-cache` cold in the
+;; global env: the check itself initializes it, and a warm test VM may already
+;; have (a second run, `bl.check` or a diagnostic requiring it), so a warm VM
+;; runs it in a fresh VM of the same SDK. It answers the failed checks' labels.
+(def ^:private ADMISSION
+  "(let [root \"data.bounded-cache\"
+         namespaces [root \"data.cache-budget\" \"data.cache-pool\"]
+         pattern (tuple :Elixir.BeamLisp.AOT :sdk_runtime_inventory! 1)
+         failures (atom [])
+         check (fn [ok label] (when-not ok (swap! failures conj label)))]
+    (BeamLisp.Env/with_env :global (fn []
+     (let [before (mapv BeamLisp.Env/loaded_ns? namespaces)
+           binding (BeamLisp.Env/lookup (tuple root \"OWNER-TIMEOUT-MS\"))
+           prior (BeamLisp.AOT/source_sdk_receipt (BeamLisp.Emit/module_for root))]
+      (check (= false (first before)) \"the consumer starts with this SDK namespace cold\")
+      ;; Ward can already have admitted this dependency's immutable code while
+      ;; leaving its namespace cold. That existing proof needs no new traversal.
+      (when prior (check (BeamLisp.AOT/sdk_unit_compiled? root) \"an admitted receipt is compiled\"))
+      (try
+       (erlang/trace_pattern pattern true (list :local :call_count))
+       (BeamLisp.Loader.Server/run (fn [] (BeamLisp.AOT/preload_sdk_image_closure! root)))
+       (check (BeamLisp.AOT/sdk_unit_compiled? root) \"the closure is admitted\")
+       (check (= before (mapv BeamLisp.Env/loaded_ns? namespaces))
+              \"loading immutable objects does not initialize their namespaces\")
+       (check (= binding (BeamLisp.Env/lookup (tuple root \"OWNER-TIMEOUT-MS\")))
+              \"value initializers remain deferred\")
+       (let [admitted (erlang/trace_info pattern :call_count)]
+        (check (= (tuple :call_count (if prior 0 1)) admitted)
+               \"a new group needs one issuer traversal; an admitted group needs none\")
+        (BeamLisp.Loader/ensure_loaded root)
+        (BeamLisp.Env/ensure_sdk_runtime!)
+        (BeamLisp.Env/ensure_sdk_runtime!)
+        (check (= admitted (erlang/trace_info pattern :call_count))
+               \"initialization and subsequent no-ops reuse that exact admitted set\")
+        (check (= (tuple :ok 25) (BeamLisp.Env/lookup (tuple root \"OWNER-TIMEOUT-MS\")))
+               \"the value initializer runs on first load\")
+        (check (= (assoc before 0 true) (mapv BeamLisp.Env/loaded_ns? namespaces))
+               \"only the requested namespace initializes; unused dependencies stay lazy\"))
+       (finally (erlang/trace_pattern pattern false (list :local :call_count)))))))
+    @failures)")
+
+(defn- launcher []
+  (or (System/get_env "BL_QUALIFY_CANDIDATE")
+      (when-let [sdk (System/get_env "BL_SDK_PRODUCT")] (Path/join sdk "bin/bl"))
+      (Path/expand "bin/bl" (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd)))))
+
 (deftest sealed-dependency-admission-preserves-deferred-initializers-and-converges
  (let [image (Path/join (BeamLisp.Tiers/priv_root) "sdk-code.term")
-       root "data.bounded-cache"
-       namespaces [root "data.cache-budget" "data.cache-pool"]
-       pattern (tuple :Elixir.BeamLisp.AOT :sdk_runtime_inventory! 1)]
-  (if-not (File/exists? image)
+       root "data.bounded-cache"]
+  (cond
+   (not (File/exists? image))
    (is (nil? (BeamLisp.AOT/preload_sdk_image_closure! root))
        "source images keep ordinary per-unit loading")
-   (BeamLisp.Env/with_env :global (fn []
-    (let [before (mapv BeamLisp.Env/loaded_ns? namespaces)
-          binding (BeamLisp.Env/lookup (tuple root "OWNER-TIMEOUT-MS"))
-          prior (BeamLisp.AOT/source_sdk_receipt (BeamLisp.Emit/module_for root))]
-     (is (= false (first before)) "the consumer starts with this SDK namespace cold")
-     ;; Ward can already have admitted this dependency's immutable code while
-     ;; leaving its namespace cold. That existing proof needs no new traversal.
-     (when prior (is (BeamLisp.AOT/sdk_unit_compiled? root)))
-     (try
-      (erlang/trace_pattern pattern true (list :local :call_count))
-      (BeamLisp.Loader.Server/run (fn [] (BeamLisp.AOT/preload_sdk_image_closure! root)))
-      (is (BeamLisp.AOT/sdk_unit_compiled? root))
-      (is (= before (mapv BeamLisp.Env/loaded_ns? namespaces))
-          "loading immutable objects does not initialize their namespaces")
-      (is (= binding (BeamLisp.Env/lookup (tuple root "OWNER-TIMEOUT-MS")))
-          "value initializers remain deferred")
-      (let [admitted (erlang/trace_info pattern :call_count)]
-       (is (= (tuple :call_count (if prior 0 1)) admitted)
-           "a new group needs one issuer traversal; an admitted group needs none")
-       (BeamLisp.Loader/ensure_loaded root)
-       (BeamLisp.Env/ensure_sdk_runtime!)
-       (BeamLisp.Env/ensure_sdk_runtime!)
-       (is (= admitted (erlang/trace_info pattern :call_count))
-           "initialization and subsequent no-ops reuse that exact admitted set")
-       (is (= (tuple :ok 25) (BeamLisp.Env/lookup (tuple root "OWNER-TIMEOUT-MS"))))
-       (is (= (assoc before 0 true) (mapv BeamLisp.Env/loaded_ns? namespaces))
-           "only the requested namespace initializes; unused dependencies stay lazy"))
-      (finally (erlang/trace_pattern pattern false (list :local :call_count))))))))))
+   ;; Cold here: check in this VM.
+   (not (BeamLisp.Env/with_env :global (fn [] (BeamLisp.Env/loaded_ns? root))))
+   (is (= [] (BeamLisp/eval (str "(ns sdk-loading-batch.admission)\n" ADMISSION))))
+   ;; Already initialized here: check in a fresh VM of the same SDK.
+   :else
+   (let [file (Path/join (System/tmp_dir!) (str "sdk-admission-" (System/unique_integer (list :positive)) ".bl"))]
+    (try
+     (File/write! file (str "(ns sdk-loading-batch.admission)\n(println (str \"SDK-ADMISSION \" (pr-str "
+                            ADMISSION ")))\n"))
+     (let [[text status] (System/cmd "timeout" (list "-k" "10" "180" (launcher) "--cold" "run" file)
+                           (list (tuple :stderr_to_stdout true) (tuple :env (list (tuple "BL_DAEMON" "off")))))]
+      (is (= 0 status) text)
+      (is (String/contains? text "SDK-ADMISSION []") text))
+     (finally (File/rm file)))))))
 
 (deftest single-class-queries-never-materialize-the-whole-image-inventory
  (let [pattern (tuple :Elixir.BeamLisp.AOT :inventory_term 1)
