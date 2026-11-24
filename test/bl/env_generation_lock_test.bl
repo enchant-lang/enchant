@@ -92,3 +92,56 @@
                                 (after 20 :excluded)))))))
    (is (= :entered (await-tag tag)))
    (finally (when (and @worker (Process/alive? @worker)) (erlang/exit @worker :kill))))))
+
+(defn suspend-registered-lock-waiter [key waiter suspended]
+ (let [lock-key (tuple :bl_generation_lock :Elixir.BeamLisp.Env key)]
+  (loop [left 5000]
+   (when-not (pos? left)
+    (throw (ex-info "No registered lock waiter before deadline" {})))
+   (if-let [row (first (ets/lookup :beam_lisp_lock_waiters lock-key))]
+    (do
+     (erlang/suspend_process waiter)
+     ;; A 1ms retry may have retired the observed alias just before suspension.
+     ;; Only keep a suspension with an alias still registered by that process.
+     (if (some #(= row %) (ets/lookup :beam_lisp_lock_waiters lock-key))
+      (do (reset! suspended true) (elem row 1))
+      (do (erlang/resume_process waiter) (Process/sleep 1) (recur (dec left)))))
+    (do (Process/sleep 1) (recur (dec left)))))))
+
+(deftest several-real-releases-leave-no-lock-wakeup-in-the-callers-mailbox
+ (let [key (erlang/make_ref) tag (erlang/make_ref) unrelated (erlang/make_ref)
+       parent (erlang/self) worker (atom nil) suspended (atom false) alias (atom nil)]
+  (try
+   (BeamLisp.Env/with_generation_lock key
+    (fn []
+     (reset! worker
+      (erlang/spawn
+       (fn []
+        (let [value (BeamLisp.Env/with_generation_lock key (fn [] :entered))
+              messages (elem (erlang/process_info (erlang/self) :messages) 1)]
+         (erlang/send parent (tuple :lock-mailbox-result tag value messages))))))
+     (reset! alias (suspend-registered-lock-waiter key @worker suspended))))
+   ;; The actual release protocol sends eight wakeups to one live alias while
+   ;; its owner is suspended. No forged wakeups or timing lottery are needed.
+   (dotimes [_ 7] (BeamLisp.Env/with_generation_lock key (fn [] :next-holder)))
+   (erlang/send @worker (tuple :application-message unrelated))
+   (erlang/send @worker (tuple :bl_local_lock_released unrelated))
+   (erlang/resume_process @worker)
+   (reset! suspended false)
+   (let [result (receive [:lock-mailbox-result observed value messages] :when (= observed tag)
+                         [value messages] (after 10000 nil))
+         messages (second result)
+         leaked (filter (fn [message]
+                  (and (erlang/is_tuple message) (= 2 (erlang/tuple_size message))
+                       (= :bl_local_lock_released (elem message 0)) (= @alias (elem message 1)))) messages)]
+    (is (= :entered (first result)))
+    (is (empty? leaked) "all queued notifications for this retired alias are drained")
+    (is (some #(= (tuple :application-message unrelated) %) messages))
+    (is (some #(= (tuple :bl_local_lock_released unrelated) %) messages)
+        "cleanup cannot consume another alias's notification")
+    (is (empty? (row-for key)))
+    (is (empty? (ets/lookup :beam_lisp_lock_waiters (tuple :bl_generation_lock :Elixir.BeamLisp.Env key)))))
+   (finally
+    (when (and @worker (Process/alive? @worker))
+     (when @suspended (erlang/resume_process @worker))
+     (erlang/exit @worker :kill))))))
