@@ -59,13 +59,15 @@
   ;; A full request environment must hide variables present only at daemon boot.
   ;; Keep with-env's partial-overlay API; supply explicit deletion tombstones here
   ;; — except for what belongs to the VM itself (see `vm-owned-environment`).
-  (let [owned (set vm-owned-environment)]
-    (reduce (fn [result key]
-              (cond
-                (contains? owned key) (dissoc result key)
-                (contains? result key) result
-                :else (assoc result key nil)))
-            (or os-env {}) (keys (erlang/apply :Elixir.System :get_env (list))))))
+  ;; One native merge, not a reduce over ~100 keys (0.3 ms of every request):
+  ;; a tombstone for each VM variable, the client's values over them, then the
+  ;; VM-owned names the VM has removed (a name the VM lacks stays as sent).
+  (let [vm-env (erlang/apply :Elixir.System :get_env (list))
+        tombstones (erlang/apply :maps :from_keys (list (erlang/apply :maps :keys (list vm-env)) nil))
+        owned (filter (fn [k] (erlang/apply :maps :is_key (list k vm-env))) vm-owned-environment)]
+    (erlang/apply :maps :without
+      (list (to-list owned)
+            (erlang/apply :maps :merge (list tombstones (or os-env {})))))))
 
 (defn handle-in-vm
   "Route one client command THROUGH its project's realm.

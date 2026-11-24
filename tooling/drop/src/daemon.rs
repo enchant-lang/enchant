@@ -800,6 +800,9 @@ enum Hello {
     RestartRequired,
     /// Unreachable, unusable, or a reject we do not recognise.
     No,
+    /// F3: the request went out behind the hello and no answer came in time.
+    /// The VM may yet read and run it, so the caller must not fall back.
+    Unanswered,
 }
 
 /// The build the hello names. Empty for a payload that predates build-named
@@ -818,6 +821,18 @@ fn hello(root: &Path, build: &str, shared: bool) -> Hello {
 
 #[cfg(unix)]
 fn hello_generation(root: &Path, build: &str, shared: bool, generation: Option<&str>) -> Hello {
+    hello_exchange(root, build, shared, generation, None)
+}
+
+/// The hello, and with `request` the request frame right behind it in the same
+/// write (F3): the client no longer waits a round trip for `ready` before it
+/// sends. That is safe because the VM reads a request only after it answered
+/// `ready` (`vm.net/serve-conn`): a reject, or the connection closing with no
+/// answer, means the request was never read and the caller may still fall
+/// back. Only silence is ambiguous, so it is `Hello::Unanswered`.
+#[cfg(unix)]
+fn hello_exchange(root: &Path, build: &str, shared: bool, generation: Option<&str>,
+                  request: Option<&[u8]>) -> Hello {
     // A build-named daemon is found under its endpoint key; a payload that
     // predates build-named daemons binds and looks for the old `<tree>.sock`.
     let ep = if build.is_empty() { legacy_endpoints(root) } else { endpoints_for(root, build, shared) };
@@ -843,11 +858,22 @@ fn hello_generation(root: &Path, build: &str, shared: bool, generation: Option<&
     // The legacy payload predates shared VMs and still keys its hello on the
     // tree fingerprint; every current build uses the endpoint-key fingerprint.
     let fp = if build.is_empty() { tree_fingerprint(root) } else { hello_fingerprint(root, build, shared) };
-    if send_frame(&mut stream, &encode_hello_generation(&fp, &token, build, generation)).is_err() {
+    let hello = encode_hello_generation(&fp, &token, build, generation);
+    let sent = match request {
+        None => send_frame(&mut stream, &hello),
+        Some(request) => send_frames(&mut stream, &[&hello, request]),
+    };
+    if sent.is_err() {
+        // A failed write means the VM had closed: it read nothing to run.
         return Hello::No;
     }
 
-    match recv_frame(&mut stream).ok().and_then(|b| decode(&b)) {
+    let answer = match recv_frame(&mut stream) {
+        Ok(bytes) => decode(&bytes),
+        Err(FrameErr::Timeout) if request.is_some() => return Hello::Unanswered,
+        Err(_) => None,
+    };
+    match answer {
         // PLAN-121/123: the daemon runs each request as its OWN VM process, so
         // it is never "busy" — a ready hello means attach and send.
         Some(Term::Tuple(t)) if is_ready(&t) => {
@@ -879,14 +905,6 @@ pub fn daemon_ready(root: &Path, shared: bool) -> bool {
 
 #[cfg(unix)]
 pub fn try_attach(root: &Path, argv: &[String], shared: bool) -> Attach {
-    let mut stream = match hello(root, &hello_build(), shared) {
-        Hello::Ready(s, _) => s,
-        Hello::RestartRequired => return Attach::RestartRequired,
-        Hello::No => return Attach::Fallback,
-    };
-
-
-    // request — from here, NEVER fall back (side effects may happen).
     let here = std::env::current_dir().unwrap_or_else(|_| root.to_path_buf());
     // The request carries the cwd the command should act in: the process cwd,
     // or `--root DIR`'s realpath. An own VM serves DIR's tree; a shared VM
@@ -900,9 +918,15 @@ pub fn try_attach(root: &Path, argv: &[String], shared: bool) -> Attach {
     // and a cold run the same program, so those workarounds can go back to being
     // performance choices.
     let req = encode_request(argv, &cwd, &env_paths, &collect_env());
-    if send_frame(&mut stream, &req).is_err() {
-        return Attach::LostAfterSend;
-    }
+    // The request rides behind the hello (see `hello_exchange`). From a
+    // `ready` on, NEVER fall back: the command may have side effects.
+    let generation = std::env::var("BL_CHECKOUT_GENERATION").ok();
+    let mut stream = match hello_exchange(root, &hello_build(), shared, generation.as_deref(), Some(&req)) {
+        Hello::Ready(s, _) => s,
+        Hello::RestartRequired => return Attach::RestartRequired,
+        Hello::No => return Attach::Fallback,
+        Hello::Unanswered => return Attach::Stalled(STALL_TIMEOUT_SECS),
+    };
 
     // Silence is not loss: only our patience ran out. The per-frame read is
     // reset by every frame, including the VM's `heartbeat` (accepted and
@@ -1014,6 +1038,18 @@ fn stream_until_exit(stream: &mut UnixStream) -> Attach {
 }
 
 // ── frame io ({packet,4}) ────────────────────────────────────────────────────
+
+/// Several frames in one write: one syscall, and the VM finds them together.
+#[cfg(unix)]
+fn send_frames(stream: &mut UnixStream, payloads: &[&[u8]]) -> std::io::Result<()> {
+    let mut buf = Vec::with_capacity(payloads.iter().map(|p| p.len() + 4).sum());
+    for p in payloads {
+        buf.extend_from_slice(&(p.len() as u32).to_be_bytes());
+        buf.extend_from_slice(p);
+    }
+    stream.write_all(&buf)?;
+    stream.flush()
+}
 
 #[cfg(unix)]
 fn send_frame(stream: &mut UnixStream, payload: &[u8]) -> std::io::Result<()> {

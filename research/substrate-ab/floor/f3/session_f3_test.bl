@@ -1,0 +1,367 @@
+; session_test.bl — the pure-beam-lisp daemon session (PLAN-123 D3).
+;
+; The WHOLE daemon in beam-lisp: vm.net transport + vm.io proxy + vm.wire codec
+; + vm.manager + bl.daemon/handle-in-vm. This drives a real AF_UNIX round-trip
+; and asserts a command's stdout streams back as frames and its exit is framed
+; after — no Elixir daemon code on the path.
+
+(ns vm.session-f3-test
+  (:require [vm.session-f3 :as session] [vm.paths :as paths] [vm.net-f3 :as net] [vm.gateway :as gw]
+            [vm.realm :as realm] [vm.idle :as idle]))
+
+;; A session that claims a name asks for a gateway (lazy start). A test run must never
+;; leave a background process behind, so the starter is a no-op for this file.
+(gw/set-starter! (fn [_bin] :not-started))
+
+(defn- setup-tree []
+  (let [root (str "/tmp/bl-session-test-" (erlang/apply :erlang :unique_integer (list (to-list [:positive]))))]
+    (File/mkdir_p! (str root "/priv/boot"))
+    (File/write! (str root "/priv/boot/core.bl") "")
+    root))
+
+(defn- client-run [root argv]
+  (let [ep (:ok (paths/endpoints root))
+        charlist (erlang/binary_to_list (:sock ep))
+        token (File/read! (:token ep))
+        conn (elem (gen_tcp/connect (tuple :local charlist) 0
+                     (list (tuple :inet_backend :inet) :local :binary (tuple :packet 4) (tuple :active false))) 1)]
+    (gen_tcp/send conn (erlang/apply :erlang :term_to_binary
+                         (list (tuple :bl 1 :hello {:tree (paths/fingerprint root) :token token}))))
+    (gen_tcp/recv conn 0 5000)
+    (let [id (erlang/list_to_binary (erlang/apply :lists :duplicate (list 16 65)))]
+      (gen_tcp/send conn (erlang/apply :erlang :term_to_binary
+                           (list (tuple :bl 1 :request id {:argv argv :cwd root :env {}})))))
+    (loop [outs [] code nil]
+      (let [r (gen_tcp/recv conn 0 10000)]
+        (if (not= :ok (elem r 0))
+          {:outs outs :code code}
+          (let [f (erlang/apply :erlang :binary_to_term (list (elem r 1)))
+                tag (elem f 2)]
+            (cond
+              (= tag :stdout) (recur (conj outs (elem f 5)) code)
+              (= tag :exit) {:outs outs :code (elem f 4)}
+              :else (recur outs code))))))))
+
+(deftest a-command-round-trips-through-the-pure-bl-daemon
+  (testing "eval streams stdout as frames and exits 0 — no Elixir on the path"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))]
+      (erlang/apply :timer :sleep (list 150))
+      (let [r (client-run root (list "eval" "(println (* 6 7))"))]
+        (session/stop listener)
+        (is (= 0 (:code r)))
+        ;; the println's "42" arrived as a stdout frame
+        (is (some (fn [o] (clojure.string/includes? o "42")) (:outs r)))))))
+
+(defn- client-run-env [root argv env]
+  ;; like client-run but binds the request's env map (the client's os-env),
+  ;; proving G5: env is read PROCESS-LOCALLY, never a node-global table.
+  (let [ep (:ok (paths/endpoints root))
+        charlist (erlang/binary_to_list (:sock ep))
+        token (File/read! (:token ep))
+        conn (elem (gen_tcp/connect (tuple :local charlist) 0
+                     (list (tuple :inet_backend :inet) :local :binary (tuple :packet 4) (tuple :active false))) 1)]
+    (gen_tcp/send conn (erlang/apply :erlang :term_to_binary
+                         (list (tuple :bl 1 :hello {:tree (paths/fingerprint root) :token token}))))
+    (gen_tcp/recv conn 0 5000)
+    (let [id (erlang/apply :crypto :strong_rand_bytes (list 16))]
+      (gen_tcp/send conn (erlang/apply :erlang :term_to_binary
+                           (list (tuple :bl 1 :request id {:argv argv :cwd root :env env}))))
+      (loop [outs [] code nil]
+        (let [r (gen_tcp/recv conn 0 20000)]
+          (if (not= :ok (elem r 0))
+            {:outs outs :code code}
+            (let [f (erlang/apply :erlang :binary_to_term (list (elem r 1)))
+                  tag (elem f 2)]
+              (cond
+                (= tag :stdout) (recur (conj outs (elem f 5)) code)
+                (= tag :exit) {:outs outs :code (elem f 4)}
+                :else (recur outs code)))))))))
+
+(deftest g5-a-requests-env-is-read-process-locally
+  (testing "a command reads its OWN request env via the osenv overlay, not a node table"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))]
+      (erlang/apply :timer :sleep (list 150))
+      (let [r (client-run-env root (list "eval" "(vm.osenv/get \"BL_RACE_TEST\")") {"BL_RACE_TEST" "from-request"})]
+        (session/stop listener)
+        (is (= 0 (:code r)))
+        (is (some (fn [o] (clojure.string/includes? o "from-request")) (:outs r)))))))
+
+(deftest g5-two-concurrent-requests-with-different-env-do-not-race
+  (testing "two requests with different env resolve to their OWN value — no node-global race"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))
+          parent (erlang/self)]
+      (erlang/apply :timer :sleep (list 150))
+      (spawn (fn [] (erlang/send parent [:a (client-run-env root (list "eval" "(vm.osenv/get \"BL_RACE\")") {"BL_RACE" "alpha"})])))
+      (spawn (fn [] (erlang/send parent [:b (client-run-env root (list "eval" "(vm.osenv/get \"BL_RACE\")") {"BL_RACE" "beta"})])))
+      (let [a (receive [:a r] r (after 25000 {:outs [] :code :timeout}))
+            b (receive [:b r] r (after 25000 {:outs [] :code :timeout}))]
+        (session/stop listener)
+        (is (some (fn [o] (clojure.string/includes? o "alpha")) (:outs a)))
+        (is (some (fn [o] (clojure.string/includes? o "beta")) (:outs b)))))))
+
+(deftest g1-a-slow-request-does-not-delay-a-concurrent-fast-one
+  (testing "no serial worker: a ~2s request in flight does not queue a fast one behind it"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))
+          parent (erlang/self)]
+      (erlang/apply :timer :sleep (list 150))
+      (spawn (fn [] (erlang/send parent [:slow (client-run root (list "eval" "(do (erlang/apply :timer :sleep (list 2000)) (println :slow))"))])))
+      (erlang/apply :timer :sleep (list 200))
+      (let [t0 (System/monotonic_time :millisecond)
+            fast (client-run root (list "eval" "(println :fast)"))
+            dt (- (System/monotonic_time :millisecond) t0)]
+        (is (= 0 (:code fast)))
+        (is (some (fn [o] (clojure.string/includes? o "fast")) (:outs fast)))
+        (is (< dt 1500))
+        (let [slow (receive [:slow r] r (after 8000 {:outs [] :code :timeout}))]
+          (session/stop listener)
+          (is (some (fn [o] (clojure.string/includes? o "slow")) (:outs slow))))))))
+
+(deftest hello-with-a-bad-token-is-rejected
+  (testing "the security boundary is the token — a wrong one gets :reject"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))]
+      (erlang/apply :timer :sleep (list 150))
+      (let [ep (:ok (paths/endpoints root))
+            charlist (erlang/binary_to_list (:sock ep))
+            conn (elem (gen_tcp/connect (tuple :local charlist) 0
+                         (list (tuple :inet_backend :inet) :local :binary (tuple :packet 4) (tuple :active false))) 1)
+            bad-token (erlang/list_to_binary (erlang/apply :lists :duplicate (list 32 9)))]
+        (gen_tcp/send conn (erlang/apply :erlang :term_to_binary
+                             (list (tuple :bl 1 :hello {:tree (paths/fingerprint root) :token bad-token}))))
+        (let [reply (erlang/apply :erlang :binary_to_term (list (elem (gen_tcp/recv conn 0 5000) 1)))]
+          (session/stop listener)
+          (is (= :reject (elem reply 2))))))))
+
+(defn- hello-reply [root build]
+  (let [ep (:ok (paths/endpoints root))
+        conn (elem (gen_tcp/connect (tuple :local (erlang/binary_to_list (:sock ep))) 0
+                     (list (tuple :inet_backend :inet) :local :binary (tuple :packet 4) (tuple :active false))) 1)]
+    (gen_tcp/send conn (erlang/apply :erlang :term_to_binary
+                         (list (tuple :bl 1 :hello {:tree (paths/fingerprint root)
+                                                    :token (File/read! (:token ep))
+                                                    :build build}))))
+    (let [reply (erlang/apply :erlang :binary_to_term (list (elem (gen_tcp/recv conn 0 5000) 1)))]
+      (gen_tcp/close conn)
+      reply)))
+
+(deftest a-daemon-refuses-a-client-that-expects-another-build
+  (testing "the hello names the build; a different one gets :restart_required, never a run"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))]
+      (erlang/apply :timer :sleep (list 150))
+      (let [mine (paths/build-id)
+            other (hello-reply root (str mine "x"))
+            same (hello-reply root mine)]
+        (session/stop listener)
+        (is (= :reject (elem other 2)))
+        (is (= :restart_required (elem other 3)))
+        (is (= :ready (elem same 2)))
+        (is (= mine (:build (elem same 3))))))))
+
+(deftest a-daemon-records-its-build-and-cleans-up-on-stop
+  (testing ".meta names the tree and build; stop removes sock, token and meta"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))
+          ep (:ok (paths/endpoints root))]
+      (erlang/apply :timer :sleep (list 150))
+      (let [meta (net/read-meta (:meta ep))]
+        (is (= (paths/build-id) (:build meta)))
+        (is (= root (:root meta))))
+      (session/stop listener)
+      (is (not (File/exists? (:sock ep))))
+      (is (not (File/exists? (:token ep))))
+      (is (not (File/exists? (:meta ep)))))))
+
+;; ── a session inside another (U14) ──────────────────────────────────────────
+;;
+;; The warm checkout VM is itself a session, and the tests it runs start more. A
+;; session's stop used to drain the VM: it counted the outer session's requests as
+;; its own (so it never finished, and left its socket behind), set a draining flag
+;; every later outer request was refused by, and closed the outer session's realms.
+
+(defn- wait-until [pred ms]
+  (loop [left ms]
+    (cond (pred) true
+          (<= left 0) false
+          :else (do (erlang/apply :timer :sleep (list 50)) (recur (- left 50))))))
+
+(deftest stopping-an-inner-session-leaves-the-outer-one-serving
+  (testing "an inner stop waits only for its own requests and closes only its own realms"
+    (let [outer-root (setup-tree) inner-root (setup-tree)
+          outer (:ok (session/start outer-root))
+          parent (erlang/self)]
+      (try
+        (let [inner (:ok (session/start inner-root))
+              inner-ep (:ok (paths/endpoints inner-root))
+              base (idle/running)]
+          (erlang/apply :timer :sleep (list 150))
+          (is (= 0 (:code (client-run inner-root (list "eval" "1")))) "the inner session serves")
+          (spawn (fn [] (erlang/send parent [:outer (client-run outer-root (list "eval" "(do (erlang/apply :timer :sleep (list 1500)) (println :outer))"))])))
+          (is (wait-until (fn [] (> (idle/running) base)) 5000) "an outer request is in flight")
+          (is (= :ok (session/stop inner)) "the outer request is not the inner session's to wait for")
+          (is (not (File/exists? (:sock inner-ep))) "so the inner socket is gone")
+          (is (not (some (fn [r] (= r inner-root)) (realm/roots))) "and its realm is closed")
+          (is (some (fn [r] (= r outer-root)) (realm/roots)) "the outer realm is still open")
+          (let [slow (receive [:outer r] r (after 10000 {:outs [] :code :timeout}))]
+            (is (= 0 (:code slow)) "the outer request finished")
+            (is (some (fn [o] (clojure.string/includes? o "outer")) (:outs slow))))
+          (is (= 0 (:code (client-run outer-root (list "eval" "(println :again)"))))
+              "and the outer session still admits requests"))
+        (finally (session/stop outer))))))
+
+(deftest a-requests-output-is-byte-for-byte-what-a-cold-run-prints
+  ;; The first test only asks that "42" be INCLUDED, which is how a daemon that
+  ;; answered `(println 42)` with the literal `~ts~n42` stayed green: io:format
+  ;; sends {:put_chars enc m f args} — a CALL the I/O server must make — and the
+  ;; proxy took the last element, the argument list. Compare whole bytes.
+  (testing "println, a non-ASCII string, and a multi-call command"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))]
+      (erlang/apply :timer :sleep (list 150))
+      (let [out (fn [src]
+                  (let [r (client-run root (list "eval" src))]
+                    (erlang/iolist_to_binary (to-list (:outs r)))))]
+        (is (= "42\n:ok\n" (out "(println 42)")))
+        (is (= "héllo ✓\n:ok\n" (out "(println \"héllo ✓\")")))
+        (is (= ":a\n[1 2]\n:ok\n" (out "(do (println :a) (println [1 2]))"))))
+      (session/stop listener))))
+
+;; ── a silent command is not a lost one ──────────────────────────────────────
+;;
+;; The launcher's client gives up when NO frame arrives for a stall timeout. That
+;; rule is only sound if the VM keeps proving it is alive while a command is quiet.
+;; Without the beat, a test that runs 200 s and prints nothing looks identical to a
+;; wedged VM, and the client had to pick a huge timeout (and then an env var to
+;; change it). With it, "nothing for 60 s" means wedged, and a long command is fine.
+
+(defn- beats-during-a-silent-command
+  "Run a command that prints nothing for `ms`, with the heartbeat every
+   `interval-ms`, and count the heartbeat frames the client saw."
+  [ms interval-ms]
+  (let [me (erlang/self)
+        sent (atom 0)
+        send (fn [_bytes] (swap! sent inc) nil)
+        beat (session/start-heartbeat send (erlang/apply :crypto :strong_rand_bytes (list 16)) interval-ms)]
+    (erlang/apply :timer :sleep (list ms))
+    (session/stop-heartbeat beat)
+    (erlang/apply :timer :sleep (list (* 2 interval-ms)))
+    (let [n @sent]
+      ;; and it really stopped
+      (erlang/apply :timer :sleep (list (* 3 interval-ms)))
+      {:beats n :after-stop (- @sent n)})))
+
+(deftest a-quiet-command-still-sends-heartbeats-and-they-stop-with-it
+  (testing "a 600 ms silence at a 100 ms beat shows several beats, then none"
+    (let [r (beats-during-a-silent-command 600 100)]
+      (is (>= (:beats r) 4) "the client sees life while the command is quiet")
+      (is (= 0 (:after-stop r)) "a finished command leaves no beat behind"))))
+
+;; The command's wait beats from the waiting process itself (U11: one process
+;; start fewer per request), so the same contract is checked on that path.
+(defn- await-quiet-child
+  "Start a child that is silent for `ms` and then answers `code` the way
+   run-command's child does, and wait for it with `session/await-command` at a
+   `interval-ms` beat. Answers the result and the beats seen before and after."
+  [ms code interval-ms]
+  (let [parent (erlang/self)
+        sent (atom 0)
+        send (fn [_bytes] (swap! sent inc) nil)
+        child (spawn (fn [] (erlang/apply :timer :sleep (list ms)) (erlang/send parent [:command-done code])))
+        result (session/await-command child send (erlang/apply :crypto :strong_rand_bytes (list 16)) interval-ms)
+        n @sent]
+    (erlang/apply :timer :sleep (list (* 3 interval-ms)))
+    {:result result :beats n :after (- @sent n)}))
+
+(deftest a-waiting-command-beats-from-its-waiter-and-stops-with-it
+  (testing "a 600 ms silence at a 100 ms beat: several beats, the child's code, nothing after"
+    (let [r (await-quiet-child 600 7 100)]
+      (is (= 7 (:result r)))
+      (is (>= (:beats r) 4) "the client sees life while the command is quiet")
+      (is (= 0 (:after r)) "a finished command leaves no beat behind")))
+  (testing "a client that leaves cancels the command and ends its process"
+    (let [child (spawn (fn [] (erlang/apply :timer :sleep (list 60000))))
+          me (erlang/self)]
+      (erlang/send_after 50 me :client_gone)
+      (is (= :cancelled (session/await-command child (fn [_] nil) (erlang/list_to_binary (list 65)) 1000)))
+      (erlang/apply :timer :sleep (list 50))
+      (is (not (erlang/is_process_alive child)))))
+  (testing "a command whose process dies without answering is exit 1, with a reason on stderr"
+    (let [errs (atom [])
+          child (spawn (fn [] (erlang/exit :boom)))]
+      (is (= 1 (session/await-command child (fn [bytes] (swap! errs conj bytes)) (erlang/list_to_binary (list 65)) 1000)))
+      (is (= 1 (count @errs))))))
+
+(deftest the-beat-is-well-inside-what-a-client-will-wait
+  (testing "the interval the VM beats at is far below the 60 s stall timeout the launcher uses"
+    (is (< vm.wire/HEARTBEAT-MS 10000))
+    (is (>= (quot 60000 vm.wire/HEARTBEAT-MS) 6)
+        "at least six beats fit inside the client's patience, so one lost beat is not a stall")))
+
+(run-tests)
+
+;; ── a command's stderr is the client's stderr ───────────────────────────────
+;;
+;; The CLI reports a failure with `IO.puts(:stderr, …)`, as a cold run does. In a
+;; warm VM `:standard_error` is ONE registered process — the VM's log — so the
+;; error went there and the client printed "ended with exit 1 and no output". The
+;; session's stderr router sends a request's stderr back as :stderr frames.
+
+(defn- client-run-streams [root argv]
+  (let [ep (:ok (paths/endpoints root))
+        charlist (erlang/binary_to_list (:sock ep))
+        token (File/read! (:token ep))
+        conn (elem (gen_tcp/connect (tuple :local charlist) 0
+                     (list (tuple :inet_backend :inet) :local :binary (tuple :packet 4) (tuple :active false))) 1)]
+    (gen_tcp/send conn (erlang/apply :erlang :term_to_binary
+                         (list (tuple :bl 1 :hello {:tree (paths/fingerprint root) :token token}))))
+    (gen_tcp/recv conn 0 5000)
+    (let [id (erlang/apply :crypto :strong_rand_bytes (list 16))]
+      (gen_tcp/send conn (erlang/apply :erlang :term_to_binary
+                           (list (tuple :bl 1 :request id {:argv argv :cwd root :env {}}))))
+      (loop [outs [] errs [] order []]
+        (let [r (gen_tcp/recv conn 0 20000)]
+          (if (not= :ok (elem r 0))
+            {:out "" :err "" :code nil :order order}
+            (let [f (erlang/apply :erlang :binary_to_term (list (elem r 1)))
+                  tag (elem f 2)]
+              (cond
+                (= tag :stdout) (recur (conj outs (elem f 5)) errs (conj order :stdout))
+                (= tag :stderr) (recur outs (conj errs (elem f 5)) (conj order :stderr))
+                (= tag :exit) {:out (erlang/iolist_to_binary (to-list outs))
+                               :err (erlang/iolist_to_binary (to-list errs))
+                               :code (elem f 4) :order order}
+                :else (recur outs errs order)))))))))
+
+(deftest a-failing-command-reports-its-error-to-the-client
+  (testing "an undefined var, a badarg and an explicit stderr write all reach the client"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))]
+      (erlang/apply :timer :sleep (list 150))
+      (let [undef (client-run-streams root (list "eval" "(println undefined-thing-xyz)"))
+            badarg (client-run-streams root (list "eval" "(erlang/element 5 (tuple 1))"))
+            written (client-run-streams root (list "eval" "(do (println :before) (IO/puts :stderr \"to-stderr\") (println :after))"))
+            spawned (client-run-streams root (list "eval" "(let [me (erlang/self)] (spawn (fn [] (IO/puts :stderr \"from-child\") (erlang/send me :done))) (receive :done :ok))"))]
+        (session/stop listener)
+        (is (= 1 (:code undef)))
+        (is (clojure.string/includes? (:err undef) "undefined-thing-xyz"))
+        (is (= 1 (:code badarg)))
+        (is (clojure.string/includes? (:err badarg) "out of range"))
+        (is (= 0 (:code written)))
+        (is (= "to-stderr\n" (:err written)))
+        ;; stdout and stderr keep the order the command wrote them in
+        (is (= [:stdout :stderr :stdout] (vec (take 3 (:order written)))))
+        ;; a process the command spawned inherits its group leader, and its stderr
+        (is (clojure.string/includes? (:err spawned) "from-child"))))))
+
+(deftest a-write-outside-any-request-keeps-the-vms-own-stderr
+  (testing "the router passes a write with no request proxy to the original device"
+    (let [root (setup-tree)
+          listener (:ok (session/start root))]
+      (erlang/apply :timer :sleep (list 150))
+      (is (= :ok (IO/puts :stderr "session-test: outside any request")))
+      (is (erlang/is_pid (erlang/whereis :standard_error)))
+      (session/stop listener))))
