@@ -46,7 +46,7 @@ build pipeline. The native compiler comes after a go/no-go measurement (N0).
 | ✅ | **K1 + K1b** Sealed boot state, lazy owner registry and lease (batch 25: cold `bl run` ~1.19 s median, was 2.06–2.44 s) | Cold `$SDK/bin/bl --cold run` ≤ 1.2 s median |
 | 🔨 | **F3** Fast entry and request (batch 26: `.bl/bin/bl` 4.7 ms warm at the repo root; ≤ 2 ms needs a resident client) | Warm unchanged request ≤ 2 ms on a quiet machine |
 | ✅ | **K2** The checkout's cold path (batch 26: +55 ms over the SDK's own, was +570) | `./bin/bl --cold` adds ≤ 100 ms over `$SDK/bin/bl --cold` |
-| 3 | **M1** A real edit benchmark | Enchant edit-to-result, cold and warm, recorded |
+| 🧪 | **M1** A real edit benchmark (2026-11-24: body edit 448–500 ms, macro edit 395–423 ms, `priv/lib` edit 1.1–1.5 s, warm test 159 ms, first command in a fresh VM 5.8 s; next M2, M3, M4) | Enchant edit-to-result, cold and warm, recorded |
 | 4 | **R1** Ship it | Installed `bl` rebuilt from main through the release gate, remeasured |
 | ✅ | **N4a** Restored units by reference (batch 23) | Std-edit SDK unit work 40 s → < 8 s |
 | ✅ | **N4b** Compiler-edit bootstrap (batch 23: P/B/C for a host edit ~1,500 s → ~50 s; C elided) | P boots the previous qualified compiler; C skipped when B = P; a `priv/host` edit's SDK ≤ 15 min |
@@ -343,8 +343,38 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 #### R1 ⏳ Ship it · release
 - The installed `bl` is October's drop. Rebuild it from main through the release gate, with the `AUTO_RELEASE_ENABLED` rehearsal (AGENTS.md); root deploys. Remeasure installed warm and cold.
 
-#### M1 ⏳ A real edit benchmark · measurement
+#### M1 🧪 A real edit benchmark · measurement · branch `lane/m1`
 - Edit one Enchant namespace (`/home/othman/projects/enchant`), once a body and once a macro provider. Time it until the result shows, cold and warm, and record that as the user-path baseline.
+- **Measured 2026-11-24** on main `535538242`, SDK `vdd8ppwp`, platform `k3f6kmfx`, load 6.6–7.8 (`research/checked-tiles/evidence/m1-edit-benchmark.json`; script `research/substrate-ab/m1/m1.py`, private copy by `copy.sh`).
+  - `/home/othman/projects/enchant` is this repository. The run used a private `git worktree` of main whose `.bl` links to main's exact client and SDK, so its VM was its own (`$MAIN/bin/bl` would share main's VM with the integrator and other agents, and a `priv/lib` edit needs an engine checkout). Same VM pid through every cycle; nothing prepared.
+  - Enchant has no project macro provider with project dependents, so the copy adds `scene_demo/m1_guard.bl`, expanded by `scene-demo.frame-plan` and `scene-demo.film`. Every edit was checked by output.
+
+  | Case (5 cycles; wall ms, median [min–max]) | `bl test frame_plan_test` | `bl run` probe |
+  |---|---|---|
+  | 1 Warm, unchanged (n=15) | 159 [119–620] | 62 [33–334]; `run examples/hello.bl` 192 [148–311]; `check` 202 [118–1,649] |
+  | 2 Body edit, first / repeated | 464 [353–16,289] / 448 [371–592] | — / 500 [374–665] |
+  | 3 Macro provider edit, first / repeated | — / 406 [337–484] | 395 [359–485] / 423 [375–519] |
+  | 4 Cold: `--cold` / first command after `realm stop` | 4,018 [3,325–5,431] / 5,765 [5,205–6,494] | `--cold run hello` 2,028 [1,693–4,037] |
+  | 5 `priv/lib/scene/core.bl` edit (U15), first / repeated / revert | — / 1,080 [986–1,334] | 1,531 [968–1,662] / 1,175 [1,069–1,304] / 1,066 [978–1,195] |
+
+  - **Where it goes.** Client: 0.6 ms unchanged; 10–17 ms after a project edit; after a `priv/lib` edit the generation service times out at 150 ms and the client inventories locally (118–404 ms; once 15.5 s after a body edit). VM handler: ~1 ms unchanged; +47–67 ms `realm/open` after a project edit; ~1.1 s of overlay after a `priv/lib` edit. Compile: `AOT/ensure_loaded_local` is `:no_module` for every project namespace in every new realm, so any edit recompiles the whole loaded project closure (frame-plan 80–133 ms, film 85–127, guard 10–21): a macro edit recompiles 3 of 3, a body edit too. The test file recompiles on every `bl test` (6–12 ms), and the first `bl run` after a `bl test` recompiles the project again (~200–320 ms). Run: an unchanged warm test is ~40% loader file probing, ~35% compiling. The first `bl check` per VM compiles `bl.check` and 27 more SDK namespaces from source (`bl.check` 897 ms).
+  - The 2026-11-20 numbers (body 170–269 ms, macro 167–169 ms) were a two-file scratch project on the October drop and are not comparable.
+- **Gate.** None (measurement only). To reproduce it: `bash research/substrate-ab/m1/copy.sh $MAIN /tmp/m1-$USER/enchant`, then `cd /tmp/m1-$USER/enchant && work run --memory 4G --timeout 2400 -- python3 -I $WT/research/substrate-ab/m1/m1.py --checkout /tmp/m1-$USER/enchant --out OUT --cycles 5 --cold 5`; remove it with `copy.sh --remove`.
+
+#### M2 ⏳ Project namespaces restored, not recompiled, when a realm retires · S+ · BL runtime (`priv/host/aot.bl` `ensure_loaded_local`, `priv/host/loader.bl` `do_load`) · from M1
+- **Why.** An edit to one 18-line namespace costs 450–500 ms, because the new realm recompiles every loaded project namespace (`ensure_loaded_local` always misses). The cost scales with the project, not the edit. `bl run` and `bl test` also don't share loaded project code, so alternating them recompiles each time.
+- **Change.** Keep compiled project units keyed by source digest plus the digests of the macro providers and `:require`d declarations each unit read (the U12a replay and the N4c reuse rule are the precedents). A new realm restores unchanged units and recompiles only the edited namespace and those whose recorded macro inputs changed. Share the key across `run` and `test` realms of one project generation.
+- **Done when.** In `m1.py`, a body edit's first command is ≤ 200 ms median and recompiles 1 namespace; a macro-provider edit recompiles the provider and its expanding dependents only, and both still show the new expansion (15/15). The first `bl run` after a `bl test` recompiles nothing.
+
+#### M3 ⏳ The first command in a fresh checkout VM costs what `--cold` costs · S · `tooling/drop` (cold child), `priv/std/vm/manager.bl`
+- **Why.** The first `bl test` after `realm stop` takes 5.2–6.5 s, 1.7 s more than `bl --cold test` of the same file (3.3–5.4 s). Every user pays it once per VM: after a reboot, after `realm stop`, after a runtime edit.
+- **Change.** First split the 5.8 s with `BL_CHECKOUT_PHASE_TIMES=1` and the K1/U5 phase stamps: client wait for readiness, scope start, generation service start, VM boot, realm open, first-command compile. Then remove the warm path's surplus over `--cold`, for example by running the first command in the booting VM rather than waiting for readiness and reconnecting.
+- **Done when.** `first-in-fresh-vm/test` in `m1.py` ≤ the `cold/test` median of the same run, over 5 cycles, load recorded.
+
+#### M4 ⏳ A `priv/lib` edit costs its compile, not an SDK inventory · S+ · `priv/std/bl/dev-overlay.bl`, `priv/host/env.bl` (`retain_sdk_runtime!`), `tooling/drop/src/generation.rs`
+- **Why.** A one-function `priv/lib/scene/core.bl` edit costs 1.1–1.5 s, and so does its revert. About 1.1 s is in the VM handler before the command runs: the sampler shows `AOT/sdk_runtime_inventory_uncached!`, `Env/retain_sdk_runtime!` and `install_dev_sdk_unit!`. Before that, the generation service declines at its 150 ms read timeout and the client inventories the tree locally (118–404 ms). Once, after a project edit, that local inventory took 15.5 s.
+- **Change.** Re-derive only the replaced unit's rows in the runtime inventory, not the whole SDK closure. Have the generation service answer a reloadable-source change, or answer "changed" within a few ms, instead of timing out. Find and bound the 15 s local inventory (cold digest cache?).
+- **Done when.** In `m1.py`, `lib/first` and `lib/repeat` ≤ 400 ms median, the client ≤ 20 ms on those rows, and no client row over 1 s across 5 cycles.
 
 ### U — the request path (what every user pays)
 
