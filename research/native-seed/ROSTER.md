@@ -51,7 +51,7 @@ build pipeline. The native compiler comes after a go/no-go measurement (N0).
 | ✅ | **N4a** Restored units by reference (batch 23) | Std-edit SDK unit work 40 s → < 8 s |
 | ✅ | **N4b** Compiler-edit bootstrap (batch 23: P/B/C for a host edit ~1,500 s → ~50 s; C elided) | P boots the previous qualified compiler; C skipped when B = P; a `priv/host` edit's SDK ≤ 15 min |
 | 5 | **N4d** Dev SDK outside QEMU | Beams path-normalized so they match the store; a `priv/host` edit runnable in ≤ 3 min |
-| 6 | **N0** Native go/no-go | Per-unit native vs BEAM front-end time, `aot.bl` compiled into the image; N3, N4c, N5 and C3 go ahead only at ≥ 2× |
+| 🧪 | **N0** Native go/no-go (branch `lane/n0`: **no-go**, native 1.86× *slower* at the median unit) | Per-unit native vs BEAM front-end time, `aot.bl` compiled into the image; N3, N4c, N5 and C3 go ahead only at ≥ 2× |
 | — | W4 | As written below |
 | — | C2 | Dropped: its prototype measured 0.4%, within noise |
 
@@ -567,6 +567,39 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - Preparing the SDK for the same tree gives the same results.
 
 ### N — the native compiler on the default path
+
+#### N0 🧪 Native go/no-go · branch `lane/n0` · measurement only · **no-go**
+- **Measured (2026-11-24, SDK `8as75r…`, all 668 units).** Same units, same SDK, one process each side. Native ran 4 times and the BEAM 3, in pairs under the same load (1-min load 4.5–10).
+  - **Native** compiles the front end into the image. `front-end/n0/compose.py` makes `lower-core`, `lower`, the hook, `host.record` and `host.aot` (hooked `aot.bl` + `stage.bl` + a timed driver) into units. `qualify.bl candidate --additions --codegen` qualifies the result 13/13.
+  - **BEAM** runs `prepare_unit` up to `lower/module->core`. The generated-module beam compile inside `prepare_unit` is timed and removed.
+  - **Identity.** Descriptors and Core are `=:=` for 664/668 units. The 4 that differ are N2b's reasons.
+
+  | | native | BEAM |
+  |---|---|---|
+  | front to Core, 667 units | 349.8 s (348.6–361.4 per run) | 256.4 s (255.7–263.3) |
+  | median unit | 316.8 ms | 184.5 ms |
+  | 20 smallest units | 104 ms | 53 ms |
+  | fit | 144 ms + 28.7 ms/KB | 142 ms + 18.3 ms/KB |
+  | `module->core` alone | 18.4 s | 14.5 s |
+  | warm restage, 4-line unit | 91 ms | 53 ms (`prepare_unit`); 36 ms (`eval_string`) |
+
+  - **Ratio BEAM/native.** 0.73 of totals and 0.54 at the median unit (p10 0.40, p90 1.00).
+  - **Where native wins.** It is faster on 66 of 667 units and ≥ 2× faster on 20. All four size quartiles are 1.7–2.1× slower natively. Of the 10 largest units, only `tooling.pulse` is faster natively.
+  - **Not counted on the native side**, because it still comes from the BEAM:
+    - custody, 13.4 s;
+    - the kernel, 5.5 s per SDK;
+    - the MD5 round trip, a second pass of 55 s for the 75 module-generating units, plus 2.2 s on the BEAM.
+  - **Against N2b.** Compiling the front end in was 1.8× faster than N2b's evaluated harness: 413–428 s against 745 s with writes and GC.
+- **Why no-go.**
+  - The bar was native ≥ 2× faster per unit. It is 1.86× slower, so reaching the bar needs ~3.7×.
+  - Even lowering, the same BL code on both sides, is 1.27× slower natively.
+  - The warm native floor (84–104 ms per unit) is above the BEAM's (`prepare_unit` ~50 ms, `eval_string` of a 4-line namespace ~36 ms), so a native compile service would make a project edit slower.
+  - **So N3, N4c, N5 and C3 stay parked.**
+- **Host edits (native-only, research).**
+  - `host/native-data-bifs.scm`: `host/n0-now-us/0`. The image's `erlang/monotonic_time` is the virtual clock.
+  - `host/native-refusals.scm`: `native-front-refusals`, the 126 remotes the compiled front end names that no host file provides. They are refused at their call, as an evaluated call was.
+  - Both reach an image only through `qualify.bl derive`, never through `chez-main`'s own files.
+- **Evidence.** `research/checked-tiles/evidence/n0-native-vs-beam.json`. Journal 06, "N0". Tooling: `research/native-seed/front-end/n0/run.sh` (setup / native / beam), `summarize.py`.
 
 #### N1 ✅ `cerl` as data on the native host · S+ · native-only
 - **Why.** The native image already carries `lower` and `lower-core`

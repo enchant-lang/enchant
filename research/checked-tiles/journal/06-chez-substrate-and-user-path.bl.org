@@ -567,3 +567,61 @@ Six alternating pairs at load 18–22 give 2,159 → 1,170 ms, with the app star
 
 Evidence: =research/checked-tiles/evidence/cold-start-k1b.json=.
 
+
+* N0: the native front end against the BEAM's, per unit (2026-11-24)
+
+The plan made the native compiler wait on one question: is the Chez front end faster than the BEAM's on the work =bl= actually does? The earlier numbers could not say. N2b staged 666 units in 745 s, and the BEAM's dump prepared 662 in 549 s, but the two ran on different harnesses and different SDKs, and N2b *evaluated* =aot.bl= at run time.
+
+N0 measures source to Core per unit, on the same 668 units of one SDK (=8as75r…=), one process on each side.
+
+- *Native.* The front end is compiled into the image, not evaluated. =front-end/n0/compose.py= turns =lower-core=, =lower=, =native-front.hook=, =host.record= and =host.aot= into units; =host.aot= is =aot.bl= hooked, plus =stage.bl= and a timed driver. =qualify.bl candidate --additions --codegen= then appends them to the bundle, refreshes =core=, =compiler= and =host.compiler= to the SDK's sources, and qualifies the result 13/13 at a codegen fixpoint.
+- *BEAM.* =open_workspace= → =prepare_unit= → =close_workspace!=, then =lower/module->core= over the plans' descriptors. =prepare_unit= compiles a unit's generated modules to beams inside itself; that compile is timed again on the same descriptors and removed, so both sides stop at Core.
+
+Compiling the front end in took four things the evaluated copy never needed:
+- The linker wants a target for every remote. 126 keys that no host file provides are now named refusals (=host/native-refusals.scm=, listed by =n0/remotes.bl=). Each fails at its call, as the evaluated call did.
+- =host.aot='s require closure has to name =lower=, the hook and =host.record=.
+- The image's core has no =vector=.
+- main's =core= now calls =BeamLisp.Env/namespaces=, which nothing in staging reaches.
+
+The image has no real clock either (=erlang/monotonic_time= is the virtual seed clock), so =host/n0-now-us= reads Chez's monotonic clock.
+
+Each BEAM run also checks the native output. Descriptors are =:== the BEAM's, and Core terms are =:== =module->core= of the BEAM's descriptor, for 664 of 668 units. The 4 that differ are N2b's named reasons. So both sides did the same work.
+
+There were four native runs and three BEAM runs. Runs 2–4 and 1–3 went in pairs, at the same time and so under the same load (1-minute load 4.5–10). A unit's time is its median over runs.
+
+#+begin_rosetta
+Measure | native | BEAM
+front to Core, 667 units | 349.8 s (348.6–361.4 per run) | 256.4 s (255.7–263.3)
+median unit | 316.8 ms | 184.5 ms
+20 smallest units (≤ 806 bytes), median | 104 ms | 53 ms
+least-squares line | 144 ms + 28.7 ms/KB | 142 ms + 18.3 ms/KB
+lowering alone (=module->core=, the same BL) | 18.4 s | 14.5 s
+datom.conn (280 KB), the largest unit | 7.28 s | 4.25 s
+#+end_rosetta
+
+BEAM time over native time is 0.73 on the totals and 0.54 at the median unit (p10 0.40, p90 1.00). Native is faster on 66 of 667 units, and at least 2× faster on 20. The size quartiles all sit at native 1.7–2.1× slower. Of the ten largest units, only =tooling.pulse= is faster natively (1.2 s against 2.4 s).
+
+Lowering runs the same BL code on both sides and is still 1.27× slower natively. That points at the native runtime, not at the staging harness.
+
+Compiling the front end into the image made the native side 1.8× faster than N2b's evaluated harness: 413–428 s with writes and GC, against 745 s. It is still slower than the BEAM.
+
+The native path also still leans on the BEAM, and none of this is in the native number:
+- *Custody*: closure hashes, stamps and sha256s, 13.4 s in total (5.2 ms median per unit).
+- *Constructor kernel*: 5.5 s, once per SDK, in a cold VM.
+- *The MD5 round trip* for the 75 units whose plans generate modules. Only a BEAM compile can answer a generated module's MD5, so those units are staged twice: 55.0 s on the first pass, 54.8 s on the second, plus 2.2 s on the BEAM.
+
+*Warm compile.* This is one unit staged and lowered again in the already-running compiler, five times after the corpus pass, with the first repeat dropped.
+
+- For the four-line =reload.preinit-counter=, native takes 91 ms, the BEAM's =prepare_unit= 53 ms, and the BEAM's project path (=Compiler/eval_string=: read, compile, load, run) 36 ms.
+- For 6–8 KB units, native and =prepare_unit= are level on =auth.audit= and =bl.realm= (195/201 ms, 291/317 ms). On =credential.pending= and =diagnostics.otp=, native takes 1.7–2× as long.
+
+The "~2 ms per project edit" figure is a file with no namespace work in it. A namespace of four lines already costs 34–39 ms on the BEAM's own path. The native staging floor is 84–104 ms per unit, so a native compile service would raise what an edit pays, not lower it.
+
+*Recommendation: no-go.*
+- The bar was native ≥ 2× faster per unit on real units, and native is 1.86× slower at the median unit.
+- To pass, it would need about 3.7× more. No native optimisation measured so far (C1, C2) has moved the reader job by more than a few per cent.
+- N3, N4c, N5 and C3 stay parked. The edit costs that matter are the BEAM's own: the fixed SDK pipeline (N4), and the per-namespace floor of =prepare_unit= and =eval_string=.
+
+The native image remains worth keeping as a qualification target, but not as the default front end.
+
+Evidence: =research/checked-tiles/evidence/n0-native-vs-beam.json=. The tooling is in =research/native-seed/front-end/n0/=.
