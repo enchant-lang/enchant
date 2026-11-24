@@ -22,15 +22,20 @@
 ; Limits: a `def` captured by another namespace keeps its old value until that
 ; namespace reloads, and a macro edit reaches only code compiled after it (the
 ; project recompiles when its realm retires). A NEW library file is not an SDK
-; unit: it needs an SDK preparation.
+; unit: it needs an SDK preparation. A unit that defines a server owner (such
+; as `data.bounded-cache/owner`) or whose code a live process pins cannot be
+; swapped in place: it is held, never half-loaded, and the SDK's code keeps
+; running for it, with a note once per digest.
 
 (ns bl.dev-overlay)
 
-(def ^:private state-key :bl.dev-overlay/state)
+(defn- state-key []
+  ;; One state per checkout root (a VM serves one; a test may point at another).
+  (tuple :bl.dev-overlay/state (System/get_env "BL_CHECKOUT_ROOT")))
 
-(defn- state [] (persistent_term/get state-key {:applied {} :noted #{}}))
+(defn- state [] (persistent_term/get (state-key) {:applied {} :failed {} :noted #{}}))
 
-(defn- put-state! [s] (persistent_term/put state-key s) s)
+(defn- put-state! [s] (persistent_term/put (state-key) s) s)
 
 (defn- beneath? [parent child]
   (or (= parent child) (String/starts_with? child (str parent "/"))))
@@ -106,60 +111,91 @@
 
 (defn- apply-all!
   "Install each file; a unit that needs another unit's new code is retried
-   after the rest. Returns {rel error} for what still failed."
+   after the rest. Returns {:failed {rel error} :held {rel module}}: `held` are
+   units running code that cannot be replaced in place (nothing was loaded)."
   [root rels]
-  (loop [pending rels pass 0]
-    (let [results (reduce (fn [errs rel]
-                            (try (install! root rel) errs
-                                 (catch e (assoc errs rel e))))
-                          {} pending)]
-      (if (or (empty? results) (= pass 1) (= (count results) (count pending)))
-        results
-        (recur (vec (keys results)) (inc pass))))))
+  (loop [pending rels pass 0 held {}]
+    (let [round (reduce (fn [out rel]
+                          (try (let [r (install! root rel)]
+                                 (if (:held r) (assoc-in out [:held rel] (:held r)) out))
+                               (catch e (assoc-in out [:failed rel] e))))
+                        {:failed {} :held held} pending)
+          failed (:failed round)]
+      (if (or (empty? failed) (= pass 1) (= (count failed) (count pending)))
+        round
+        (recur (vec (keys failed)) (inc pass) (:held round))))))
+
+(defn- blocking-error [failed]
+  (ex-info (str "library sources did not compile in the warm VM:\n"
+                (apply str (map (fn [[rel f]] (str "  " rel ": " (:message f) "\n")) (sort failed))))
+           {:kind :dev-overlay-failed :files (vec (sort (keys failed)))}))
 
 (defn sync!
   "Bring the VM's SDK units in line with the checkout's library sources, once
-   per request generation. Returns nil, or throws with every file that failed
-   to compile (the command does not run on a half-applied tree)."
+   per request generation. A file that failed to compile is not compiled again
+   until its bytes change; while it stays broken every command fails with its
+   error, re-raised from state (one persistent_term read). A unit whose server
+   is running is held: a note once per digest, the SDK's code keeps running."
   [generation]
-  ;; The common case is one persistent_term read: the generation is unchanged.
-  (when-let [root (and generation (not= generation (:generation (state)))
-                       (erlang/function_exported :Elixir.BeamLisp.Env :dev_sdk_overlay_root 0)
-                       (BeamLisp.Env/dev_sdk_overlay_root))]
-      (erlang/apply :global :trans
-        (list (tuple :bl_dev_overlay (erlang/self))
-          (fn []
-            (let [s (state)]
-              (when (not= generation (:generation s))
-                (let [p (policy root)
-                      sdk-priv (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
-                      found (scan root sdk-priv p)
-                      digests (into {} (map (fn [rel] [rel (digest (Path/join root rel))]) (:changed found)))
-                      applied (:applied s)
-                      due (vec (filter (fn [rel] (not= (get digests rel) (get applied rel))) (:changed found)))
-                      reverted (vec (remove (fn [rel] (contains? digests rel)) (keys applied)))]
-                  (doseq [[rel why] (:held found)]
-                    (note-once! [rel (digest (Path/join root rel))]
-                      (str "bl: " rel (if (= why :compiler)
-                                        " feeds the compiler key (nix/producer-sources.nix)"
-                                        " serves the request itself")
-                           " and differs from the running SDK; it is NOT reloaded."
-                           " Run scripts/prepare-checkout-sdk (or stop BL_SDK_REUSE_CURRENT) for it.")))
-                  (doseq [rel (:new found)]
-                    (note-once! [rel :new]
-                      (str "bl: " rel " is not in the running SDK; a new library file needs scripts/prepare-checkout-sdk.")))
-                  (let [failed (apply-all! root (into due reverted))
-                        applied (reduce (fn [m rel] (if (contains? failed rel) m
-                                                      (if (contains? digests rel) (assoc m rel (get digests rel)) (dissoc m rel))))
-                                        applied (into due reverted))]
-                    (put-state! (assoc (state) :applied applied
-                                       :generation (if (empty? failed) generation (:generation s))))
-                    (when (seq failed)
-                      (throw (ex-info (str "library sources did not compile in the warm VM:\n"
-                                           (apply str (map (fn [[rel e]] (str "  " rel ": " (ex-message e) "\n")) failed)))
-                                      {:kind :dev-overlay-failed :files (vec (keys failed))})))
-                    (when (seq (into due reverted))
-                      {:applied (count due) :reverted (count reverted)}))))))))))
+  (let [s (state)]
+    (if (= generation (:generation s))
+      ;; The common case: one persistent_term read.
+      (when (seq (:failed s)) (throw (blocking-error (:failed s))))
+      (when-let [root (and generation
+                           (erlang/function_exported :Elixir.BeamLisp.Env :dev_sdk_overlay_root 0)
+                           (BeamLisp.Env/dev_sdk_overlay_root))]
+        (erlang/apply :global :trans
+          (list (tuple :bl_dev_overlay (erlang/self))
+            (fn []
+              (let [s (state)]
+                (if (= generation (:generation s))
+                  (when (seq (:failed s)) (throw (blocking-error (:failed s))))
+                  (let [p (policy root)
+                        sdk-priv (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
+                        found (scan root sdk-priv p)
+                        digests (into {} (map (fn [rel] [rel (digest (Path/join root rel))]) (:changed found)))
+                        applied (:applied s)
+                        ;; a failure stands while its bytes do; a new edit retries
+                        failed (into {} (filter (fn [[rel f]] (= (:digest f) (get digests rel))) (:failed s)))
+                        due (vec (filter (fn [rel] (and (not= (get digests rel) (get applied rel))
+                                                        (not (contains? failed rel))))
+                                         (:changed found)))
+                        reverted (vec (remove (fn [rel] (contains? digests rel)) (keys applied)))
+                        work (into due reverted)]
+                    (doseq [[rel why] (:held found)]
+                      (note-once! [rel (digest (Path/join root rel))]
+                        (str "bl: " rel (if (= why :compiler)
+                                          " feeds the compiler key (nix/producer-sources.nix)"
+                                          " serves the request itself")
+                             " and differs from the running SDK; it is NOT reloaded."
+                             " Run scripts/prepare-checkout-sdk (or stop BL_SDK_REUSE_CURRENT) for it.")))
+                    (doseq [rel (:new found)]
+                      (note-once! [rel :new]
+                        (str "bl: " rel " is not in the running SDK; a new library file needs scripts/prepare-checkout-sdk.")))
+                    (let [result (apply-all! root work)
+                          errors (:failed result)
+                          held (:held result)
+                          applied (reduce (fn [m rel]
+                                            (cond
+                                              (or (contains? errors rel) (contains? held rel)) m
+                                              (contains? digests rel) (assoc m rel (get digests rel))
+                                              :else (dissoc m rel)))
+                                          applied work)
+                          failed (reduce (fn [m [rel e]]
+                                           (assoc m rel {:digest (get digests rel) :message (ex-message e)}))
+                                         failed errors)]
+                      (doseq [[rel module] held]
+                        (note-once! [rel (get digests rel) :held]
+                          (str "bl: " rel ": " (pr-str module) " is a server owner or code a live process"
+                               " runs, and cannot be replaced in the warm VM; commands keep the SDK's code"
+                               " for this unit. Run scripts/prepare-checkout-sdk to build the edit in.")))
+                      ;; Every outcome advances the generation; only a compile
+                      ;; error blocks, and it is re-raised from state.
+                      (put-state! (assoc (state) :applied applied :failed failed :generation generation))
+                      (when (seq failed) (throw (blocking-error failed)))
+                      (when (seq work)
+                        {:applied (count (filter (fn [rel] (contains? applied rel)) due))
+                         :reverted (count reverted) :held (vec (keys held))}))))))))))))
 
 (defn status
   "What this VM runs from the checkout instead of the SDK: rel => digest."
