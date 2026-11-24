@@ -69,10 +69,16 @@
       (is (refused? (fn [] (package/verify! output)))))))
    (finally (File/rm_rf! root)))))
 
+(defn- fresh-vm-run
+ "Run `file` in a fresh `bin/bl --cold` VM of this tree; returns [text status]."
+ [file env]
+ (System/cmd (or (System/get_env "BL_QUALIFY_CANDIDATE") (Path/expand "bin/bl" (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd)))) (list "--cold" "run" file)
+  (list (tuple :stderr_to_stdout true)
+        (tuple :env (cons (tuple "BL_DAEMON" "off") env)))))
 (deftest package-consumers-preserve-source-effects-across-fresh-vms
  (let [root (str (System/tmp_dir!) "/package-consumer-" (erlang/unique_integer (list :positive)))
        source (str root "/src") output (str root "/release") entry (str root "/main.bl")
-       consumer (str root "/consumer.bl") marker (str root "/effect")
+       producer (str root "/producer.bl") consumer (str root "/consumer.bl") marker (str root "/effect")
        program "(ns package.consumer-entry (:require [package.consumer-leaf]))"]
   (try
    (File/mkdir_p! (str source "/package"))
@@ -81,11 +87,21 @@
     "(ns package.consumer-leaf (:require [package.consumer-effect])) (defn answer [] 42) (def runtime-value (System/get_env \"BL_TEST_PACKAGE_VALUE\"))")
    (File/write! (str source "/package/consumer-effect.bl")
     (str "(ns package.consumer-effect) (File/write! " (pr-str marker) " \"ran\") (def ready true)"))
-   (BeamLisp.Loader/with_search_dir source
-    (fn []
-     (let [built (package/build! entry output [])]
-      (is (= ["package.consumer-effect"] (:source-fallback built)))
-      (is (= ["package.consumer-leaf"] (:artifacts built))))))
+   ;; A package carries the realm identity it was built in, and install!
+   ;; refuses any other (application.package/install!). The consumers below
+   ;; are fresh `--cold` VMs, which open no realm, so the producer is one too:
+   ;; built inside this test's VM, the package would take the warm realm's
+   ;; identity whenever `bl test` runs in a realm VM.
+   (File/write! producer
+    (str "(ns package.produce (:require [application.package])) "
+     "(BeamLisp.Loader/with_search_dir " (pr-str source) " (fn [] "
+     "(let [built (application.package/build! " (pr-str entry) " " (pr-str output) " [])] "
+     "(println \"PACKAGE_FALLBACK\" (pr-str (:source-fallback built))) "
+     "(println \"PACKAGE_ARTIFACTS\" (pr-str (:artifacts built))))))"))
+   (let [[text status] (fresh-vm-run producer (list))]
+    (is (= 0 status) text)
+    (is (String/contains? text "PACKAGE_FALLBACK [\"package.consumer-effect\"]") text)
+    (is (String/contains? text "PACKAGE_ARTIFACTS [\"package.consumer-leaf\"]") text))
    (File/write! consumer
     (str "(ns package.consume (:require [application.package])) "
      "(application.package/install! " (pr-str output) " " (pr-str program) " []) "
@@ -101,9 +117,7 @@
    ;; the source-only initializer, even when a producer previously loaded it.
    (doseq [value ["consumer-a" "consumer-b"]]
     (File/rm marker)
-    (let [[text status] (System/cmd (or (System/get_env "BL_QUALIFY_CANDIDATE") (Path/expand "bin/bl" (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd)))) (list "--cold" "run" consumer)
-                         (list (tuple :stderr_to_stdout true)
-                               (tuple :env (list (tuple "BL_DAEMON" "off") (tuple "BL_TEST_PACKAGE_VALUE" value)))))]
+    (let [[text status] (fresh-vm-run consumer (list (tuple "BL_TEST_PACKAGE_VALUE" value)))]
      (is (= 0 status) text)
      (is (String/contains? text "PACKAGE_CONSUMER_OK") text)))
    (finally (File/rm_rf! root)))))
