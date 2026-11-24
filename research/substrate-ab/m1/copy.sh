@@ -12,6 +12,8 @@ set -euo pipefail
 if [ "${1:-}" = --remove ]; then
   MAIN=$2; COPY=$3
   [ -x "$COPY/bin/bl" ] && (cd "$COPY" && BL_SDK_LOCK_WAIT=0 ./bin/bl realm stop >/dev/null 2>&1 || true)
+  # The client's per-tree generation service outlives the VM; stop it too.
+  pkill -f "[g]eneration-service $COPY\$" || true
   git -C "$MAIN" worktree remove --force "$COPY"
   exit 0
 fi
