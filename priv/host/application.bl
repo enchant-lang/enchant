@@ -31,12 +31,20 @@
 ;     left outside the tree that is supposed to own it. The call is CONDITIONAL
 ;     in the sense that matters: it belongs to this callback's success path and
 ;     to no other (nothing at module load, nothing before the children exist),
-;     Then load and supervise the native owner registry, whose source helpers
-;     require a seeded language. Env owns its index; collector restarts preserve
-;     entries and rebuild monitors. The callback only returns success after this
-;     third child is ready. `init/0` is itself idempotent (guarded by `Env.seeded?/0`), so a
+;     `init/0` is itself idempotent (guarded by `Env.seeded?/0`), so a
 ;     second app start in an already-seeded VM is a cheap no-op — never a
 ;     second seeding.
+;
+;   * the native owner registry is NOT started here (K1b). Its start
+;     prepares the SDK class, which leases the whole SDK runtime closure: about
+;     60% of a cold `bl run`'s app start, paid by every command although only a
+;     managed actor needs the collector. `Env/ensure_sdk_owner_registry!` starts
+;     it on demand, as a third child of this same supervisor, before the first
+;     managed actor registers; the SDK lease is established by the first actor,
+;     generation or native adapter that needs it (`Env/ensure_sdk_runtime!`,
+;     `prepare_sdk_class!`, `sdk_runtime_retained_modules?`). Until then every
+;     load still takes the pre-lease path `BeamLisp.init/0` itself always took,
+;     which refuses to republish an SDK module with other bytes.
 ;
 ;   * `stop/1` is the OTP `stop` callback, answering `:ok`. `use Application`
 ;     GENERATES this one (`def stop(_state), do: :ok`, overridable) and the live
@@ -86,10 +94,7 @@
     (when (and (erlang/is_tuple result) (erlang/== :ok (erlang/element 1 result)))
       (try
         (BeamLisp/init)
-        ; Language helpers are safe only AFTER boot. Physical owner discovery
-        ; is shared runtime infrastructure, never an application opt-in.
-        (BeamLisp.Loader/ensure_loaded "proc.owner-registry")
-        (BeamLisp.Ns.Rt/invoke (BeamLisp.Env/fetch_exact! "proc.owner-registry" "start-child!") (list))
+        ; The owner registry starts on demand (`Env/ensure_sdk_owner_registry!`).
         (catch e
           ; Stop only the supervisor this call started, never an existing tree.
           (Supervisor/stop (erlang/element 2 result))

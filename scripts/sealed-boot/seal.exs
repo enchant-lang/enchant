@@ -21,7 +21,8 @@ hex = fn b -> Base.encode16(:crypto.hash(:sha256, b), case: :lower) end
 leaves = %{"Elixir.BeamLisp.AOT.beam" => "aot.bl", "Elixir.BeamLisp.AOTCache.beam" => "aot_cache.bl",
            "Elixir.BeamLisp.Env.beam" => "env.bl", "Elixir.BeamLisp.Loader.beam" => "loader.bl",
            "Elixir.BeamLisp.Bootstrap.beam" => "bootstrap.bl", "Elixir.BeamLisp.BuildPlan.beam" => "build_plan.bl",
-           "Elixir.BeamLisp.PackageAuthority.beam" => "package_authority.bl", "Elixir.BeamLisp.Reader.beam" => "reader.bl"}
+           "Elixir.BeamLisp.PackageAuthority.beam" => "package_authority.bl", "Elixir.BeamLisp.Reader.beam" => "reader.bl",
+           "Elixir.BeamLisp.Application.beam" => "application.bl"}
 restamp = fn name, bytes ->
   case Map.fetch(leaves, name) do
     :error -> bytes
