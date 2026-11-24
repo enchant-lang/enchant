@@ -91,6 +91,90 @@ def run_producer(command, *, cwd, env, timeout, stream):
         return subprocess.CompletedProcess(command, process.returncode, ''.join(lines))
 
 
+def seed_directory(path):
+    return path.is_dir() and not path.is_symlink() and any(path.iterdir()) and not any(
+        not p.is_file() or p.is_symlink() or
+        (p.name != "manifest.term" and p.suffix not in (".beam", ".app"))
+        for p in path.iterdir())
+
+
+def producer_image(root, image, source, driver, deps):
+    """One private producer image booting `source`, exactly as every stage runs."""
+    subprocess.run(["cp", "-a", "--reflink=auto", str(root / "priv"), str(image / "priv")], check=True)
+    shutil.rmtree(image / "priv/bootstrap/seed")
+    shutil.copytree(source, image / "priv/bootstrap/seed")
+    shutil.copy2(root / "env.bl", image / "env.bl")
+    app = image / ".bl/lib/beam_lisp-0.1.0"
+    app.mkdir(parents=True)
+    (app / "priv").symlink_to(image / "priv", target_is_directory=True)
+    shutil.copytree(source, app / "ebin")
+    shutil.copy2(driver, image / "produce.bl")
+    (image / "produce.exs").write_text(PRODUCER_BOOT)
+    command = ["elixir"]
+    for dep in deps:
+        command += ["-pa", str(dep)]
+    command += ["-pa", str(app / "ebin"), str(image / "produce.exs")]
+    env = {**os.environ, "BL_ROOT": str(image), "BL_DAEMON": "off",
+           "BL_ARTIFACT_DRIVER": str(image / "produce.bl"), "XDG_CACHE_HOME": str(image / "cache"),
+           "ELIXIR_ERL_OPTIONS": "+S 4:4 +SDcpu 2:2 +SDio 1:1"}
+    for name in ("BL_GENERATION_PREVIOUS_UNITS", "BL_GENERATION_BASELINE",
+                 "BL_GENERATION_PLANNING_UNITS", "BL_GENERATION_UNIT_STORE"):
+        env.pop(name, None)
+    return app, command, env
+
+
+def probe_bootstrap(root, candidate, deps, timeout=300):
+    """Boot `candidate` against this source with the producer's own startup and
+    no driver work. Accepted only when it writes its bootstrap receipt."""
+    with tempfile.TemporaryDirectory(prefix="bl-generation-probe-") as temporary:
+        image = Path(temporary)
+        probe = image / "probe-driver.bl"
+        probe.write_text(":ok\n")
+        _, command, env = producer_image(root, image, candidate, probe, deps)
+        receipt = image / "probe-bootstrap.json"
+        env["BL_GENERATION_BOOTSTRAP_RECEIPT"] = str(receipt)
+        try:
+            result = subprocess.run(command, cwd=image, env=env, text=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            return False, f"probe exceeded {timeout} seconds: {error.stdout or ''}"
+        if result.returncode == 0 and receipt.is_file():
+            return True, json.loads(receipt.read_text())
+        return False, result.stdout
+
+
+def elide_reproduction(products, seed, inputs, output):
+    """C proves that the compiler B, booted, reproduces B. When B's complete
+    bytes equal P's, the compiler B's run booted WAS byte-identical to B, so
+    that run already is the self-reproduction C would repeat. Check it from the
+    retained P/B products and their actual bytes; otherwise answer None."""
+    stages = []
+    for label, product in zip("PB", products):
+        report = json.loads((product / "result.json").read_text())
+        stage = report.get("generation")
+        if (report.get("kind") != "artifact-generation-stage" or not isinstance(stage, dict)
+                or stage.get("generation") != label or stage.get("produced") is not True
+                or stage.get("fresh_boot_qualified") is not True or "error" in report
+                or {p.name: sha(p) for p in sorted((product / label).iterdir())} != stage.get("files")):
+            raise RuntimeError(f"generation {label} product is incomplete for C's elision check")
+        recorded = json.loads((product / "inputs.json").read_text())
+        if ({k: v for k, v in recorded.items() if not k.startswith("priv/bootstrap/seed/")}
+                != {k: v for k, v in inputs.items() if not k.startswith("priv/bootstrap/seed/")}):
+            raise RuntimeError(f"generation {label} was produced from different source inputs")
+        stages.append(stage)
+    if (products[1] / "B").resolve() != seed:
+        raise RuntimeError("C's elision check names a B product other than C's seed")
+    if stages[0]["files"] != stages[1]["files"]:
+        return None
+    shutil.copytree(products[1] / "B", output / "C")
+    shutil.copytree(products[1] / "unit-store", output / "unit-store", symlinks=False)
+    return {"generation": "C", "producer_floor": str(seed), "produced": False,
+            "fresh_boot_qualified": False, "elided": True,
+            "fixpoint": {"kind": "byte-identical-predecessor", "booted": "P", "reproduced": "B",
+                         "products": [str(p) for p in products]},
+            "files": {p.name: sha(p) for p in sorted((output / "C").iterdir())}}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
@@ -107,15 +191,45 @@ def main():
     parser.add_argument("--planning-units", type=Path,
                         help="P's captured inputs for units unchanged from the qualified baseline")
     parser.add_argument("--stream", action="store_true", help="stream current unit progress to the build log")
+    parser.add_argument("--bootstrap-candidate", type=Path,
+                        help="P only: a previously qualified compiler floor to boot instead of --seed "
+                             "when it starts against this source; refused startup falls back to --seed")
+    parser.add_argument("--elide-when-equal", type=Path, nargs=2, metavar=("P_PRODUCT", "B_PRODUCT"),
+                        help="C only: when B's bytes equal P's, B's own run already booted a "
+                             "byte-identical compiler and reproduced it; record C as elided")
     args = parser.parse_args()
+    if args.bootstrap_candidate and args.generation != "P":
+        parser.error("--bootstrap-candidate selects only generation P's initial floor")
+    if args.elide_when_equal and args.generation != "C":
+        parser.error("--elide-when-equal applies only to generation C")
     if not 1 <= args.producer_timeout <= 1200:
         parser.error("--producer-timeout must be between 1 and 1200 seconds")
     root, output = args.root.resolve(), args.out.absolute()
+    deps = sorted((root / "deps").glob("*/ebin"))
+    deps += sorted((root / "_build").glob("*/lib/*/ebin"))
+    deps = list(dict.fromkeys(p.resolve() for p in deps))
+    driver = root / "test/scripts/artifact-generation.bl"
     initial_seed = (args.seed or root / "priv/bootstrap/seed").resolve()
-    if not initial_seed.is_dir() or any(
-            not p.is_file() or p.is_symlink() or
-            (p.name != "manifest.term" and p.suffix not in (".beam", ".app"))
-            for p in initial_seed.iterdir()):
+    bootstrap_choice = None
+    if args.bootstrap_candidate:
+        candidate = args.bootstrap_candidate.resolve(strict=True)
+        if not seed_directory(candidate):
+            parser.error("bootstrap candidate must be a directory of regular artifact files")
+        # The previous qualified compiler boots whenever its own startup accepts
+        # this source. With equal compiler/build keys it must prove its runtime
+        # hosts were produced from these exact host files; a changed producer
+        # host (env, loader, bootstrap, ...) refuses, so fall back to --seed.
+        started = time.monotonic()
+        accepted, detail = probe_bootstrap(root, candidate, deps)
+        bootstrap_choice = {"candidate": str(candidate), "fallback": str(initial_seed),
+                            "accepted": accepted, "probe_seconds": round(time.monotonic() - started, 3)}
+        if accepted:
+            bootstrap_choice["installation"] = detail["installation"]
+            initial_seed = candidate
+        else:
+            bootstrap_choice["refusal"] = detail[-2000:]
+        print("BOOTSTRAP-CHOICE " + json.dumps(bootstrap_choice), flush=True)
+    if not seed_directory(initial_seed):
         parser.error("initial seed must be a directory of regular artifact files")
     initial_seed_files = {p.name: sha(p) for p in sorted(initial_seed.iterdir())}
     if "manifest.term" not in initial_seed_files:
@@ -124,7 +238,6 @@ def main():
     if os.path.lexists(output):
         parser.error(f"output must be absent: {output}")
     output.mkdir(parents=True)
-    driver = root / "test/scripts/artifact-generation.bl"
     watched = sorted({root / "env.bl", Path(__file__).resolve(), driver,
                       root / "scripts/check-source-floor", root / "scripts/demo-artifact-production",
                       *(p for p in (root / "priv/native").iterdir()
@@ -135,13 +248,12 @@ def main():
               if not p.is_relative_to(root / "priv/bootstrap/seed")}
     inputs.update({"priv/bootstrap/seed/" + name: value for name, value in initial_seed_files.items()})
     (output / "inputs.json").write_text(json.dumps(inputs, indent=2) + "\n")
-    deps = sorted((root / "deps").glob("*/ebin"))
-    deps += sorted((root / "_build").glob("*/lib/*/ebin"))
-    deps = list(dict.fromkeys(p.resolve() for p in deps))
     report = {"version": 1, "kind": "artifact-generation-qualification", "stages": [],
               "initial_seed": str(initial_seed), "initial_seed_files": initial_seed_files,
               "floor_installed": False, "native_execution_admission": False,
               "self_reproduction_qualified": False}
+    if bootstrap_choice is not None:
+        report["bootstrap_choice"] = bootstrap_choice
 
     def save():
         (output / "result.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -159,6 +271,15 @@ def main():
     previous_files = initial_seed_files
     save()
     try:
+        if args.elide_when_equal:
+            elided = elide_reproduction(args.elide_when_equal, initial_seed, inputs, output)
+            if elided is not None:
+                report["kind"] = "artifact-generation-stage"
+                report["generation"] = elided
+                report["stages"].append(elided)
+                print("ARTIFACT-GENERATION: C elided; B booted a byte-identical P and reproduced it ("
+                      + str(len(elided["files"])) + " files)", flush=True)
+                return 0
         # The predecessor's optimizer/backend may differ from current Source.
         # P crosses that compiler boundary; only B/C establish reproduction.
         # Every generation uses the same producer and strict fresh-boot gate.
@@ -173,31 +294,12 @@ def main():
             save()
             with tempfile.TemporaryDirectory(prefix=f"bl-generation-{label}-") as temporary:
                 image = Path(temporary)
-                subprocess.run(["cp", "-a", "--reflink=auto", str(root / "priv"), str(image / "priv")], check=True)
-                shutil.rmtree(image / "priv/bootstrap/seed")
-                shutil.copytree(source, image / "priv/bootstrap/seed")
-                shutil.copy2(root / "env.bl", image / "env.bl")
-                app = image / ".bl/lib/beam_lisp-0.1.0"
-                app.mkdir(parents=True)
-                (app / "priv").symlink_to(image / "priv", target_is_directory=True)
-                shutil.copytree(source, app / "ebin")
-                shutil.copy2(driver, image / "produce.bl")
-                (image / "produce.exs").write_text(PRODUCER_BOOT)
-                command = ["elixir"]
-                for dep in deps:
-                    command += ["-pa", str(dep)]
-                command += ["-pa", str(app / "ebin"), str(image / "produce.exs")]
-                env = {**os.environ, "BL_ROOT": str(image), "BL_DAEMON": "off",
-                       "BL_ARTIFACT_DRIVER": str(image / "produce.bl"),
-                       "BL_GENERATION_OUTPUT": str(target), "XDG_CACHE_HOME": str(image / "cache"),
-                       "BL_GENERATION_BOOTSTRAP_RECEIPT": str(output / f"{label}.bootstrap.json"),
-                       "ELIXIR_ERL_OPTIONS": "+S 4:4 +SDcpu 2:2 +SDio 1:1"}
+                app, command, env = producer_image(root, image, source, driver, deps)
+                env.update({"BL_GENERATION_OUTPUT": str(target),
+                            "BL_GENERATION_BOOTSTRAP_RECEIPT": str(output / f"{label}.bootstrap.json")})
                 # Every stage consults the SAME previously qualified baseline.
                 # B and C must independently emit every changed unit; letting C
                 # fetch B's new outputs would make reproduction circular.
-                env.pop("BL_GENERATION_PREVIOUS_UNITS", None)
-                env.pop("BL_GENERATION_BASELINE", None)
-                env.pop("BL_GENERATION_PLANNING_UNITS", None)
                 env["BL_GENERATION_UNIT_STORE"] = str(output / "unit-store")
                 if args.previous_units:
                     env["BL_GENERATION_PREVIOUS_UNITS"] = str(args.previous_units.resolve(strict=True))

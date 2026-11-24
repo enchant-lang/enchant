@@ -47,6 +47,86 @@
                    (= actual expected) (contains? actual namespace))
       (throw (ex-info "Unit reuse inputs disagree with verified artifact" {:namespace namespace})))))
 
+;; Restored units by reference (N4a). A restored unit was fully verified
+;; (manifest, every byte, every BEAM's module name) when it was emitted, and
+;; its manifest names each module by sha256. Restoring it checks what can have
+;; changed since: the manifest's identity and compiler key, the directory's
+;; exact membership, and that every member is a bounded regular file (no
+;; symlink). Its bytes are not re-read here: the manifest digests become the
+;; entry's `:digests`, and `build/assemble-outputs!` hashes every shipped byte
+;; against exactly those before the image proof, so each byte is hashed once
+;; per SDK, at the boundary that ships it. The files are hard-linked, not
+;; copied. Every call goes through prim_file: the file server serializes
+;; behind one dirty-IO scheduler, and `AOT/physical_sdk_path` publishes a
+;; persistent term per new directory, which is where a full `verify_unit` of
+;; 668 freshly extracted unit directories went (17.7 s of 40 s in gate 19b).
+(defn- lstat [path]
+  (let [r (prim_file/read_link_info path)]
+    (when (= :ok (elem r 0)) (elem r 1))))
+
+(defn- refuse-restored! [reason directory]
+  (throw (ex-info "Restored unit failed digest verification"
+           {:kind :restored-unit-changed :reason reason :directory directory})))
+
+(defn- restored-unit
+  "Check one previously produced unit for restoration by reference. Answers
+   `{:manifest m :refs [[module file sha256] ...]}`: references, not bytes."
+  [directory]
+  (let [dir (lstat directory)
+        _ (when-not (and dir (= :directory (elem dir 2))) (refuse-restored! :not-a-directory directory))
+        manifest-file (Path/join directory "artifact-unit.term")
+        info (lstat manifest-file)
+        _ (when-not (and info (= :regular (elem info 2)) (<= (elem info 1) 1048576))
+            (refuse-restored! :manifest directory))
+        encoded (elem (prim_file/read_file manifest-file) 1)
+        _ (when-not (and (erlang/is_binary encoded) (>= (erlang/byte_size encoded) 2)
+                         (not= 80 (binary/at encoded 1)))
+            (refuse-restored! :manifest directory))
+        manifest (BeamLisp.CompilerData/decode_closed_etf! encoded
+                   {:max-nodes 16384 :max-bytes 1048576 :max-depth 64})
+        rows (:modules manifest)
+        _ (when-not (and (= 1 (:version manifest)) (erlang/is_binary (:namespace manifest))
+                         (= (BeamLisp.AOTCache/compiler_key) (:compiler-key manifest))
+                         (erlang/is_list rows) (<= 1 (count rows) 256))
+            (refuse-restored! :manifest directory))
+        names (mapv (fn [row]
+                (let [name (:module row)]
+                  (when-not (and (erlang/is_binary name) (<= 1 (erlang/byte_size name) 512)
+                                 (= name (Path/basename name)) (not (contains? #{"." ".."} name))
+                                 (not (String/contains? name "\\"))
+                                 (not (String/contains? name (erlang/list_to_binary (list 0))))
+                                 (erlang/is_binary (:sha256 row)) (= 32 (erlang/byte_size (:sha256 row))))
+                    (refuse-restored! :manifest directory))
+                  name)) rows)
+        listed (prim_file/list_dir directory)
+        expected (sort (cons "artifact-unit.term" (map #(str % ".beam") names)))]
+    (when-not (and (= names (distinct names)) (= :ok (elem listed 0))
+                   (= expected (sort (map #(if (erlang/is_binary %) % (erlang/list_to_binary %)) (elem listed 1)))))
+      (refuse-restored! :membership directory))
+    {:manifest manifest
+     :refs (first (reduce (fn [[acc remaining] row]
+             (let [file (Path/join directory (str (:module row) ".beam"))
+                   info (lstat file)
+                   size (when info (elem info 1))]
+               (when-not (and info (= :regular (elem info 2)) (<= size (min remaining 33554432)))
+                 (refuse-restored! :member directory))
+               [(conj acc [(erlang/binary_to_atom (:module row) :utf8) file (:sha256 row)])
+                (- remaining size)]))
+             [[] 268435456] rows))}))
+
+(defn- link-or-copy!
+  "A hard link to an immutable verified file, or a copy where links cannot go."
+  [source destination]
+  (when-not (= :ok (prim_file/make_link source destination))
+    (File/cp! source destination)))
+
+(defn- link-unit!
+  "Place a verified unit at `directory` by reference to its files."
+  [source directory files]
+  (when (lstat directory) (File/rm_rf! directory))
+  (when-not (= :ok (prim_file/make_dir directory)) (File/mkdir_p! directory))
+  (doseq [name files] (link-or-copy! (Path/join source name) (Path/join directory name))))
+
 (defn artifact-key [prepared]
  (digest (erlang/term_to_binary
            {:namespace (:namespace prepared) :world (:world prepared) :phase-world (:phase-world prepared)
@@ -331,30 +411,51 @@
             (if (:reusable plan)
               (let [namespace (:namespace plan)
                     source (Path/join (Path/join previous ".units") namespace)
-                    verified (measure timings :verify-restored (fn [] (BeamLisp.AOT/verify_unit source)))
+                    verified (measure timings :verify-restored (fn [] (restored-unit source)))
                     actual (get (:prior plan) "inputs")]
                 (verify-inputs! verified actual namespace)
                 (when (not= source (:directory plan))
                   (measure timings :copy-restored
-                    (fn [] (File/rm_rf! (:directory plan)) (File/cp_r! source (:directory plan)))))
+                    (fn [] (link-unit! source (:directory plan)
+                             (cons "artifact-unit.term"
+                                   (map (fn [[module _ _]] (str (Atom/to_string module) ".beam")) (:refs verified)))))))
                 (assoc plan :verified verified :inputs actual :compiled? false))
               (merge plan (:prepared plan) {:compiled? true})))
           (fn [acc _ plan]
             (let [verified (:verified plan) actual (:inputs plan) namespace (:namespace plan)
+                  ;; A compiled unit carries its bytes; a restored one carries
+                  ;; [module file sha256] references to verified files.
+                  refs (:refs verified)
+                  flat (fn [module] (Path/join out (str (Atom/to_string module) ".beam")))
                   same? (and (not (:compiled? plan)) (= previous out)
-                         (every? (fn [[module bytes]]
-                           (= (tuple :ok bytes) (File/read (Path/join out (str (Atom/to_string module) ".beam")))))
-                           (:beams verified)))
-                  modules (vec (map first (:beams verified)))
+                         (if refs
+                           (every? (fn [[module _ sha]]
+                             (let [read (prim_file/read_file (flat module))]
+                               (and (= :ok (elem read 0)) (= sha (crypto/hash :sha256 (elem read 1)))))) refs)
+                           (every? (fn [[module bytes]]
+                             (= (tuple :ok bytes) (File/read (flat module)))) (:beams verified))))
+                  modules (vec (map first (or refs (:beams verified))))
                   _ (doseq [module modules]
                       (when-let [owner (get-in acc [:module-owners module])]
                         (throw (ex-info "Two SDK units own the same output module"
                                         {:module module :owners [owner namespace]}))))
-                  _ (measure timings :write-flat (fn [] (doseq [[module bytes] (:beams verified)]
-                      (File/write! (Path/join out (str (Atom/to_string module) ".beam")) bytes))))
+                  ;; Unlink first: a flat file may be a link to a verified unit
+                  ;; file, which an in-place write would change for both.
+                  _ (measure timings :write-flat (fn []
+                      (if refs
+                        (when-not same?
+                          (doseq [[module file _] refs]
+                            (prim_file/delete (flat module))
+                            (link-or-copy! (Path/join (:directory plan) (Path/basename file)) (flat module))))
+                        (doseq [[module bytes] (:beams verified)]
+                          (prim_file/delete (flat module))
+                          (File/write! (flat module) bytes)))))
                   digests (measure timings :output-digests (fn []
-                            (vec (sort-by first (map (fn [[module bytes]] [(Atom/to_string module) (digest bytes)])
-                                                      (:beams verified))))))
+                            (vec (sort-by first
+                              (if refs
+                                (map (fn [[module _ sha]] [(Atom/to_string module) (hex sha)]) refs)
+                                (map (fn [[module bytes]] [(Atom/to_string module) (digest bytes)])
+                                     (:beams verified)))))))
                   entry {:hash (:hash plan) :key (:key plan) :modules modules :digests digests
                          :preparation-key (digest (Jason/encode! actual))}]
               (when-let [log (:log opts)]
