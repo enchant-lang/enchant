@@ -120,6 +120,7 @@ fn checkout_main(args: &[String]) -> ! {
     // `bin/bl`'s one-exec path passes the root as it was invoked; the
     // environment names the canonical one, as `bin/bl` always exported it.
     std::env::set_var("BL_CHECKOUT_ROOT", &root);
+    engine_inputs::bind_digest_cache_root(&root);
     let argv = &args[2..];
     #[cfg(unix)]
     select_checkout_platform(&root, argv);
@@ -993,6 +994,55 @@ mod checkout_tests {
         }"#).unwrap();
         std::fs::write(root.join("priv/runtime.bl"), "runtime 1").unwrap();
         root
+    }
+
+    /// M4: re-reading only an edited reloadable source gives exactly what a
+    /// fresh capture gives, never moves the base fingerprint (the VM key), and
+    /// refuses anything that is not such a row.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reloadable_refresh_equals_a_fresh_capture() {
+        let root = engine_fixture("refresh");
+        std::fs::create_dir_all(root.join("priv/lib/split")).unwrap();
+        std::fs::write(root.join("nix/dev-reload.json"), r#"{"version":1,"roots":["priv/lib"],
+            "extensions":[".bl"],"compiler":[],"restart":[]}"#).unwrap();
+        let wire = root.join("priv/lib/split/wire.bl");
+        std::fs::write(&wire, "(ns split.wire) (defn n [] 1)\n").unwrap();
+        std::fs::write(root.join("priv/lib/split/c.mjs"), "c").unwrap();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let mut snapshot = engine_inputs::Snapshot::capture(&root).unwrap();
+        let runtime = checkout_runtime_generation(&root, Some(&snapshot)).unwrap();
+        for k in 2..5 {
+            std::fs::write(&wire, format!("(ns split.wire) (defn n [] {k}) ; longer\n").repeat(k)).unwrap();
+            let before = snapshot.fingerprint.clone();
+            assert!(snapshot.refresh_reloadable(&[canonical.join("priv/lib/split/wire.bl")]).unwrap());
+            let fresh = engine_inputs::Snapshot::capture(&root).unwrap();
+            assert_ne!(snapshot.fingerprint, before, "the edit moves the engine fingerprint");
+            assert_eq!(snapshot.fingerprint, fresh.fingerprint, "refresh == capture");
+            assert_eq!(snapshot.base_fingerprint, fresh.base_fingerprint);
+            assert_eq!(checkout_runtime_generation(&root, Some(&snapshot)).unwrap(), runtime,
+                       "a reloadable edit keeps the runtime token");
+            assert_eq!(checkout_project_generation(&root, &root, &[], Some(&snapshot)).unwrap(),
+                       checkout_project_generation(&root, &root, &[], Some(&fresh)).unwrap());
+            snapshot.verify().unwrap();
+        }
+        // Not reloadable (wrong extension, a runtime file), or not in the snapshot.
+        std::fs::write(root.join("priv/lib/split/c.mjs"), "c2").unwrap();
+        assert!(!snapshot.refresh_reloadable(&[canonical.join("priv/lib/split/c.mjs")]).unwrap());
+        std::fs::write(root.join("priv/runtime.bl"), "runtime 9").unwrap();
+        assert!(!snapshot.refresh_reloadable(&[canonical.join("priv/runtime.bl")]).unwrap());
+        // A temporary that came and went (`sed -i`) is not an input.
+        let restored = std::fs::read(&wire).unwrap();
+        let temporary = root.join("priv/lib/split/sedX1");
+        std::fs::write(&temporary, b"(ns split.wire) (defn n [] 7)\n").unwrap();
+        std::fs::rename(&temporary, &wire).unwrap();
+        let mut again = engine_inputs::Snapshot::capture(&root).unwrap();
+        std::fs::write(&wire, &restored).unwrap();
+        assert!(again.refresh_reloadable(&[canonical.join("priv/lib/split/sedX1"), canonical.join("priv/lib/split/wire.bl")]).unwrap());
+        assert_eq!(again.fingerprint, engine_inputs::Snapshot::capture(&root).unwrap().fingerprint);
+        std::fs::write(root.join("priv/lib/split/new.bl"), "(ns split.new)").unwrap();
+        assert!(!snapshot.refresh_reloadable(&[canonical.join("priv/lib/split/new.bl")]).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "linux")]

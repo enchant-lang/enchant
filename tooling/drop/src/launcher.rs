@@ -615,6 +615,7 @@ fn main() {
     }
     if argv.first().map(String::as_str) == Some("--engine-inputs") {
         if argv.len() != 2 { fail("usage: --engine-inputs ROOT"); }
+        engine_inputs::bind_digest_cache_root(&std::fs::canonicalize(&argv[1]).unwrap_or_else(|_| PathBuf::from(&argv[1])));
         let snapshot = engine_inputs::Snapshot::capture(Path::new(&argv[1]))
             .unwrap_or_else(|error| fail(&format!("checkout engine inventory: {error}")));
         engine_inputs::save_digest_cache();
