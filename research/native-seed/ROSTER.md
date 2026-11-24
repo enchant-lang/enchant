@@ -41,11 +41,11 @@ build pipeline. The native compiler comes after a go/no-go measurement (N0).
 | Order | Card | Done when |
 |---|---|---|
 | ✅ | **F1** One exec to the client (batch 21: 19.4 → 11.5 ms; gate 12 ms at load 21) | Warm `./bin/bl run` median ≤ 12 ms over 15 runs, load recorded |
-| 🔨 | **F2** One request, one process (items 1–3 landed batch 21; item 4 open) | VM handler ≤ 3 ms; client total ≤ 6 ms; ten files and `checkout_transport.py` pass |
+| ✅ | **F2** One request, one process (items 1–3 batch 21, item 4 batch 26) | VM handler ≤ 3 ms; client total ≤ 6 ms; ten files and `checkout_transport.py` pass |
 | ✅ | **U15** std/lib edits reload in the warm VM (batch 21: edit seen in 1.0 s, revert 0.86 s) | A `priv/lib` edit is seen by the next `bl test` in < 10 s with no SDK |
 | ✅ | **K1 + K1b** Sealed boot state, lazy owner registry and lease (batch 25: cold `bl run` ~1.19 s median, was 2.06–2.44 s) | Cold `$SDK/bin/bl --cold run` ≤ 1.2 s median |
-| 3 | **F3** Keep-alive client, compact request | Warm unchanged request ≤ 2 ms on a quiet machine |
-| 3 | **K2** The checkout's cold path | `./bin/bl --cold` adds ≤ 100 ms over `$SDK/bin/bl --cold` |
+| 🔨 | **F3** Fast entry and request (batch 26: `.bl/bin/bl` 4.7 ms warm at the repo root; ≤ 2 ms needs a resident client) | Warm unchanged request ≤ 2 ms on a quiet machine |
+| ✅ | **K2** The checkout's cold path (batch 26: +55 ms over the SDK's own, was +570) | `./bin/bl --cold` adds ≤ 100 ms over `$SDK/bin/bl --cold` |
 | 3 | **M1** A real edit benchmark | Enchant edit-to-result, cold and warm, recorded |
 | 4 | **R1** Ship it | Installed `bl` rebuilt from main through the release gate, remeasured |
 | ✅ | **N4a** Restored units by reference (batch 23) | Std-edit SDK unit work 40 s → < 8 s |
@@ -251,6 +251,36 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - **Why.** After N4b, a `priv/host` edit costs ~50 s of compiler work and ~1,000 s of library recompiling, because every library unit's key includes the whole compiler key.
 - **Change.** Key each library unit on its own inputs plus the bytes of the compiler and host modules that compiling it actually loads. Codegen modules (`emit`, `lower`, `aot`, …) stay in every key. A host module that changes no unit's compiled output therefore restores every unit. Alternatively, use early cutoff: recompile, compare the emitted bytes, and stop when they are equal. That needs the native front end or a cheap compile, so it is weaker.
 - **Done when.** A `priv/host/delay.bl` comment's SDK restores ≥ 95% of library units, and preparation is ≤ 600 s end to end.
+
+#### Batch 26 (`d6c48cc33`): T3, F2 item 4 + F3, K2 + init trims
+- **T3.**
+  - Restored unit links are now read-only, or a copy is made. A write to a restored path unlinks first, so a write can never reach a store the user owns. That was a real hazard from N4a.
+  - Four tests were wrong rather than the code: `aot_implicit_dependencies` (realm path), `sdk_loading_batch` (warm VM already initialised), `test_test_prerequisites` (stale line numbers in the boundary map), and `codegen_provenance` (wrote into the store SDK). All pass on the batch SDK.
+- **F2 item 4 and F3.**
+  - The command runs in the connection process, and the connection watcher owns cancellation and the heartbeat.
+  - The accept loop pre-starts the next owned worker.
+  - The project `env.bl` value is memoized by its bytes. That cost 1.85 ms per request at the repo root, and it was the "regression" that took warm time from 6 to 12 ms.
+  - The client keeps `.bl/bin/bl`, a symlink to itself that skips the 2.4 ms `/bin/sh` script.
+  - Warm `(println 1)`, 21 runs at load ~5: repo root `./bin/bl` 6.6 ms and `.bl/bin/bl` 4.7 ms; scratch project 7.9 and 5.2 ms.
+  - What is left below that: a resident client or broker (a keep-alive across processes) and a compact environment (a protocol bump). `run_file` on an unchanged file still costs 0.43 ms.
+- **K2.**
+  - A settled tree takes the client's fingerprint, accepted only against a `selection.v1` record that the Python path writes after full verification.
+  - `bin/bl` execs the SDK's `boot.exs`.
+  - `./bin/bl --cold` is now 1.10–1.15 s against the SDK's own 1.03–1.14 s.
+- **Init trims.** `packaged_compiler?` stops at its first match; `declared_ns` scans a 64 KiB window; the floor proof skips the Rt/Compiler attribute chunks; seed manifests are parsed once per VM on store paths. Cold sealed paired: 1.04–1.07 s, against 1.09–1.21 s.
+  - What remains toward 0.8 s is design work:
+    - initializers, 226 ms, of which `mark_emitted` receipt compression is 84 ms. Storing receipts uncompressed saves ~45 ms for ~3 MB per VM, which is a call for the user;
+    - attribute decoding of the phase library, 46 ms, which is a `priv/boot` emitter change;
+    - the floor proof, 52 ms, which could be sealed in `do-prime`;
+    - erts + Elixir, ~240 ms.
+- **A host comment after T3's `priv/build` change:** 670 s.
+
+#### T4 ⏳ `proc/owner_registry_test` and `application_package_test` fail after other files in one VM · H
+- In gate 26 (after the T3 group in the same VM) and on main's SDK `8as75r07`, these fail:
+  - `proc/owner_registry`: all 4 tests fail with "Test owner failed during admitted startup".
+  - `application_package` `package-consumers-preserve-source-effects-across-fresh-vms`: "Application package realm identity mismatch".
+- In gate 25 the same code passed `proc/owner_registry` 53/53, run first in its VM.
+- Find the shared state, and make each file pass in any order.
 
 #### Batch 25 (`1023d1519`): K1b, N4c, and the fresh-VM start and stop races
 - **dupstart.**
