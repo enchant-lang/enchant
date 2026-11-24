@@ -219,13 +219,27 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
 - Not yet shown end to end: the gate's warm median (12 ms at load 21) is within noise of F1 alone (11.5 ms at load ~14). Measure the VM handler again on a quiet machine with `research/substrate-ab/floor/f1/start_wall_min.bl`.
 - Open: item 4, running the command in the connection process. It changes cancellation, so it needs a SIGTERM/SIGKILL cancel check alongside the session and `realm_shared` tests.
 
+#### Batch 22 (`31a8b524e`): the U15 overlay with live server owners, and `realm stop` after an overlay
+- **What broke after batch 21.** Another session's `priv/lib/data/bounded-cache.bl` edit landed after main's SDK was built. Every warm request then recompiled it, failed with `{:code_leased …Bounded-cache.Owner}` and exited 1, at 1.2 s each. The first `realm stop` then crashed the VM manager, because a drain-time first load of `reload.generation` was refused under the overlay, and the VM stayed up.
+- **Fix.**
+  - A unit that defines a server owner, or trips a publication pin, is held: it stays on the SDK's code with one note per digest. 21 library files define a server.
+  - Failures are remembered per (file, digest), so a broken file costs ~1 ms per request, not a recompile.
+  - Drain dependencies load at VM boot.
+  - A failed drain is reported (`retirement failed: <reason>`) instead of crashing.
+- **Gate (SDK `mqs6v3vg`, prep 1964 s).**
+  - All overlay tests pass, and so does the scenario with a live bounded-cache owner.
+  - `test/scripts/realm_stop_after_overlay.py` passes.
+  - `session`, `realm_shared` and the ten files pass; `checkout_transport` exits 0.
+  - Warm median: 13 ms in the gate at load 16; 6 ms on main at load 19 before.
+
+
 #### K1b ⏳ Cold start below 1.2 s · S+ · `priv/host/env.bl`, owner registry
 - After K1, the remaining app start (~1.3 s) is code running, not values recomputed: namespace loads and initializers (~1/3 of samples), the owner registry leasing the whole SDK runtime closure (~15%), native stub compiles (~3%). See the journal section "K1: sealed boot state, and what a seal cannot reach" and `research/checked-tiles/evidence/cold-start-k1.json`.
 - **Change.** Start the owner registry and the SDK lease lazily, so the first actor pays and a plain `bl run` does not. Load `bl.cli`'s namespaces on demand (~300 ms).
 - **Done when.** Cold `$SDK/bin/bl --cold run` of `(println 1)` ≤ 1.2 s median, paired with the batch-21 SDK.
 
 #### T3 ⏳ `codegen_provenance_test` writes into the store SDK · H
-- Also: `test/scripts/dev_overlay_scenario.py` leaves its probe VM (`realm start --root /tmp/u15-probe-*`) running after it passes; stop it in its `finally`.
+- (Fixed in batch 22: the U15 scenario now stops its probe VM.)
 - Two tests error with `erofs` writing `.../lib/beam_lisp-0.1.0/priv/codegen.sources` on any store SDK (same on main's `2nvkh1n5` and batch 21's `0nzlyz01`). Point them at a scratch copy.
 
 ### K — cold start
