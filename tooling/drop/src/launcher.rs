@@ -603,6 +603,8 @@ pub const VERB_MAINTENANCE: &str = "maintenance"; // a DROP's own verb (it carri
 pub const LAUNCHER_VERBS: &[&str] = &[VERB_WHICH, VERB_SELF_UPDATE, VERB_SELF_INSTALL, VERB_SELF_GC, VERB_HOOKS];
 
 fn main() {
+    #[cfg(unix)]
+    direct_entry_main();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if let Some(status) = command_domain::dispatch(&argv) {
         std::process::exit(status);

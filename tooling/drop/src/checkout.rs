@@ -120,10 +120,12 @@ fn checkout_main(args: &[String]) -> ! {
     // `bin/bl`'s one-exec path passes the root as it was invoked; the
     // environment names the canonical one, as `bin/bl` always exported it.
     std::env::set_var("BL_CHECKOUT_ROOT", &root);
-    #[cfg(unix)]
-    select_checkout_platform(&root);
-    timer.mark("platform");
     let argv = &args[2..];
+    #[cfg(unix)]
+    select_checkout_platform(&root, argv);
+    #[cfg(unix)]
+    ensure_direct_entry(&root);
+    timer.mark("platform");
     let cwd = std::env::current_dir().unwrap_or_else(|e| fail(&e.to_string()));
     let project = root_override(argv)
         .or_else(|| project_dir(&cwd))
@@ -171,7 +173,7 @@ const PLATFORM_SELECTED: &str = "BL_CHECKOUT_PLATFORM_SELECTED";
 /// client of this protocol ever writes the pointer, and only naming itself, so
 /// `bin/bl` never execs an older client without a platform.
 #[cfg(unix)]
-fn select_checkout_platform(root: &Path) {
+fn select_checkout_platform(root: &Path, argv: &[String]) {
     use std::os::unix::process::CommandExt;
     let selected = std::env::var_os(PLATFORM_SELECTED);
     std::env::remove_var(PLATFORM_SELECTED);
@@ -207,11 +209,88 @@ fn select_checkout_platform(root: &Path) {
         checkout_platform::record_pointer(root, &platform);
         return;
     }
+    // Spelled out rather than this process's own argv: a client entered as
+    // `.bl/bin/bl` was given the program's arguments only.
     let error = Command::new(&client)
-        .args(std::env::args_os().skip(1))
+        .arg("--checkout").arg(root).arg("--").args(argv)
         .env(PLATFORM_SELECTED, &platform)
         .exec();
     fail(&format!("cannot run {}: {error}", client.display()));
+}
+
+/// F3: `.bl/bin/bl`, the checkout's entry without a shell. `bin/bl` is a
+/// `/bin/sh` script, and on this host a shell start alone is ~1.9 ms (most of
+/// it locale setup), a third of a warm request. The entry is a symlink to the
+/// client the tree's platform pointer names, so it moves with the platform; a
+/// client started through it knows its checkout from the path it was run as.
+pub const DIRECT_ENTRY: &str = ".bl/bin/bl";
+const DIRECT_ENTRY_TARGET: &str = "../checkout-platform/bin/drop-launcher";
+
+/// Create or repair `.bl/bin/bl` (one readlink when it is already right).
+#[cfg(unix)]
+fn ensure_direct_entry(root: &Path) {
+    let entry = root.join(DIRECT_ENTRY);
+    if std::fs::read_link(&entry).is_ok_and(|t| t == Path::new(DIRECT_ENTRY_TARGET)) {
+        return;
+    }
+    let Some(dir) = entry.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let staged = dir.join(format!("bl.{}", std::process::id()));
+    let _ = std::fs::remove_file(&staged);
+    if std::os::unix::fs::symlink(DIRECT_ENTRY_TARGET, &staged).is_ok() && std::fs::rename(&staged, &entry).is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+}
+
+/// The checkout a process started as `<root>/.bl/bin/bl` (by path, or as `bl`
+/// found on PATH) belongs to.
+#[cfg(unix)]
+fn direct_entry_root(arg0: &Path) -> Option<PathBuf> {
+    if arg0.file_name()? != "bl" {
+        return None;
+    }
+    let path = if arg0.components().count() > 1 {
+        arg0.to_path_buf()
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|dir| dir.join("bl"))
+            .find(|candidate| candidate.is_file())?
+    };
+    if !std::fs::symlink_metadata(&path).ok()?.file_type().is_symlink() {
+        return None;
+    }
+    let bin = path.parent()?;
+    let dot = bin.parent()?;
+    if bin.file_name()? != "bin" || dot.file_name()? != ".bl" {
+        return None;
+    }
+    let root = dot.parent()?;
+    let root = if root.as_os_str().is_empty() { Path::new(".") } else { root };
+    root.join("bin/bl").is_file().then(|| root.to_path_buf())
+}
+
+/// A client entered as `.bl/bin/bl` does what `bin/bl`'s one-exec path does,
+/// under the same conditions; any other case goes through `bin/bl` itself.
+#[cfg(unix)]
+fn direct_entry_main() {
+    use std::os::unix::process::CommandExt;
+    let Some(arg0) = std::env::args_os().next() else { return };
+    let Some(root) = direct_entry_root(Path::new(&arg0)) else { return };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cold = args.iter().take_while(|a| a.as_str() != "--").any(|a| a == "--cold");
+    let preset = |key: &str| std::env::var_os(key).is_some_and(|v| !v.is_empty());
+    std::env::remove_var("BL_INTERNAL_PRODUCER");
+    std::env::remove_var(PLATFORM_SELECTED);
+    if cold || preset("BL_CHECKOUT_COLD") || preset("BL_CHECKOUT_PLATFORM") {
+        let script = root.join("bin/bl");
+        let error = Command::new(&script).args(&args).exec();
+        fail(&format!("cannot run {}: {error}", script.display()));
+    }
+    let mut full = vec![root.to_string_lossy().into_owned(), "--".to_string()];
+    full.extend(args);
+    checkout_main(&full)
 }
 
 /// Whether this process is the platform's own client binary.
@@ -876,6 +955,31 @@ fn checkout_sources_walk(
 #[cfg(test)]
 mod checkout_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_direct_entry_names_its_checkout_only_through_its_own_symlink() {
+        let root = std::env::temp_dir().join(format!("direct-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/bl"), "#!/bin/sh\n").unwrap();
+        assert_eq!(direct_entry_root(&root.join(".bl/bin/bl")), None, "no entry yet");
+        ensure_direct_entry(&root);
+        let entry = root.join(DIRECT_ENTRY);
+        assert_eq!(std::fs::read_link(&entry).unwrap(), Path::new(DIRECT_ENTRY_TARGET));
+        ensure_direct_entry(&root); // idempotent
+        assert_eq!(direct_entry_root(&entry), Some(root.clone()));
+        assert_eq!(direct_entry_root(&root.join("bin/bl")), None, "bin/bl is the script, not the entry");
+        std::fs::write(root.join("bin/notbl"), "").unwrap();
+        assert_eq!(direct_entry_root(&root.join("bin/notbl")), None);
+        // a regular file in the entry's place is not trusted
+        std::fs::remove_file(&entry).unwrap();
+        std::fs::write(&entry, "").unwrap();
+        assert_eq!(direct_entry_root(&entry), None);
+        ensure_direct_entry(&root);
+        assert!(std::fs::symlink_metadata(&entry).unwrap().file_type().is_symlink(), "repaired");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[cfg(target_os = "linux")]
     fn engine_fixture(name: &str) -> PathBuf {
