@@ -53,32 +53,38 @@
       (cache/clear! name))))
 
 (deftest queued-value-remains-charged-after-caller-timeout-and-death
-  (let [name :cache_pool_queued_test parent (erlang/self)
-        key (cache/key-data :key 0) rev (cache/key-data 1 0) value (binary/copy "x" 200000)
-        weight (cache/footprint (tuple key rev value))]
-    (is (wait-for (fn [] (cache/ready! name))))
-    (let [owner (Process/whereis name) before (:bytes (pool/stats))
-          caller (spawn (fn []
-                          (let [ticket (erlang/make_ref)]
-                            (let [gate (:gate (erlang/element 2 (first (ets/lookup name :cache-control))))]
-                              (ets/insert_new gate (tuple :lease ticket :claimed (erlang/self) weight))
-                              (pool/reserve! owner ticket weight)
-                              (call owner [:reserve (erlang/self) ticket weight] 1000))
-                            (erlang/send parent :queued-reservation-ready)
-                            (receive :publish
-                              (do (try (call owner [:put ticket key rev value weight] 5) (catch _ nil))
-                                  (erlang/send parent :queued-call-timed-out))
-                              (after 5000 nil)))))]
-      (receive :queued-reservation-ready :ok (after 5000 (assert false "reservation missing")))
-      (sys/suspend owner)
-      (erlang/send caller :publish)
-      (receive :queued-call-timed-out :ok (after 5000 (assert false "queued call did not time out")))
-      (is (= (+ before weight) (:bytes (pool/stats))))
-      (sys/resume owner)
-      (is (wait-for (fn [] (:hit? (cache/lookup name :key 1)))))
-      (is (= (+ before weight) (:bytes (pool/stats))))
-      (cache/clear! name)
-      (is (= before (:bytes (pool/stats)))))))
+  (let [name :cache_pool_queued_test parent (erlang/self)]
+    ;; Obtain the valid wire revision from public admission. The low-level
+    ;; reservation probe must not forge the library's generation/code receipt.
+    (is (wait-for (fn [] (cache/put! name :revision-probe 1 :probe))))
+    (is (= :probe (:value (cache/lookup name :revision-probe 1))))
+    (let [rev (erlang/element 2 (first (ets/lookup name (cache/key-data :revision-probe 0))))
+          _ (cache/clear! name)
+          key (cache/key-data :key 0) value (binary/copy "x" 200000)
+          weight (cache/footprint (tuple key rev value))]
+      (is (wait-for (fn [] (cache/ready! name))))
+      (let [owner (Process/whereis name) before (:bytes (pool/stats))
+            caller (spawn (fn []
+                            (let [ticket (erlang/make_ref)]
+                              (let [gate (:gate (erlang/element 2 (first (ets/lookup name :cache-control))))]
+                                (ets/insert_new gate (tuple :lease ticket :claimed (erlang/self) weight))
+                                (pool/reserve! owner ticket weight)
+                                (call owner [:reserve (erlang/self) ticket weight] 1000))
+                              (erlang/send parent :queued-reservation-ready)
+                              (receive :publish
+                                (do (try (call owner [:put ticket key rev value weight] 5) (catch _ nil))
+                                    (erlang/send parent :queued-call-timed-out))
+                                (after 5000 nil)))))]
+        (receive :queued-reservation-ready :ok (after 5000 (assert false "reservation missing")))
+        (sys/suspend owner)
+        (erlang/send caller :publish)
+        (receive :queued-call-timed-out :ok (after 5000 (assert false "queued call did not time out")))
+        (is (= (+ before weight) (:bytes (pool/stats))))
+        (sys/resume owner)
+        (is (wait-for (fn [] (:hit? (cache/lookup name :key 1)))))
+        (is (= (+ before weight) (:bytes (pool/stats))))
+        (cache/clear! name)
+        (is (= before (:bytes (pool/stats))))))))
 
 (deftest dead-caller-before-metadata-send-is-reclaimed-without-owner-restart
   (let [name :cache_pool_unsent_metadata parent (erlang/self)]
