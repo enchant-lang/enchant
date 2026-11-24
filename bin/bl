@@ -81,19 +81,20 @@ SDK=${SELECTION% *}
 BL_CHECKOUT_SDK_INPUTS=${SELECTION##* }
 export BL_CHECKOUT_SDK_INPUTS
 SDK=$(readlink -f "$SDK")
-"$PLATFORM/artifact-platform/bin/python3" - "$SDK" "$BL_CHECKOUT_SDK_INPUTS" <<'PYSDK'
-import json, pathlib, re, sys
-sdk = pathlib.Path(sys.argv[1])
-if not re.fullmatch(r"[0-9a-f]{64}", sys.argv[2]):
-    raise SystemExit("bl: SDK selection lacks its captured input fingerprint")
-if not re.fullmatch(r"/nix/store/[0-9a-z]{32}-[^/]+", str(sdk)):
-    raise SystemExit("bl: SDK must be an immutable Nix product")
-metadata = json.loads((sdk / "artifact.json").read_text())
-if (metadata.get("version"), metadata.get("kind"), metadata.get("target")) != (1, "sdk", "x86_64-linux"):
-    raise SystemExit("bl: unsupported SDK product")
-if not (sdk / "image/ebin/Elixir.BeamLisp.Launcher.beam").is_file():
-    raise SystemExit("bl: incomplete SDK product")
-PYSDK
+# The selection verified the product (scripts/prepare-checkout-sdk
+# verify_selection, or its recorded verdict for a settled tree); these are
+# the same shape checks without another interpreter start.
+refuse() { echo "bl: $1" >&2; exit 1; }
+case "$BL_CHECKOUT_SDK_INPUTS" in *[!0-9a-f]*|'') refuse 'SDK selection lacks its captured input fingerprint' ;; esac
+[ "${#BL_CHECKOUT_SDK_INPUTS}" -eq 64 ] || refuse 'SDK selection lacks its captured input fingerprint'
+case "$SDK" in /nix/store/*) ;; *) refuse 'SDK must be an immutable Nix product' ;; esac
+NAME=${SDK#/nix/store/}
+HASH=${NAME%%-*}
+case "$NAME:$HASH" in */*|*:*[!0-9a-z]*) refuse 'SDK must be an immutable Nix product' ;; esac
+[ "${#HASH}" -eq 32 ] && [ "$HASH" != "$NAME" ] && [ -n "${NAME#*-}" ] ||
+  refuse 'SDK must be an immutable Nix product'
+[ -f "$SDK/artifact.json" ] || refuse 'unsupported SDK product'
+[ -f "$SDK/image/ebin/Elixir.BeamLisp.Launcher.beam" ] || refuse 'incomplete SDK product'
 export BL_SDK_PRODUCT="$SDK"
 COORDINATOR=$(readlink -f "$SDK/preparation-coordinator")
 export BL_PREPARATION_COORDINATOR="$COORDINATOR"
@@ -103,6 +104,11 @@ export BL_BUILD_ID=src
 export BEAM_LISP_DEV=0
 # Only immutable SDK dependencies enter the VM. Producer/bootstrap staging is
 # confined to bin/bl-producer inside the trusted Nix recipes.
+# Boot exactly as the SDK's own bin/bl-cold does: its boot.exs puts the
+# platform's Elixir ahead of the payload's ebin-only copy, then the image.
+if [ -f "$SDK/boot.exs" ]; then
+  exec elixir "$SDK/boot.exs" "$@"
+fi
 PA=""
 for directory in "$SDK"/lib/*/ebin; do
   PA="$PA -pa $directory"
