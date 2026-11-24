@@ -107,6 +107,17 @@
   (let [scope (caller-scope)]
     (if (and (some? scope) (nil? (:scope spec))) (assoc spec :scope scope) spec)))
 
+(defn- drain-vm
+  "`vmc/drain` as this server's answer, never its exit. A drain runs inside the
+   manager; one that raised ended the manager and its realm table with it, so
+   `bl realm stop` printed \"stopped\" while the VM, its realm and its processes
+   stayed up and nothing could retire them. A raising drain is kept as
+   :draining with its reason, so the stop says why and can be retried."
+  [vm]
+  (try (vmc/drain vm)
+    (catch e {:status :waiting :pending 0
+              :error (let [m (ex-message e)] (if (string? m) m (pr-str e)))})))
+
 (defn- shutdown-vms
   "Drain the VMs `scope` owns (all of them for a nil scope); keep pending ones
    as :draining and every VM of another scope untouched. Answers [reply state]."
@@ -114,7 +125,7 @@
   (let [mine? (fn [vm] (or (nil? scope) (= scope (:scope vm))))
         targets (filter (fn [[_ vm]] (mine? vm)) (:vms st))
         others (into {} (filter (fn [[_ vm]] (not (mine? vm))) (:vms st)))
-        results (mapv (fn [[id vm]] [id (vmc/drain vm)]) targets)
+        results (mapv (fn [[id vm]] [id (drain-vm vm)]) targets)
         pending (into {} (keep (fn [[id result]]
                                 (when (= :waiting (:status result))
                                  [id (assoc (get (:vms st) id) :status :draining)])) results))]
@@ -208,7 +219,7 @@
 
   (handle-call [:drain id] [_from st]
     (if (contains? (:vms st) id)
-      (let [r (vmc/drain (get (:vms st) id))]
+      (let [r (drain-vm (get (:vms st) id))]
         (reply r (if (= :waiting (:status r))
                    (assoc-in st [:vms id :status] :draining)
                    (assoc st :vms (dissoc (:vms st) id)))))
@@ -229,6 +240,11 @@
   []
   (if (nil? (Process/whereis MANAGER))
     (do (owner/start)
+        ;; What a drain calls is loaded now, before any request: loading an SDK
+        ;; namespace later can need a compile (a checkout VM's dev overlay,
+        ;; U15), and a drain must not depend on one succeeding.
+        ;; If it cannot load here, `drain` loads it itself, as it always did.
+        (try (vmc/prepare-drain!) (catch _ nil))
         (core/start daemon nil {:name MANAGER}))
     (Process/whereis MANAGER)))
 

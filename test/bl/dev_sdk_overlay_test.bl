@@ -83,6 +83,45 @@
             (is (= :sdk-runtime-retained (BeamLisp.Env/ensure_sdk_runtime!)))))))
     (File/rm_rf! root)))
 
+(deftest a-unit-that-defines-a-server-owner-is-held-whole
+  ;; data.bounded-cache defines `defserver owner`. Its owner module cannot be
+  ;; republished in place (`:code_leased`, even after the owner process stops)
+  ;; and before this check the body had already loaded by then: a half-replaced
+  ;; unit, a broken lease, and the same failure recompiled on every command.
+  (require 'data.bounded-cache)
+  (let [root (scratch-checkout)
+        sdk (File/read! (Path/join (BeamLisp.Tiers/priv_root) "lib/data/bounded-cache.bl"))
+        edited (str sdk "\n(defn u15-probe [] :edited)\n")
+        dev-priv (str root "/.bl/dev-overlay/priv")
+        copy (str dev-priv "/lib/data/bounded-cache.bl")
+        name :u15_probe_cache
+        owner-module :Elixir.BeamLisp.Server.Data.Bounded-cache.Owner
+        members [:Elixir.BeamLisp.Ns.Data.Bounded-cache :Elixir.BeamLisp.Ns.Body.Data.Bounded-cache
+                 :Elixir.BeamLisp.Ns.Init.Data.Bounded-cache owner-module]
+        md5s (fn [] (mapv (fn [m] (when (erlang/module_loaded m) (erlang/apply m :module_info (list :md5)))) members))
+        install (fn [] (BeamLisp.Env/install_dev_sdk_unit! "data.bounded-cache" copy dev-priv))]
+    (File/mkdir_p! (Path/dirname copy))
+    (File/write! copy edited)
+    (is (= true (data.bounded-cache/ready! name)) "an owner is running")
+    (let [owner (Process/whereis name) before (md5s)]
+      (with-checkout root
+        (fn []
+          (let [result (install)]
+            (is (= owner-module (:held result)) "held, naming the server module, not :code_leased")
+            (is (= before (md5s)) "nothing of the unit was loaded")
+            (is (nil? (BeamLisp.Env/dev_sdk_row :Elixir.BeamLisp.Ns.Body.Data.Bounded-cache)))
+            (is (Process/alive? owner) "the owner was not touched")
+            (is (= true (data.bounded-cache/ready! name)) "the SDK's cache still answers")
+            (is (= :sdk-runtime-retained (BeamLisp.Env/ensure_sdk_runtime!))))
+          ;; with no owner running it is still held whole, and still harmless
+          (erlang/monitor :process owner)
+          (erlang/exit owner :kill)
+          (receive [:DOWN _ :process _ _] :ok (after 5000 :timeout))
+          (is (= owner-module (:held (install))))
+          (is (= before (md5s)))
+          (is (= :sdk-runtime-retained (BeamLisp.Env/ensure_sdk_runtime!))))))
+    (File/rm_rf! root)))
+
 (deftest outside-a-checkout-the-sdk-is-never-replaced
   (let [root (scratch-checkout)]
     (is (= :dev_sdk_overlay_requires_a_checkout_vm

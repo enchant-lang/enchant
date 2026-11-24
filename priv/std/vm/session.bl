@@ -172,7 +172,8 @@
   (if (> running 0) {:status :waiting :pending running}
    (let [results (mapv realm/close (session-realms k))
          pending (count (filter #(= :waiting (:status %)) results))]
-    {:status (if (= 0 pending) :retired :waiting) :pending pending}))))
+    {:status (if (= 0 pending) :retired :waiting) :pending pending
+     :errors (vec (keep :error results))}))))
 
 (defn vm-label
   "What `bl vm` calls this VM: the project's name for a VM that serves one project,
@@ -261,10 +262,16 @@
              (conn-send (wire/stdout id 0 (str "bl realm: restarted " root "\n")))
              (conn-send (wire/exit id 0))))))
       (= op :stop)
-      (if (= :waiting (:status (drain-session! k))) (pending! conn-send id)
+      (let [drained (drain-session! k)]
+       (if (= :waiting (:status drained))
+        (do ;; a drain that raised says why (`vm.manager/drain-vm`); pending
+            ;; consumers alone keep the plain retry message
+            (doseq [e (:errors drained)]
+              (conn-send (wire/stderr id 0 (str "bl realm: retirement failed: " e "\n"))))
+            (pending! conn-send id))
        (do (request-stop! k)
            (conn-send (wire/stdout id 0 "bl realm: stopping\n"))
-           (conn-send (wire/exit id 0))))
+           (conn-send (wire/exit id 0)))))
       :else (conn-send (wire/exit id 0)))))
 
 (defn- request-handler [frame conn-send]
