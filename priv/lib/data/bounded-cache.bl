@@ -6,7 +6,7 @@
 (def OWNER-TIMEOUT-MS 25)
 
 (declare binary-extra)
-(declare key-data)
+(declare legacy-key-data)
 (declare ensure-owner)
 (declare publish-entry!)
 
@@ -15,18 +15,18 @@
     (cond
       (erlang/== xs ()) out
       (not (erlang/is_list xs)) nil
-      :else (when-let [x (key-data (erlang/hd xs) depth)]
+      :else (when-let [x (legacy-key-data (erlang/hd xs) depth)]
               (recur (erlang/tl xs) (conj out x))))))
 
 (defn- key-map [x depth]
   (loop [it (maps/iterator x) out {}]
     (let [entry (maps/next it)]
       (if (= :none entry) out
-        (let [k (key-data (erlang/element 1 entry) depth)
-              v (key-data (erlang/element 2 entry) depth)]
+        (let [k (legacy-key-data (erlang/element 1 entry) depth)
+              v (legacy-key-data (erlang/element 2 entry) depth)]
           (when (and k v) (recur (erlang/element 3 entry) (assoc out k v))))))))
 
-(defn key-data
+(defn- legacy-key-data
   "Typed identity without retaining local reference resources. Unsupported
    identities decline caching; container tags prevent forged scalar collisions."
   [x depth]
@@ -46,6 +46,30 @@
       (erlang/is_list x)
         (when-let [v (key-list x (inc depth))] (tuple :list v))
       :else nil)))
+
+(defn- walk-code
+  "Finite native-code receipt, or nil when the runtime cannot establish it.
+   The fallback remains usable on a floor without CacheWalk. SDK ownership
+   and source leases remain the runtime's authority; this receipt only makes
+   optional retention more conservative across kernel/Vector changes."
+  []
+  (try
+    (let [vector (BeamLisp.Vector/module_info :md5)]
+      (if (and (erlang/function_exported :Elixir.BeamLisp.CacheWalk :key-data 2)
+               (erlang/function_exported :Elixir.BeamLisp.CacheWalk :footprint 1))
+        [:native (BeamLisp.CacheWalk/module_info :md5) vector]
+        [:legacy vector]))
+    (catch _ nil)))
+
+(defn key-data
+  "Typed finite identity. Numeric depth uses the SDK's pure host walk when
+   present; the old BL comparison/domain remains authoritative otherwise."
+  [x depth]
+  (when-let [receipt (walk-code)]
+    (let [value (if (and (= :native (first receipt)) (erlang/is_number depth))
+                  (BeamLisp.CacheWalk/key-data x depth)
+                  (legacy-key-data x depth))]
+      (when (= receipt (walk-code)) value))))
 
 (defn- list-extra [xs depth]
   (loop [xs xs acc 0]
@@ -82,7 +106,7 @@
       (erlang/is_list x) (list-extra x (inc depth))
       :else nil)))
 
-(defn footprint
+(defn- legacy-footprint
   "Conservative charge for an entry, including sub-binaries' retained parents.
    nil declines opaque/resource-bearing values. No serialization copy is made."
   [entry]
@@ -92,15 +116,28 @@
       (+ 256 (* 2 (+ (* (erlang/system_info :wordsize) (erts_debug/flat_size entry))
                        (erlang/external_size entry) extra))))))
 
+(defn footprint
+  "Conservative retained charge, including binary parents. Unknown or changed
+   kernel/Vector code declines optional admission; no resource is retained."
+  [entry]
+  (when-let [receipt (walk-code)]
+    (let [weight (if (= :native (first receipt))
+                   (BeamLisp.CacheWalk/footprint entry)
+                   (legacy-footprint entry))]
+      (when (= receipt (walk-code)) weight))))
+
 (defn- digest-data [data]
   (when-let [weight (footprint data)]
     (when (<= weight 1048576)
       {:digest (crypto/hash :sha256 (erlang/term_to_binary data)) :weight weight})))
 
 (defn- fingerprint-code []
-  (try (BeamLisp.Env/namespace_generations
-         (list "core" "sugar" "rt" "data.bounded-cache" "data.cache-budget"))
-       (catch _ nil)))
+  (try
+    (when-let [receipt (walk-code)]
+      (when-let [definitions (BeamLisp.Env/namespace_generations
+                              (list "core" "sugar" "rt" "data.bounded-cache" "data.cache-budget"))]
+        [definitions receipt]))
+    (catch _ nil)))
 
 (defn fingerprint
   "Compact finite provenance; large repeated immutable inputs reuse their digest
@@ -243,7 +280,7 @@
   [name]
   (try (some? (ensure-owner name)) (catch _ false)))
 
-(defn- scoped-revision [revision]
+(defn- generation-revision [revision]
   ;; A shared SDK factory can produce the same callback fingerprint for two
   ;; different application graphs/configurations. Context is native authority,
   ;; not another key every application developer must remember to supply.
@@ -254,9 +291,14 @@
       (throw (ex-info "Unknown generation cache authority" {:kind :invalid-cache-generation})))
     revision))
 
+(defn- scoped-revision [revision]
+  (let [generation (generation-revision revision)]
+    (when-let [receipt (walk-code)] (tuple :cache-walk receipt generation))))
+
 (defn lookup [name key revision]
   (try
-    (let [key (key-data key 0) revision (key-data (scoped-revision revision) 0)]
+    (let [key (key-data key 0) scoped (scoped-revision revision)
+          revision (when scoped (key-data scoped 0))]
       (if (and key revision)
         (do (ensure-owner name)
             (let [entry (first (ets/lookup name key))]
@@ -287,7 +329,8 @@
    A busy optional cache never imposes OTP's default five-second write timeout."
   [name key revision value]
   (try
-    (let [key (key-data key 0) revision (key-data (scoped-revision revision) 0)]
+    (let [key (key-data key 0) scoped (scoped-revision revision)
+          revision (when scoped (key-data scoped 0))]
       (if (and key revision)
         (let [weight (footprint (tuple key revision value))]
           (if (budget/admissible? weight)

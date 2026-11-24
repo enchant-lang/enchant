@@ -1,0 +1,90 @@
+(ns data.cache-walk-test
+  (:require [data.bounded-cache :as cache]
+            [test.bl.support.cache-walk-reference :as reference]))
+
+(defn- nest [depth]
+  (loop [n depth value :leaf]
+    (if (zero? n) value (recur (dec n) (tuple value)))))
+
+(defn- outcome [f]
+  (try [:returned (f)] (catch _ [:raised])))
+
+(deftest the-installed-host-walk-has-no-library-or-loader-dispatch
+  ;; This suite must qualify the new SDK, never silently exercise a fallback
+  ;; on the preceding floor. Inspect the actual installed beam, not a probe.
+  (is (erlang/function_exported :Elixir.BeamLisp.CacheWalk :key-data 2))
+  (is (erlang/function_exported :Elixir.BeamLisp.CacheWalk :footprint 1))
+  (let [object (code/get_object_code :Elixir.BeamLisp.CacheWalk)
+        chunks (beam_lib/chunks (erlang/element 2 object) (list :imports))
+        imports (proplists/get_value :imports (erlang/element 2 (erlang/element 2 chunks)))]
+    (is (= :ok (erlang/element 1 chunks)))
+    (is (seq imports))
+    (is (every? (fn [entry]
+                  (contains? #{:erlang :maps :binary :erts_debug
+                               :Elixir.BeamLisp.Vector :Elixir.BeamLisp.CacheWalk}
+                             (erlang/element 1 entry))) imports))))
+
+(deftest installed-walk-and-public-cache-match-the-frozen-physical-oracle
+  (let [local (erlang/make_ref)
+        node-text (Atom/to_string (erlang/node))
+        _ (assert (>= (erlang/byte_size node-text) 6))
+        foreign (erlang/binary_to_term
+                  (binary/replace (erlang/term_to_binary local) node-text
+                    (str "other@" (binary/copy "x" (- (erlang/byte_size node-text) 6)))
+                    (list :global)))
+        improper (erlang/binary_to_term
+                   (erlang/list_to_binary (list 131 108 0 0 0 1 97 1 97 2)))
+        parent (binary/copy "x" 16777216)
+        slice (binary/part parent 0 256)
+        port (first (erlang/ports))
+        values (concat
+                 [nil false true :leaf 0 -1 1 1.0 -0.25 (erlang/bsl 1 128) "" "é" slice
+                  () [] {} (tuple) (tuple 1 1.0 false nil "x") local foreign
+                  (erlang/self) port (fn [] nil) improper
+                  {:items (list (tuple 1 1.0 false nil slice))}
+                  {:resource [(erlang/self)]}]
+                 (map nest (range 132))
+                 (map (fn [n] (vec (range n))) [1 31 32 33 64 65 1024 1025])
+                 (map (fn [n]
+                        (into {} (map (fn [i] [(str i) [i (erlang/float i) false nil]])
+                                      (range n)))) [1 31 32 33 64]))]
+    (is (erlang/is_reference foreign))
+    (is (not= (erlang/node) (erlang/node foreign)))
+    (is (erlang/is_port port))
+    (is (> (binary/referenced_byte_size slice) 1048576))
+    (doseq [value values]
+      (let [key (reference/key-data value 0) weight (reference/footprint value)]
+        (is (erlang/=:= key (BeamLisp.CacheWalk/key-data value 0)))
+        (is (erlang/=:= key (cache/key-data value 0)))
+        (is (erlang/=:= weight (BeamLisp.CacheWalk/footprint value)))
+        (is (erlang/=:= weight (cache/footprint value)))))
+    (is (some? (cache/key-data local 0)))
+    (is (nil? (cache/key-data foreign 0)))
+    (is (nil? (cache/footprint local)))
+    (is (>= (cache/footprint slice) (* 2 (binary/referenced_byte_size slice))))))
+
+(deftest public-depth-domain-remains-compatible-including-the-fallback
+  (doseq [depth [-1 0 1 127 127.5 128 128.5 129]
+          value [nil () (tuple) {} (tuple :leaf)]]
+    (let [expected (reference/key-data value depth)]
+      (is (erlang/=:= expected (BeamLisp.CacheWalk/key-data value depth)))
+      (is (erlang/=:= expected (cache/key-data value depth)))))
+  (doseq [depth [nil false :depth "0" []] value [nil (tuple :leaf)]]
+    (is (erlang/=:= (outcome (fn [] (reference/key-data value depth)))
+                   (outcome (fn [] (cache/key-data value depth)))))))
+
+(deftest nil-logical-revision-is-retained-with-an-explicit-native-code-receipt
+  (let [name :bounded_cache_native_walk_receipt
+        revision (tuple :cache-walk
+                   [:native (BeamLisp.CacheWalk/module_info :md5)
+                            (BeamLisp.Vector/module_info :md5)] nil)]
+    (try
+      (is (cache/put! name :key nil :answer))
+      (is (= {:hit? true :value :answer} (cache/lookup name :key nil)))
+      (let [entry (first (ets/lookup name (cache/key-data :key 0)))]
+        (is (erlang/=:= (cache/key-data revision 0) (erlang/element 2 entry)))
+        (is (= (cache/footprint entry) (:bytes (cache/stats name)))))
+      (is (not (:hit? (cache/lookup name :key :different))))
+      (is (cache/forget! name :key))
+      (is (not (:hit? (cache/lookup name :key nil))))
+      (finally (when-let [pid (Process/whereis name)] (GenServer/stop pid))))))
