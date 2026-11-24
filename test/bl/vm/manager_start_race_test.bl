@@ -1,0 +1,30 @@
+; Concurrent first starts of the node's VM manager and its owner registry
+; (a daemon's boot and its first request) answer one pid; none fails with
+; `{:already_started, pid}`. K1b made that race the common case.
+(ns vm.manager-start-race-test)
+
+(def runner-source
+ "{:ok, _} = Application.ensure_all_started(:beam_lisp)
+  BeamLisp.Loader.ensure_loaded(\"vm.manager\")
+  start = BeamLisp.Env.fetch!(\"vm.manager\", \"start\")
+  parent = self()
+  for _ <- 1..8, do: spawn(fn -> send(parent, {:started, (try do BeamLisp.Ns.Rt.invoke(start, []) rescue e -> {:error, Exception.message(e)} end)}) end)
+  results = for _ <- 1..8, do: (receive do {:started, r} -> r after 120_000 -> :timeout end)
+  pids = Enum.uniq(results)
+  IO.puts(\"results=\" <> inspect(results))
+  IO.puts(\"race-ok=\" <> inspect(length(pids) == 1 and is_pid(hd(pids)) and hd(pids) == Process.whereis(:\"vm-manager\")))
+  System.halt(0)\n")
+
+(deftest concurrent-first-manager-starts-answer-one-pid
+ (let [dir (str (System/tmp_dir!) "/vm-manager-race-" (erlang/unique_integer (list :positive)))
+       runner (str dir "/race.exs")]
+  (File/mkdir_p! dir)
+  (try
+   (File/write! runner runner-source)
+   (let [paths (mapcat #(list "-pa" (erlang/list_to_binary %)) (code/get_path))
+         result (System/cmd "elixir" (to-list (concat paths (list runner)))
+                  (list (tuple :stderr_to_stdout true) (tuple :cd dir)))
+         text (elem result 0)]
+    (is (= 0 (elem result 1)) text)
+    (is (String/contains? text "race-ok=true") text))
+   (finally (File/rm_rf! dir)))))

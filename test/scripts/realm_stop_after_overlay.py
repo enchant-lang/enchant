@@ -15,6 +15,9 @@ Three phases, each in VMs of their own:
    The first run after the stop must not reach the stopping VM ("retirement
    pending"; most cycles of a checkout-root VM before `vm.client/stop` waited
    for the VM to retire). `--lenient-stop` reports that as a WARN instead.
+   Each cycle's stop of the VM the previous cycle started is checked like
+   phases 1 and 2 (K1b: after the lazy app start, every other fresh VM lost
+   the `vm-manager` race).
 1. Plain: 23 warm `bl run` of `(println 1)`, then `bl realm stop`.
 2. Overlay (U15): an edit to `priv/lib/data/bounded-cache.bl` is present when
    the VM starts, so the warm VM compiles it over the SDK; a few runs, then
@@ -107,7 +110,12 @@ def main():
         try:
             for cycle in range(10):
                 before = checkout_vms()
-                bl("realm", "stop")
+                # K1b: each cycle's stop must also retire the VM the previous
+                # cycle's runs started (exit 0, no pending, process gone).
+                if before:
+                    failures += stop_and_check(f"fresh: cycle {cycle}")
+                else:
+                    bl("realm", "stop")
                 runs = [bl("run", str(program))]
                 # A stop that answers while its VM still serves sends the next
                 # run into a draining VM. Reported on its own; that cycle's
