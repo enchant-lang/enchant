@@ -1420,27 +1420,58 @@
   "The namespace a file declares: the first symbol after its leading `(ns …)`.
    Leading whitespace and `;` comments are skipped; a file whose first form is
    not `(ns …)` declares no namespace and returns nil. Metadata is skipped, so
-   `(ns ^{:instr {…}} codebase …)` reads `codebase`."
+   `(ns ^{:instr {…}} codebase …)` reads `codebase`.
+
+   K2: the scan reads a few bytes of a file, but it used to turn the whole file
+   into a char list first (11 ms for `rt` at every cold start). A large file is
+   first scanned in its leading window; that answer stands only when every step
+   stopped inside the window, which a step that reached its end cannot claim.
+   Any other outcome scans the whole file exactly as before."
   [source]
   (if (erlang/is_binary source)
-    (let [s (skip_leading (erlang/binary_to_list source))]
-      (if (erlang/is_list s)
-        (if (empty? s)
-          nil
-          (if (erlang/== 40 (first s))
-            (let [rest1 (skip_leading (rest s))
-                  t (take_token rest1)]
-              (if (and (erlang/is_tuple t)
-                       (erlang/== "ns" (erlang/element 1 t)))
-                (let [rest2 (skip_leading (erlang/element 2 t))
-                      rest3 (skip_metadata rest2)
-                      rest4 (skip_leading rest3)
-                      t2 (take_token rest4)]
-                  (if (erlang/is_tuple t2) (erlang/element 1 t2) nil))
-                nil))
-            nil))
-        nil))
+    (let [window (declared-ns-window)
+          early (when (erlang/> (erlang/byte_size source) window)
+                  (declared_ns_decided (erlang/binary_to_list (binary/part source 0 window))))]
+      (if (erlang/is_tuple early)
+        (erlang/element 1 early)
+        (declared_ns_chars (erlang/binary_to_list source))))
     nil))
+
+(defn- declared-ns-window [] 65536)
+
+(defn- declared_ns_chars
+  [chars]
+  (let [s (skip_leading chars)]
+    (if (erlang/is_list s)
+      (if (empty? s)
+        nil
+        (if (erlang/== 40 (first s))
+          (let [rest1 (skip_leading (rest s))
+                t (take_token rest1)]
+            (if (and (erlang/is_tuple t)
+                     (erlang/== "ns" (erlang/element 1 t)))
+              (let [rest2 (skip_leading (erlang/element 2 t))
+                    rest3 (skip_metadata rest2)
+                    rest4 (skip_leading rest3)
+                    t2 (take_token rest4)]
+                (if (erlang/is_tuple t2) (erlang/element 1 t2) nil))
+              nil))
+          nil))
+      nil)))
+
+(defn- declared_ns_decided
+  "`declared_ns_chars` on a window of a longer file: `{name}` only when the
+   declared name was found and every token it read ended before the window
+   did (a non-empty tail), else nil, and the caller scans the whole file."
+  [chars]
+  (let [s (skip_leading chars)]
+    (when (and (erlang/is_list s) (erlang/not (empty? s)) (erlang/== 40 (first s)))
+      (let [t (take_token (skip_leading (rest s)))]
+        (when (and (erlang/is_tuple t) (erlang/== "ns" (erlang/element 1 t))
+                   (erlang/not (empty? (erlang/element 2 t))))
+          (let [t2 (take_token (skip_leading (skip_metadata (skip_leading (erlang/element 2 t)))))]
+            (when (and (erlang/is_tuple t2) (erlang/not (empty? (erlang/element 2 t2))))
+              (tuple (erlang/element 1 t2)))))))))
 
 (defn- skip_leading
   "Skip whitespace bytes and `;` line comments; return the tail."

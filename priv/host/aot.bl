@@ -5755,13 +5755,23 @@
             (and bytes (not (nil? (sdk_image_preload_unit ns root bytes)))
                  (= input (sdk_inventory_input))))))))
 
-(defn- sdk_preinit_seed_member! [manifest mod source]
+(defn- sdk_preinit_seed_member!
+  ;; K2: `decode?` false skips decoding the attributes of a member whose
+  ;; attributes nothing reads (no host source to compare, no descriptors). Rt
+  ;; and Compiler carry ~0.8 and ~1.6 MB of phase-library attributes; decoding
+  ;; them was ~26 ms of each cold start. The chunk is still located, so a
+  ;; malformed beam refuses as before; bytes, MD5 and SHA-256 are all checked.
+  ([manifest mod source] (sdk_preinit_seed_member! manifest mod source true))
+  ([manifest mod source decode?]
   (let [name (erlang/iolist_to_binary (list (Atom/to_string mod) ".beam"))
         expected (Map/get (Map/get manifest "modules") name)
         bytes (when expected (File/read! (Path/join (BeamLisp.Bootstrap/seed_dir) name)))
-        chunks (when bytes (beam_lib/chunks bytes (list :attributes)))
+        chunks (when bytes
+                 (if decode?
+                   (beam_lib/chunks bytes (list :attributes))
+                   (beam_lib/chunks bytes (list (String/to_charlist "Attr")) (list :allow_missing_chunks))))
         attrs (when (and chunks (erlang/== :ok (elem chunks 0)))
-                (Keyword/get (elem (elem chunks 1) 1) :attributes))]
+                (if decode? (Keyword/get (elem (elem chunks 1) 1) :attributes) :undecoded))]
     (when-not (and bytes attrs (Code/ensure_loaded? mod)
                    (erlang/== expected (String/downcase (Base/encode16 (crypto/hash :sha256 bytes))))
                    (or (erlang/== (elem (elem (beam_lib/md5 bytes) 1) 1)
@@ -5779,7 +5789,7 @@
                        (erlang/== (normalized_attribute attrs :bl_source_hash)
                          (String/downcase (Base/encode16 (crypto/hash :sha256 (File/read! source)))))))
       (erlang/error (tuple :sdk_preinit_producer_unproved mod)))
-    attrs))
+    attrs)))
 
 (defn sdk_preinit_floor_ready?
   "Native current-floor producer proof; never a public SDK or Source grant.
@@ -5855,8 +5865,8 @@
                 (tuple :Elixir.BeamLisp.Bootstrap "bootstrap.bl"))
           (fn [entry]
             (sdk_preinit_seed_member! manifest (elem entry 0) (Path/join (Path/join root "host") (elem entry 1)))))
-        (sdk_preinit_seed_member! manifest :Elixir.BeamLisp.Ns.Rt nil)
-        (sdk_preinit_seed_member! manifest :Elixir.BeamLisp.Ns.Compiler nil)
+        (sdk_preinit_seed_member! manifest :Elixir.BeamLisp.Ns.Rt nil false)
+        (sdk_preinit_seed_member! manifest :Elixir.BeamLisp.Ns.Compiler nil false)
         (let [attrs (sdk_preinit_seed_member! manifest :Elixir.BeamLisp.Ns.Core nil)]
           (when-not (and (sdk_declaration_descriptor? (normalized_attribute attrs :bl_sdk_declarations) "core")
                          (sdk_callable_descriptor? (normalized_attribute attrs :bl_sdk_callable_kinds) "core"))
