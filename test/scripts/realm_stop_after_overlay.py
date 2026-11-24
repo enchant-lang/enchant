@@ -12,16 +12,17 @@ Three phases, each in VMs of their own:
    boot and its first request both start `vm-manager`; neither run may print
    `server failed to start` (batch 22: `{:already_started, <vm-manager>}` in
    about 1 of 3 fresh VMs, from a check-then-start in `vm.manager/start`).
-   The first run after the stop reaching the stopping VM ("retirement
-   pending"; every second cycle of a checkout-root VM on main) is a WARN, or a
-   failure with `--strict-stop`.
+   The first run after the stop must not reach the stopping VM ("retirement
+   pending"; most cycles of a checkout-root VM before `vm.client/stop` waited
+   for the VM to retire). `--lenient-stop` reports that as a WARN instead.
 1. Plain: 23 warm `bl run` of `(println 1)`, then `bl realm stop`.
 2. Overlay (U15): an edit to `priv/lib/data/bounded-cache.bl` is present when
    the VM starts, so the warm VM compiles it over the SDK; a few runs, then
    `bl realm stop`. The edit is reverted in `finally`.
 
-Pass (exit 0): in both phases the stop exits 0, prints neither "retirement
-pending" nor "retirement failed", and the VM's OS process is gone within 15 s.
+Pass (exit 0): every stop exits 0, prints neither "retirement pending" nor
+"retirement failed", the run right after a stop starts a fresh VM rather than
+reaching the stopping one, and the VM's OS process is gone within 15 s.
 
 Batch 21 failed phase 2: the first stop loaded `reload.generation` inside the
 VM manager, that load was refused (`:sdk_runtime_loaded_code_changed`) and
@@ -95,10 +96,10 @@ def main():
         sys.exit(f"a VM already serves {ROOT}; run `./bin/bl realm stop` first")
     original = EDITED.read_bytes()
     failures = []
-    # `--strict-stop` also fails on a run that reaches a VM `realm stop` has
-    # answered for but that still serves (an open defect on main, reported
-    # separately); without it those are printed as warnings.
-    strict_stop = "--strict-stop" in sys.argv[1:]
+    # A run that reaches a VM `realm stop` answered for but that still serves
+    # fails the gate. `--lenient-stop` prints those as warnings instead, for
+    # checking the other phases on an SDK from before `vm.client/stop` waited.
+    strict_stop = "--lenient-stop" not in sys.argv[1:]
     warnings = []
     with tempfile.TemporaryDirectory(prefix="bl-realm-stop-") as scratch:
         program = Path(scratch) / "one.bl"
