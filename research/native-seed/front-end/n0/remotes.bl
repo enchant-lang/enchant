@@ -1,0 +1,85 @@
+; Card N0: which remotes of the composed front-end units the native linker
+; cannot resolve. Evaluated by the native image (qualify.bl eval):
+;
+;   this file, then (n0-main [[PATH NS] ...] {"MODULE" PATH} [CORE.bl SUGAR.bl])
+;
+; The image's compiled units link every :remote to a compiled definition or a
+; registered host leaf (native.bootstrap/remote-decision); an evaluated file
+; resolves them at call time. This compiles each form of the given sources to
+; ANF exactly as native.eval does, walks the :remote nodes, and prints each
+; key that is neither exported here nor a definition of the composed unit that
+; becomes that module (n0-self: module name -> source path). Those keys get
+; named refusals (host/native-refusals.scm), so they fail at call time as an
+; evaluated call would and function_exported answers false for them.
+(ns n0.remotes (:require [compiler :as c] [reader :as rd] [reader-node :as rn]))
+
+(defn- remotes [node acc]
+ (cond
+  (map? node) (let [acc (cond
+                         (and (= :remote (:op node)) (keyword? (:mod node)) (keyword? (:fun node)))
+                          (conj acc [(:mod node) (:fun node) (count (:args node))])
+                         (and (= :global (:op node)) (string? (:name node)))
+                          (conj acc [:global (:ns node) (:name node)])
+                         :else acc)]
+               (reduce (fn [a v] (remotes v a)) acc (vals node)))
+  (or (vector? node) (seq? node) (list? node)) (reduce (fn [a v] (remotes v a)) acc node)
+  :else acc))
+
+(defn- defined-names [source path]
+ (set (keep (fn [form]
+             (let [n (rn/node-form form)]
+              (when (= :list (rn/node-tag n))
+               (let [[h nm] (rn/node-items n)]
+                (when (contains? #{"defn" "defn-"} (rn/node-name (rn/node-form h)))
+                 (rn/node-name (rn/node-form nm)))))))
+            (rd/read-string source path))))
+
+(defn- scan [path ns]
+ (let [source (host/read-file path)
+       env (assoc (c/new-env ns) :target :js)]
+  (BeamLisp.Env/in_ns ns)
+  (reduce (fn [acc form]
+           (try
+            (let [head (let [n (rn/node-form form)] (when (= :list (rn/node-tag n)) (rn/node-name (rn/node-form (first (rn/node-items n))))))]
+             (cond
+              (= "ns" head) acc
+              (contains? #{"defn" "defn-" "def"} head)
+               (let [decl (c/declaration-source form env)
+                     name (rn/node-name (rn/node-form (:name decl)))]
+                (when-not (BeamLisp.Env/bound? ns name) (BeamLisp.Env/intern ns name nil))
+                (c/reset-fresh!)
+                (remotes (c/compile (:value-form decl) env) acc))
+              :else (do (c/reset-fresh!) (remotes (c/compile form env) acc))))
+            (catch e (println (str "N0-SCAN-FAIL " path " " (let [s (pr-str e)] (subs s 0 (min 300 (count s)))))) acc)))
+          #{} (rd/read-string source path))))
+
+(defn n0-main
+ ([files self-paths] (n0-main files self-paths []))
+ ([files self-paths core-paths]
+ (let [self (into {} (map (fn [[m p]] [m (defined-names (host/read-file p) p)]) self-paths))
+      found (reduce (fn [acc [path ns]] (into acc (scan path ns))) #{} files)
+      globals (filter #(= :global (first %)) found)
+      found (remove #(= :global (first %)) found)
+      ;; an unqualified global resolves to its own unit, core or sugar: their
+      ;; compiled definitions or the image's seed rows (native.resolution/normal)
+      seeds (get-in (host/eval-scheme "native-bundle-metadata") [:resolution :seed-names])
+      own (into {} (map (fn [[p ns]] [ns (defined-names (host/read-file p) p)]) files))
+      kernel (reduce into (set (concat (get seeds "core") (get seeds "sugar")))
+                     (map (fn [p] (defined-names (host/read-file p) p)) core-paths))
+      absent (sort (distinct (keep (fn [[_ ns name]]
+                                    (when-not (or (not (string? ns)) (erlang/is_tuple (binary/match name "/")) (contains? (get own ns #{}) name) (contains? kernel name))
+                                     (str ns "/" name)))
+                                   globals)))
+      leaves (set (host/registered-leaves))
+      missing (sort (keep (fn [[m f a]]
+                           (let [key (str (erlang/atom_to_binary m) "/" (erlang/atom_to_binary f) "/" a)]
+                            (when-not (or (contains? leaves key)
+                                          (erlang/function_exported m f a)
+                                          (contains? (get self (erlang/atom_to_binary m) #{}) (erlang/atom_to_binary f)))
+                             key)))
+                         found))]
+ (println (str "N0-REMOTES " (count found) " unresolved " (count missing)))
+ (doseq [k missing] (println (str "N0-UNRESOLVED " k)))
+ (when (seq core-paths)
+  (println (str "N0-GLOBALS " (count globals) " absent " (count absent)))
+  (doseq [k absent] (println (str "N0-ABSENT " k)))))))

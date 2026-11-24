@@ -1,0 +1,75 @@
+; Card N0: the timed driver for the native front end, compiled into host.aot
+; after front-end/stage.bl (n0/compose.py replaces stage's nf-unit-core and
+; nf-run with these). Same work as N2b's run, with a real clock and one line
+; per unit:
+;   UNIT ok NS descriptors N generated G stage_us S lower_us L write_us W gc_us C
+; stage = read, expand, compile, stage and describe (nf-unit); lower = every
+; descriptor and generated descriptor to Core (lower/module->core); write =
+; term_to_binary + file writes; gc = the forced collection nf-memo-recount!
+; makes between units (the BEAM makes none). After the corpus, each WARM
+; namespace is staged and lowered again REPS times in the same process:
+;   WARM NS I total_us T stage_us S lower_us L
+
+; The clock is host/n0-now-us (host/native-data-bifs.scm): this image's
+; erlang/monotonic_time is the virtual seed clock.
+(defn- n0-now [] (host/n0-now-us))
+
+(defn- n0-lower [descriptors generated]
+ [(mapv lower/module->core descriptors) (mapv lower/module->core generated)])
+
+(defn- nf-unit-core [row out]
+ (let [t0 (n0-now)
+       [descriptors generated] (nf-unit row out)
+       t1 (n0-now)
+       _ (nf-step (:namespace row) "lower")
+       [cores gcores] (n0-lower descriptors generated)
+       t2 (n0-now)
+       dir (str out "/u/" (:namespace row))]
+  (doseq [[i d] (map-indexed vector descriptors)]
+   (nf-write (str dir "/" i ".desc.etf") d)
+   (nf-write (str dir "/" i ".core.etf") (nth cores i)))
+  (doseq [[i d] (map-indexed vector generated)]
+   (nf-write (str dir "/G-" i ".desc.etf") d)
+   (nf-write (str dir "/G-" i ".core.etf") (nth gcores i)))
+  [(count descriptors) (count generated) (- t1 t0) (- t2 t1) (- (n0-now) t2)]))
+
+(defn- n0-warm [row reps out]
+ (doseq [i (range reps)]
+  (host/nf-memo-recount!)
+  (let [t0 (n0-now)
+        [descriptors generated] (nf-unit row out)
+        t1 (n0-now)
+        _ (n0-lower descriptors generated)
+        t2 (n0-now)]
+   (println (str "WARM " (:namespace row) " " i " total_us " (- t2 t0) " stage_us " (- t1 t0) " lower_us " (- t2 t1))))))
+
+(defn nf-run
+ ([custody out] (nf-run custody out nil nil 0))
+ ([custody out only] (nf-run custody out only nil 0))
+ ([custody out only warm reps]
+ (let [t-start (n0-now)
+       doc (erlang/binary_to_term (host/read-bytes custody))
+       rows (if only (filter #(contains? (set only) (:namespace %)) (:units doc)) (:units doc))]
+  (nf-install-world!
+   (let [gen (str out "/generated-md5.etf")]
+    (if (File/exists? gen)
+     (assoc doc :beam-md5s (merge (or (:beam-md5s doc) {}) (erlang/binary_to_term (host/read-bytes gen))))
+     doc)))
+  (erlang/put :nf_doc doc)
+  (doseq [n (keys (or (:all doc) {}))] (BeamLisp.Env/declare_ns n))
+  (erlang/put :nf_kernel (erlang/binary_to_term (host/read-bytes (str out "/kernel.etf"))))
+  (nf-route-aot!)
+  (println (str "N0-SETUP us " (- (n0-now) t-start)))
+  (doseq [row rows]
+   (let [g0 (n0-now) _ (host/nf-memo-recount!) gc (- (n0-now) g0)]
+    (try
+     (let [[n g s l w] (nf-unit-core row out)]
+      (println (str "UNIT ok " (:namespace row) " descriptors " n " generated " g
+                    " stage_us " s " lower_us " l " write_us " w " gc_us " gc)))
+     (catch e
+      (println (str "UNIT fail " (:namespace row) " " (pr-str e)))))))
+  (println (str "UNITS-DONE " (count rows) " us " (- (n0-now) t-start)))
+  (doseq [row (:units doc) :when (contains? (set (or warm (list))) (:namespace row))]
+   (try (n0-warm row reps out)
+    (catch e (println (str "WARM fail " (:namespace row) " " (pr-str e))))))
+  (println (str "N0-DONE us " (- (n0-now) t-start))))))

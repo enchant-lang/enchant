@@ -1,0 +1,102 @@
+; Card N0: the BEAM's front end over the same units, timed per unit.
+;
+;   bl --cold run research/native-seed/front-end/n0/beam.bl -- OUT REPS [WARM-NS ...]
+;
+; OUT is a native run's directory (custody.etf, u/NS/*.etf). For each unit:
+;   prepare_us   open_workspace + AOT/prepare_unit + close_workspace!, exactly
+;                as front-end/compare.bl and priv/build/unit-store.bl prepare
+;   core_us      lower/module->core over the plans' descriptors
+;   gen_beam_us  BeamLisp.Emit/compile_descriptor over the unit's generated
+;                descriptors (the native run's G-*.desc.etf): prepare_unit
+;                compiles those to beams inside itself, which is past Core
+;   gen_core_us  lower/module->core over the same generated descriptors
+;   custody_us   what the native path takes from the BEAM per unit
+;                (front-end/custody.bl): ns_closure_hash, key_for_ns, sha256
+; front-to-Core = prepare - gen_beam + core + gen_core. It also checks the
+; native descriptors =:= the BEAM's and the native Core =:= module->core of
+; the BEAM's descriptor. Then each WARM namespace again REPS times in this VM,
+; and Compiler/eval_string of the same source under a fresh namespace name
+; (the path a changed project file takes today: read, compile, load, run).
+; NF_ONLY="ns ..." limits the run to those units.
+(ns native-front.n0-beam)
+
+(defn- now [] (erlang/monotonic_time :microsecond))
+
+(defn- prepare [namespace file]
+ (let [root (BeamLisp.AOT/physical_sdk_path (BeamLisp.Tiers/priv_root))
+       workspace (BeamLisp.AOT/open_workspace
+                  {:version 2 :phase-imports (list 'core 'sugar) :roots (list root)
+                   :sources (list {:namespace (symbol namespace) :file file})} {})]
+  (try (BeamLisp.AOT/prepare_unit workspace (symbol namespace))
+   (finally (BeamLisp.AOT/close_workspace! workspace)))))
+
+(defn- files [dir prefix suffix]
+ (loop [i 0 out []]
+  (let [p (Path/join dir (str prefix i suffix))]
+   (if (File/exists? p) (recur (inc i) (conj out p)) out))))
+
+(defn- read-term [p] (erlang/binary_to_term (File/read! p)))
+
+(defn- custody-us [row]
+ (let [t0 (now)]
+  (BeamLisp.AOT/with_source_snapshot
+   (fn [] (BeamLisp.AOT/ns_closure_hash (:namespace row) (:file row))
+          (BeamLisp.AOTCache/key_for_ns (:namespace row))
+          (crypto/hash :sha256 (BeamLisp.Loader/read_source (:file row)))))
+  (- (now) t0)))
+
+(defn- front [row]
+ (let [t0 (now)
+       prepared (prepare (:namespace row) (:file row))
+       t1 (now)
+       descriptors (vec (mapcat :descriptors (:plans prepared)))
+       cores (mapv lower/module->core descriptors)
+       t2 (now)]
+  {:prepared-us (- t1 t0) :core-us (- t2 t1) :descriptors descriptors :cores cores}))
+
+(defn- unit [out row]
+ (let [namespace (:namespace row) dir (Path/join (Path/join out "u") namespace)
+       gens (mapv read-term (files dir "G-" ".desc.etf"))
+       {:keys [prepared-us core-us descriptors cores]} (front row)
+       g0 (now) _ (doseq [g gens] (BeamLisp.Emit/compile_descriptor g))
+       g1 (now) _ (doseq [g gens] (lower/module->core g))
+       g2 (now)
+       natives (files dir "" ".desc.etf")
+       same-desc (and (seq natives) (= (count natives) (count descriptors))
+                      (every? (fn [[i p]] (erlang/=:= (read-term p) (nth descriptors i))) (map-indexed (fn [i p] [i p]) natives)))
+       same-core (and same-desc
+                      (every? (fn [i] (erlang/=:= (read-term (Path/join dir (str i ".core.etf"))) (nth cores i)))
+                              (range (count natives))))]
+  (println (str "BEAM ok " namespace " descriptors " (count descriptors) " generated " (count gens)
+                " prepare_us " prepared-us " core_us " core-us " gen_beam_us " (- g1 g0) " gen_core_us " (- g2 g1)
+                " custody_us " (custody-us row) " same_desc " (boolean same-desc) " same_core " (boolean same-core)))))
+
+(defn- eval-copy [row i]
+ ;; the unit's source under a namespace no one else has: a project file
+ (let [source (BeamLisp.Loader/read_source (:file row))
+       name (str "n0.warm." (:namespace row) ".e" i)
+       renamed (String/replace source (str "(ns " (:namespace row)) (str "(ns " name) (list (tuple :global false)))
+       t0 (now)]
+  (BeamLisp.Ns.Compiler/eval_string renamed (BeamLisp.Ns.Compiler/new_env "user") (str "/tmp/" name ".bl"))
+  (- (now) t0)))
+
+(defn run [[out reps & warm]]
+ (let [doc (erlang/binary_to_term (File/read! (Path/join out "custody.etf")))
+       only (when-let [o (System/get_env "NF_ONLY")] (set (String/split o)))
+       doc (if only (update doc :units (fn [us] (filter #(contains? only (:namespace %)) us))) doc)
+       reps (String/to_integer reps)
+       t0 (now)]
+  (doseq [row (:units doc)]
+   (try (unit out row)
+    (catch e (println (str "BEAM fail " (:namespace row) " " (ex-message e))))))
+  (println (str "BEAM-DONE " (count (:units doc)) " ms " (quot (- (now) t0) 1000)))
+  (doseq [row (:units doc) :when (contains? (set warm) (:namespace row))]
+   (doseq [i (range reps)]
+    (let [{:keys [prepared-us core-us]} (front row)]
+     (println (str "WARM " (:namespace row) " " i " total_us " (+ prepared-us core-us) " prepare_us " prepared-us " core_us " core-us)))))
+  (doseq [row (:units doc) :when (contains? (set warm) (:namespace row))]
+   (doseq [i (range reps)]
+    (try (println (str "EVAL " (:namespace row) " " i " us " (eval-copy row i)))
+     (catch e (println (str "EVAL fail " (:namespace row) " " (ex-message e)))))))))
+
+(run (vec (BeamLisp/argv)))

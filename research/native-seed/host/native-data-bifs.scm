@@ -1065,3 +1065,11 @@
     (if (eq? md5 native-missing) (bl-make-tuple (bl-key "error") (bl-key "beam_lib"))
      (bl-make-tuple (bl-key "ok") (bl-make-tuple (bl-nth beam 1) md5))))
    (native-badarg "beam_lib:md5 has no native counterpart for beam bytes"))))
+;; host/n0-now-us/0: Chez's monotonic clock in microseconds, for the N0
+;; front-end timing driver (front-end/n0/driver.bl). The image's own
+;; erlang/monotonic_time is the virtual seed clock unless the POSIX adapter
+;; is linked, which the front-end image does not carry.
+(nf-leaf! "host/n0-now-us/0"
+ (lambda ()
+  (let ((t (current-time 'time-monotonic)))
+   (+ (* 1000000 (time-second t)) (quotient (time-nanosecond t) 1000)))))
