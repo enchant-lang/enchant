@@ -2966,6 +2966,7 @@
           root (physical_sdk_path (BeamLisp.Tiers/priv_root))]
       (when-not (and source root (String/starts_with? source (erlang/iolist_to_binary (list root "/"))))
         (erlang/error :framework_declaration_outside_sdk))
+      (when-not (image_sdk_unit_evidence! ns root)
       ;; Build-driver units are stamped with the build key, exactly as emission
       ;; and the manifest fallback below require. The compiler bucket misses them.
       (let [key (ns_closure_hash ns) tier-key (BeamLisp.AOTCache/key_for_ns ns)
@@ -2991,7 +2992,34 @@
                             (Path/join directory (erlang/iolist_to_binary (list (Atom/to_string shim) ".beam")))
                             (BeamLisp.AOTCache/key_for_ns ns) key))
               (erlang/error :missing_sdk_compiler_inventory))
-            (register_cached_sdk_unit! ns modules directory)))))))
+            (register_cached_sdk_unit! ns modules directory))))))))
+
+(defn- image_sdk_unit_evidence! [ns root]
+  ;; K1b: a sealed image already carries this unit's complete compiler rows
+  ;; (`sdk-code.term`); a load after the SDK lease publishes exactly these rows
+  ;; (preload_sdk_image_closure!). Before the lease, take the same rows instead
+  ;; of recovering them through the per-user AOT cache: every member's artifact
+  ;; is read and its sha256 compared with its inventory row, the Source digest
+  ;; checked (sdk_image_preload_unit), the complete unit verified, and a member
+  ;; already loaded must carry its row's MD5. Only an immutable root takes this
+  ;; path; a unit the image does not hold (nil) keeps the cache route. A unit
+  ;; it holds but cannot verify raises: no fallback blesses other bytes.
+  (let [input (sdk_inventory_input) bytes (elem input 1)]
+    (when (and bytes (immutable_root? root) (erlang/== root (elem input 0)))
+      (when-let [unit (sdk_image_preload_unit ns root bytes)]
+        (let [members (Map/get unit :members)]
+          (verify_complete_sdk_units! (Map/new (Enum/map members
+            (fn [member] (tuple (Map/get member :module) (Map/get member :row))))))
+          (Enum/each members (fn [member]
+            (let [mod (Map/get member :module) row (Map/get member :row)]
+              (when (and (erlang/module_loaded mod)
+                         (erlang/not (erlang/== (Map/get row :md5) (erlang/apply mod :module_info (list :md5))))
+                         (erlang/not (and (erlang/== :mutable-forwarder (Map/get row :role))
+                                          (BeamLisp.Env/sdk_forwarder_current? mod (Map/get row :forwarder-routes)))))
+                (erlang/error :sdk_image_preload_loaded_code_changed)))))
+          (publish_sdk_emission_entries! (Enum/map members (fn [member]
+            (tuple (tuple :bl_sdk_emission (Map/get member :module)) (Map/get member :row)))))
+          true)))))
 
 (defn- seed_forwarder_metadata [mod bytes]
   ;; The seed manifest authenticates the bytes; derive their role from the
@@ -3454,9 +3482,18 @@
 ;; API before any global callable is invoked. Claimed registry rows only select
 ;; physical SDK source discovery; they never grant native executable authority.
 (defn- sdk_inventory_input []
-  (let [root (physical_sdk_path (BeamLisp.Tiers/priv_root))
-        image (Path/join root "sdk-code.term")]
-    (tuple root (when (File/exists? image) (File/read! image)))))
+  ;; K1b: a cold run asks this ~35 times, each a 3.5 MB read of sdk-code.term.
+  ;; Under an immutable /nix/store root the file cannot change in this VM, so
+  ;; its bytes are read once (one shared binary); any other root reads live.
+  (let [priv (BeamLisp.Tiers/priv_root)
+        key (tuple :Elixir.BeamLisp.AOT :sdk_inventory_input priv)
+        hit (persistent_term/get key nil)]
+    (or hit
+      (let [root (physical_sdk_path priv)
+            image (Path/join root "sdk-code.term")
+            input (tuple root (when (File/exists? image) (File/read! image)))]
+        (when (and root (elem input 1) (immutable_root? root)) (persistent_term/put key input))
+        input))))
 
 (defn- sdk_compiler_row
   ([mod] (sdk_compiler_row mod (sdk_inventory_input)))
@@ -5768,10 +5805,22 @@
         (when (erlang/== true ready) (persistent_term/put :bl_sdk_preinit_ready (sdk_preinit_inputs)))
         ready))))
 
+(defn- sdk_preinit_dir_stamp [dir]
+  (erlang/phash2 (Enum/map (Enum/sort (Path/wildcard (Path/join dir "*")))
+    (fn [p] (let [r (prim_file/read_file_info p (list (tuple :time :posix)))]
+              (if (erlang/== :ok (elem r 0)) (tuple p (elem (elem r 1) 1) (elem (elem r 1) 5)) p))))))
+
 (defn- sdk_preinit_inputs []
-  (let [stamp (fn [dir] (erlang/phash2 (Enum/map (Enum/sort (Path/wildcard (Path/join dir "*")))
-                (fn [p] (let [r (prim_file/read_file_info p (list (tuple :time :posix)))]
-                          (if (erlang/== :ok (elem r 0)) (tuple p (elem (elem r 1) 1) (elem (elem r 1) 5)) p))))))
+  ;; K1b: the two stamps are a wildcard plus a stat of every seed and host
+  ;; file (~3 ms), asked at every namespace load. A directory that resolves
+  ;; into /nix/store cannot change in this VM; its stamp is computed once.
+  ;; Others stay live.
+  (let [stamp (fn [dir]
+                (if (let [physical (physical_sdk_path dir)] (and physical (immutable_root? physical)))
+                  (let [key (tuple :Elixir.BeamLisp.AOT :sdk_preinit_dir_stamp dir)
+                        hit (persistent_term/get key nil)]
+                    (or hit (let [v (sdk_preinit_dir_stamp dir)] (persistent_term/put key v) v)))
+                  (sdk_preinit_dir_stamp dir)))
         mods (list :Elixir.BeamLisp.AOT :Elixir.BeamLisp.Loader :Elixir.BeamLisp.Env :Elixir.BeamLisp.Compiler
                    :Elixir.BeamLisp.Emit :Elixir.BeamLisp.Record :Elixir.BeamLisp.AOTCache :Elixir.BeamLisp.CompilerData
                    :Elixir.BeamLisp.Tiers :Elixir.BeamLisp.Bootstrap :Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Compiler
