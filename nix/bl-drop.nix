@@ -20,9 +20,14 @@ let
   inherit (pkgs) lib;
 
   sources = import ./producer-sources.nix { inherit lib; };
+  # A development SDK (scripts/dev-sdk, N4d) is never a predecessor: its
+  # library and compiler records are its base's, not its own.
   previousMetadata = if previousSdk == null then null else
-    builtins.fromJSON (builtins.unsafeDiscardStringContext
+    let metadata = builtins.fromJSON (builtins.unsafeDiscardStringContext
       (builtins.readFile (previousSdk + "/artifact.json")));
+    in if metadata ? dev
+      then throw "development SDK ${toString previousSdk} cannot be a preparation predecessor; use its base ${metadata.dev.base}"
+      else metadata;
   previousPlatform = if previousMetadata == null then null else
     builtins.fromJSON (builtins.unsafeDiscardStringContext
       (builtins.readFile (builtins.storePath previousMetadata.platform + "/platform.json")));
