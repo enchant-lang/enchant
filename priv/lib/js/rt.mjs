@@ -573,6 +573,29 @@ export function keyEq(a, b) {
   if (a instanceof Dec) return b instanceof Dec && a.u === b.u && a.s === b.s;
   return false;
 }
+/** Erlang's EXACT term equality (`=:=`): unlike `keyEq`, numbers compare by
+    representation — 1 and 1.0, 1.5 and 1.50M are different terms, as on the
+    BEAM. rt.bl's key boundary asks "is this key its own canonical key?" with
+    it (rt.bl "stored representatives"). */
+export function exactEq(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || a === undefined || b === undefined) return false;
+  const an = isKeyNum(a), bn = isKeyNum(b);
+  if (an || bn) {
+    if (!(an && bn)) return false;
+    const ai = typeof a === "number" || typeof a === "bigint", bi = typeof b === "number" || typeof b === "bigint";
+    if (ai || bi) return ai && bi && a == b; // eslint-disable-line eqeqeq
+    if (a instanceof Flt) return b instanceof Flt && (Object.is(a.v, b.v) || (a.v !== a.v && b.v !== b.v));
+    return a instanceof Dec && b instanceof Dec && a.u === b.u && a.s === b.s;
+  }
+  if (typeof a !== "object" || typeof b !== "object") return false;
+  if (a instanceof Vec) return b instanceof Vec && seqEqv(a, b, exactEq);
+  if (a instanceof Cons || a === EMPTY) return (b instanceof Cons || b === EMPTY) && seqEqv(a, b, exactEq);
+  if (a instanceof HMap) return b instanceof HMap && mapEqv(a, b, exactEq);
+  if (a instanceof HSet) return b instanceof HSet && a.cnt === b.cnt && [...a].every(e => exactEq(e, b.get(e, NOT_FOUND)));
+  if (a instanceof Tup) return b instanceof Tup && a.items.length === b.items.length && a.items.every((e, i) => exactEq(e, b.items[i]));
+  return false;
+}
 /** Erlang TERM order (`erlang/<`, `=<`, `lists:sort`) on the JS value model:
     number < atom < reference < fun < tuple < map < list < binary. Atoms (nil, booleans,
     keywords) order by name; tuples by size then element-wise; lists
