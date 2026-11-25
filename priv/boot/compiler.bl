@@ -800,6 +800,23 @@
   (a/structt (kernel-mod-vector-literal)
              (list [(a/lit :items) (a/tup (compile-each items env))])))
 
+(defn- self-keyed-literal?
+  "Whether a map-literal key form is a keyword, string, integer, boolean, nil
+   or quoted symbol: a key that is its own canonical key and its own
+   representative."
+  [k]
+  (let [n (rn/node-form k)
+        tag (rn/node-tag n)]
+    (or (erlang/=:= :keyword tag)
+        (and (erlang/=:= :scalar tag)
+             (or (erlang/is_integer n) (erlang/is_binary n) (erlang/is_atom n)))
+        (and (erlang/=:= :list tag)
+             (let [items (rn/node-items n)]
+               (and (= 2 (count items))
+                    (erlang/=:= :symbol (rn/node-tag (rn/node-form (first items))))
+                    (= "quote" (rn/node-name (rn/node-form (first items))))
+                    (erlang/=:= :symbol (rn/node-tag (rn/node-form (second items))))))))))
+
 (defn- compile-map
   "Turn a map literal like {:a 1} into the tree that builds a beam-lisp map.
 
@@ -808,14 +825,24 @@
    it must be invisible to the map too). The result is Elixir's map syntax
    `%{k => v, ...}` with each key and value compiled."
   [pairs env]
-  (let [entries (apply list (map (fn [pair]
-                                (let [kv (erlang/tuple_to_list pair)
-                                      k (compile-node (first kv) env)
-                                      v (compile-node (second kv) env)]
-                                  [(a/remote (kernel-mod-rt-literal) :hash_key (list k))
-                                   v]))
-                              pairs))]
-    (a/mapp entries)))
+  (if (every? (fn [pair] (self-keyed-literal? (first (erlang/tuple_to_list pair)))) pairs)
+    (let [entries (apply list (map (fn [pair]
+                                  (let [kv (erlang/tuple_to_list pair)
+                                        k (compile-node (first kv) env)
+                                        v (compile-node (second kv) env)]
+                                    [(a/remote (kernel-mod-rt-literal) :hash_key (list k))
+                                     v]))
+                                pairs))]
+      (a/mapp entries))
+    ; a key that may not be its own canonical key (a float, a decimal, any
+    ; expression): the runtime's key boundary keeps what was written as the
+    ; stored representative (rt.bl, "stored representatives")
+    (a/remote (kernel-mod-rt-literal) :map_lit
+              (list (anf-list (apply list (mapcat (fn [pair]
+                                                    (let [kv (erlang/tuple_to_list pair)]
+                                                      [(compile-node (first kv) env)
+                                                       (compile-node (second kv) env)]))
+                                                  pairs)))))))
 
 (defn- compile-set
   "Turn a set literal like #{1 2} into the tree that builds a beam-lisp set,
@@ -2464,14 +2491,20 @@
                            (compile-body fin-items (notail env))))]
         (a/tryy body-node catch-clauses after-node)))))
 
-(defn datum
+(defn- datum-in
   "Turn a reader form into the plain DATA value it denotes.
 
    This is what `quote` hands back: the form as data, not as running code. A
    symbol stays a symbol node, a list becomes a list of data, a vector becomes
    a real beam-lisp vector, a keyword becomes its atom, and a plain literal is
-   itself. Source-location wrappers are peeled first."
-  [form]
+   itself. Source-location wrappers are peeled first.
+
+   `code?` says the datum is CODE handed to a macro, not a quoted value: a set
+   literal's members and a map literal's keys are then forms still to be
+   evaluated, so they stay exactly as written. Canonicalising them (Q3) would
+   rewrite the program: `(is #{(f 0.0) (f -0.0)})` would reach the macro as
+   `#{(f 0)}`. The evaluated literal is keyed when it is built."
+  [form code?]
   (case (rn/node-tag form)
       ; a metadata wrapper carries two kinds of key. POSITIONAL keys
       ; (:line/:col/:file) are the compiler's source channel and are dropped
@@ -2485,7 +2518,7 @@
       ; Only a vector or a symbol keeps author metadata, so the position keys
       ; are filtered only for those: a list wrapper, the common case, skips it.
       :meta
-        (let [base (datum (rn/node-form form))
+        (let [base (datum-in (rn/node-form form) code?)
               m (when (or (vector? base) (erlang/=:= :symbol (rn/node-tag base))) (rn/node-pos form))
               author (if (erlang/is_map m) (author-meta m) {})]
           (if (and (erlang/is_map author)
@@ -2499,25 +2532,45 @@
                 (Enum/map (maps/to_list author)
                   (fn [pair] (erlang/list_to_tuple
                                (list (erlang/element 1 pair)
-                                     (datum (erlang/element 2 pair))))))))
+                                     (datum-in (erlang/element 2 pair) code?)))))))
             base))
       :symbol form
       :keyword (erlang/binary_to_atom (rn/node-name form))
-      :list (Enum/map (rn/node-items form) (fn [value] (datum value)))
-      :vector (BeamLisp.Vector/new (Enum/map (rn/node-items form) (fn [value] (datum value))))
-      :set (BeamLisp.Set/new (Enum/map (rn/node-items form) (fn [value] (datum value))))
+      :list (Enum/map (rn/node-items form) (fn [value] (datum-in value code?)))
+      :vector (BeamLisp.Vector/new (Enum/map (rn/node-items form) (fn [value] (datum-in value code?))))
+      :set (let [members (Enum/map (rn/node-items form) (fn [value] (datum-in value code?)))]
+             ; as CODE the members are kept exactly (BeamLisp.Set/new_exact);
+             ; JS and an older host floor have no exact set and key them
+             (if (and code? (erlang/function_exported :Elixir.BeamLisp.Set :new_exact 1))
+               (BeamLisp.Set/new_exact members)
+               (BeamLisp.Set/new members)))
       :map
-        ; build a plain map value from the key/value data; :maps.from_list
-        ; takes a list of {k, v} tuples, which is what each pair becomes. Each
-        ; key is its canonical key (Q3), as an evaluated literal's is:
-        ; `(get '{1.0 :x} 1)` is :x.
-        (maps/from_list
-          (Enum/map (rn/node-items form)
-            (fn [pair]
+        ; build a plain map value from the key/value data. As DATA, each key
+        ; goes through the key boundary (Q3), as an evaluated literal's does:
+        ; `(get '{1.0 :x} 1)` is :x and `(keys '{1.0 :x})` is (1.0). As CODE,
+        ; :maps.from_list keeps the raw keys.
+        (if code?
+          (maps/from_list
+            (Enum/map (rn/node-items form)
+              (fn [pair]
+                (let [kv (erlang/tuple_to_list pair)]
+                  (erlang/list_to_tuple
+                    (list (datum-in (first kv) code?) (datum-in (second kv) code?)))))))
+          (Enum/reduce (rn/node-items form) (maps/new)
+            (fn [pair acc]
               (let [kv (erlang/tuple_to_list pair)]
-                (erlang/list_to_tuple
-                  (list (BeamLisp.Ns.Rt/hash_key (datum (first kv))) (datum (second kv))))))))
+                (BeamLisp.Ns.Rt/key_put acc (datum-in (first kv) code?) (datum-in (second kv) code?))))))
       form))
+
+(defn datum
+  "The quoted DATA a reader form denotes: `(datum-in form false)`."
+  [form]
+  (datum-in form false))
+
+(defn- macro-datum
+  "A macro's argument: the form as CODE, see `datum-in`."
+  [form]
+  (datum-in form true))
 
 (defn- compile-quote
   "Turn (quote form) into the data the form denotes, as a literal value.
@@ -5147,8 +5200,8 @@
   [macro-fn form args env]
   (datum-macro-result
     (BeamLisp.Ns.Rt/invoke macro-fn
-      (erlang/++ (list (datum form) (macro-env env))
-                 (Enum/map args (fn [value] (datum value)))))))
+      (erlang/++ (list (macro-datum form) (macro-env env))
+                 (Enum/map args (fn [value] (macro-datum value)))))))
 
 
 

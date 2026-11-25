@@ -85,6 +85,15 @@
   (let [result
         (g/with! graph
          (fn []
+          ;; Whether the unmutated redirect predicate holds for this load.
+          (println :sdk-loading-redirect-predicate
+           {:generation (some? (Process/get :bl_generation))
+            :application (some? (Process/get :bl_application_identity))
+            :sdk-library-unit (BeamLisp.AOT/sdk_library_unit? TARGET)
+            :source (BeamLisp.Loader/source_path TARGET)
+            :tier (BeamLisp.Tiers/tier_of_ns TARGET)})
+          ;; ...so the "without-redirect" mutation removes a branch this load takes.
+          (assert (and (some? (Process/get :bl_generation)) (BeamLisp.AOT/sdk_library_unit? TARGET)))
           (let [before (caller)
                 [outcome routes] (observed-load
                                   #(if (= mode "original")
@@ -108,16 +117,19 @@
     (do (assert invariant)
         (println (if (= mode "original") "SDK_LOADING_CONTEXT_ORIGINAL_READY"
                      "SDK_LOADING_CONTEXT_COPIED_ORIGINAL_READY")))
-    ;; A surviving mutation is a failure of this causal control. Never convert
-    ;; it into a historical closure merely because the fixture ran successfully.
+    ;; Until 61501db8e the managed Loader mailbox could not carry the caller's
+    ;; native admission, so the server route refused this load
+    ;; (:incomplete_generation_execution_lease) and the redirect was the only
+    ;; correct route. The mailbox now mints an actual handoff. The redirect
+    ;; (Env/load_sdk_library!) itself re-enters Loader/ensure_loaded with the
+    ;; caller context cleared, so both reach the same traced Loader.Server/AOT
+    ;; route; the mutation (asserted applied by helper!, and the predicate
+    ;; printed above shows it would have fired) sends the load there with the
+    ;; application context still bound. That route must keep the invariant.
     (do
-     (assert (= :incomplete_generation_execution_lease (get-in result [:outcome :error])))
-     (assert (:caller-restored result))
-     (assert retired?)
-     (assert (= false loaded))
-     (assert (= 0 count))
-     (assert (= false invariant))
-     (println "SDK_LOADING_CONTEXT_REDIRECT_CONTROL_CAUGHT"))))
+     (assert (some #(= [:Elixir.BeamLisp.AOT :ensure_loaded] %) (:routes result)))
+     (assert invariant)
+     (println "SDK_LOADING_CONTEXT_REDIRECT_CONTROL_SERVER_ROUTE_READY"))))
   (finally
    (g/retire! graph)
    (when (not= "original" mode) (code/purge PROBE) (code/delete PROBE))

@@ -288,6 +288,21 @@ function nodeGet(node, shift, hash, key) {
     return keyEq(k, key) ? node.arr[i + 1] : NOT_FOUND;
   }
 }
+function nodeGetKey(node, shift, hash, key) {
+  for (;;) {
+    if (node instanceof CNode) {
+      const a = node.arr;
+      for (let i = 0; i < a.length; i += 2) if (keyEq(a[i], key)) return a[i];
+      return NOT_FOUND;
+    }
+    const bit = bitpos(hash, shift);
+    if ((node.bitmap & bit) === 0) return NOT_FOUND;
+    const i = 2 * bidx(node.bitmap, bit);
+    const k = node.arr[i];
+    if (k === NODE_MARK) { node = node.arr[i + 1]; shift += 5; continue; }
+    return keyEq(k, key) ? k : NOT_FOUND;
+  }
+}
 // returns [newNode, added?]
 function nodeAssoc(node, shift, hash, key, val) {
   if (node instanceof CNode) {
@@ -376,8 +391,13 @@ export class HMap {
   constructor(cnt, root, meta) { this.cnt = cnt; this.root = root; this.meta = meta || null; this._h = undefined; }
   get(k, dflt) { k = canonKey(k); const v = nodeGet(this.root, 0, hashOf(k), k); return v === NOT_FOUND ? dflt : v; }
   has(k) { k = canonKey(k); return nodeGet(this.root, 0, hashOf(k), k) !== NOT_FOUND; }
+  /** the STORED key equal to `k`, or `dflt` */
+  storedKey(k, dflt) { k = canonKey(k); const s = nodeGetKey(this.root, 0, hashOf(k), k); return s === NOT_FOUND ? dflt : s; }
+  /** The key is stored AS GIVEN (keyEq/hashOf are value-equal, so lookup
+      does not need it canonical); an equal key already present keeps its
+      stored form and only the value changes — Clojure's rule, the BEAM's
+      "stored representatives" (rt.bl). */
   assoc(k, v) {
-    k = canonKey(k);
     const [r, added] = nodeAssoc(this.root, 0, hashOf(k), k, v);
     return r === this.root ? this : new HMap(added ? this.cnt + 1 : this.cnt, r, this.meta);
   }
@@ -441,6 +461,8 @@ export class HSet {
   constructor(m, meta) { this.m = m; this.meta = meta || null; this._h = undefined; }
   get cnt() { return this.m.cnt; }
   has(x) { return this.m.has(x); }
+  /** the STORED member equal to `x`, or `dflt`: `(get #{1.0} 1)` is 1.0 */
+  get(x, dflt) { return this.m.storedKey(x, dflt); }
   conj(x) { const m = this.m.assoc(x, true); return m === this.m ? this : new HSet(m, this.meta); }
   disj(x) { const m = this.m.dissoc(x); return m === this.m ? this : new HSet(m, this.meta); }
   *[Symbol.iterator]() { for (const [k] of this.m) yield k; }
@@ -549,6 +571,29 @@ export function keyEq(a, b) {
   if (a instanceof HSet) return b instanceof HSet && a.cnt === b.cnt && [...a].every(e => b.has(e));
   if (a instanceof Tup) return b instanceof Tup && a.items.length === b.items.length && a.items.every((e, i) => keyEq(e, b.items[i]));
   if (a instanceof Dec) return b instanceof Dec && a.u === b.u && a.s === b.s;
+  return false;
+}
+/** Erlang's EXACT term equality (`=:=`): unlike `keyEq`, numbers compare by
+    representation — 1 and 1.0, 1.5 and 1.50M are different terms, as on the
+    BEAM. rt.bl's key boundary asks "is this key its own canonical key?" with
+    it (rt.bl "stored representatives"). */
+export function exactEq(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || a === undefined || b === undefined) return false;
+  const an = isKeyNum(a), bn = isKeyNum(b);
+  if (an || bn) {
+    if (!(an && bn)) return false;
+    const ai = typeof a === "number" || typeof a === "bigint", bi = typeof b === "number" || typeof b === "bigint";
+    if (ai || bi) return ai && bi && a == b; // eslint-disable-line eqeqeq
+    if (a instanceof Flt) return b instanceof Flt && (Object.is(a.v, b.v) || (a.v !== a.v && b.v !== b.v));
+    return a instanceof Dec && b instanceof Dec && a.u === b.u && a.s === b.s;
+  }
+  if (typeof a !== "object" || typeof b !== "object") return false;
+  if (a instanceof Vec) return b instanceof Vec && seqEqv(a, b, exactEq);
+  if (a instanceof Cons || a === EMPTY) return (b instanceof Cons || b === EMPTY) && seqEqv(a, b, exactEq);
+  if (a instanceof HMap) return b instanceof HMap && mapEqv(a, b, exactEq);
+  if (a instanceof HSet) return b instanceof HSet && a.cnt === b.cnt && [...a].every(e => exactEq(e, b.get(e, NOT_FOUND)));
+  if (a instanceof Tup) return b instanceof Tup && a.items.length === b.items.length && a.items.every((e, i) => exactEq(e, b.items[i]));
   return false;
 }
 /** Erlang TERM order (`erlang/<`, `=<`, `lists:sort`) on the JS value model:
@@ -1010,6 +1055,7 @@ function escStr(s) {
   return '"' + s.replace(/[\\"\n\t\r]/g, c => c === "\n" ? "\\n" : c === "\t" ? "\\t" : c === "\r" ? "\\r" : "\\" + c) + '"';
 }
 /** `pr-str` — the readable printer. */
+const KEY_REPS = kw("$bl/key-reps");
 export function printStr(x) {
   if (x === null || x === undefined) return "nil";
   // a lazy or partly-lazy seq prints BOUNDED, as rt.bl's print-seq: at most 20
@@ -1032,7 +1078,13 @@ export function printStr(x) {
   if (x instanceof Vec) return "[" + x.toArray().map(printStr).join(" ") + "]";
   if (x === EMPTY) return "()";
   if (x instanceof Cons) { const a = []; for (let p = x; p instanceof Cons; p = p.t) a.push(printStr(p.h)); return "(" + a.join(" ") + ")"; }
-  if (x instanceof HMap) return "{" + x.entries().map(([k, v]) => printStr(k) + " " + printStr(v)).join(", ") + "}";
+  if (x instanceof HMap) {
+    // rt.bl's stored representatives: the hidden table is not an entry, and
+    // a key prints as it was written
+    const reps = x.get(KEY_REPS, null);
+    const es = reps instanceof HMap ? x.entries().filter(([k]) => !(k instanceof Kw && k.fq === "$bl/key-reps")).map(([k, v]) => [reps.get(k, k), v]) : x.entries();
+    return "{" + es.map(([k, v]) => printStr(k) + " " + printStr(v)).join(", ") + "}";
+  }
   if (x instanceof HSet) return "#{" + x.elements().sort(compare).map(printStr).join(" ") + "}";
   if (x instanceof Tup) return "{" + x.items.map(printStr).join(", ") + "}";
   if (x instanceof BLError) return "#error {:message " + escStr(x.message) + "}";

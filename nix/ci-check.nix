@@ -2,19 +2,7 @@
 # Existing SDK selection is optional. The default uses the ordinary SDK recipe.
 { source, request, sdk ? null, previous ? null, compatSdk ? null, models ? null, memoryMiB ? 6144, cpuCount ? 2 }:
 let
-  root = /. + source;
-  roots = builtins.filter (name: builtins.pathExists (root + "/${name}")) [
-    ".gitignore" ".github" "AGENTS.md" "README.md" "README.bl.org" "examples" "bin" "nix" "scripts"
-    "test" "priv" "native" "tooling/drop" "tooling/build-backends" "packages/job-runner"
-    "docs" "research" "env.bl" "bl.lock" "flake.nix" "flake.lock"
-    "rust-toolchain" "rust-toolchain.toml"
-  ];
-  input = import ./project-source.nix {
-    inherit source;
-    rootsJson = builtins.toJSON roots;
-    excludedJson = builtins.toJSON [ "priv/native" "priv/z3" "priv/codegen.sources"
-      "priv/precompiled.term" "priv/sdk-code.term" ];
-  };
+  input = import ./ci-check-source.nix { inherit source; };
   lock = builtins.fromJSON (builtins.readFile (input + "/flake.lock"));
   pkgs = import (builtins.fetchTree lock.nodes.nixpkgs.locked).outPath { system = "x86_64-linux"; };
   requestData = builtins.fromJSON (builtins.readFile (/. + request));

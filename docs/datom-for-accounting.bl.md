@@ -46,7 +46,9 @@ range scan over an amount would bracket the wrong window:
 (println "cash  =" (dec/plain-str (balance-of "cash")))
 (println "bank  =" (dec/plain-str (balance-of "bank")))
 
-;; every stored balance, read back and sorted by true value — the AVET order
+;; every stored balance, read back and sorted by true value — the AVET order.
+;; A relation result is a set of tuples, and a set keeps each member as it
+;; was stored: `100.50M` comes back as `100.50M`, its scale intact.
 (def all-balances
   (->> (datom.query.engine/q
          '[:find ?bal :where [?e :account/balance ?bal]]
