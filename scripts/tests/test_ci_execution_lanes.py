@@ -102,6 +102,26 @@ class ExecutionLaneTests(unittest.TestCase):
         self.assertIn('--expand-environment=no', command[:delimiter])
         self.assertFalse(any('UNRELATED_SECRET' in value for value in command))
 
+    def test_check_source_leaves_out_recorded_research_evidence(self):
+        source = load('ci-source.py')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'project'
+            for name in ['env.bl', 'research/formal-logic/evidence/big.json',
+                         'research/formal-logic/browser-driver.mjs', 'research/service-world/x.bl']:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(name)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            subprocess.run(['git', 'add', '.'], cwd=root, check=True)
+            snapshot = Path(temporary) / 'snapshot'
+            source.capture(root, snapshot)
+            self.assertFalse((snapshot / 'research/formal-logic/evidence').exists())
+            self.assertTrue((snapshot / 'research/formal-logic/browser-driver.mjs').is_file())
+            self.assertTrue((snapshot / 'research/service-world/x.bl').is_file())
+        ci_check = (ROOT / 'nix/ci-check-source.nix').read_text()
+        for prefix in source.EXCLUDED:
+            self.assertIn('"' + prefix.rstrip('/') + '"', ci_check)
+
     def test_both_execution_lanes_keep_real_example_and_literate_fixture_inputs(self):
         source = load('ci-source.py')
         with tempfile.TemporaryDirectory() as temporary:
