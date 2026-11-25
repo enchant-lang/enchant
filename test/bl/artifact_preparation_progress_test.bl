@@ -1,13 +1,20 @@
-(ns artifact-preparation-progress-test (:require [artifact.preparation-progress :as progress]))
+(ns artifact-preparation-progress-test)
+;; The namespace ships beside the Foundry coordinator (`nix/coordinator-runtime.nix`
+;; copies it to foundry/bin/artifact/), not on a project load path, so the test
+;; loads the actual source file, as preparation_failure_cause_test does.
+(BeamLisp/run_file
+ (Path/join (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd))
+            "nix/artifact/preparation-progress.bl"))
+(ns artifact-preparation-progress-test)
 (def status {"id" "job_0123456789abcdef" "kind" "artifact-prepare" "status" "running"
              "workerAlive" true "needsRecovery" false "cancelRequested" false})
 (deftest progress-is-bounded-coalesced-and-never-carries-private-job-data
  (let [seen (atom []) writer #(swap! seen conj %)
        noisy (assoc status "error" "private-error" "argv" ["private-argv"] "nonce" "private-nonce")
-       initial (progress/observe! nil noisy -100000 writer)
-       same (progress/observe! initial status -70001 writer)
-       heartbeat (progress/observe! same status -70000 writer)
-       done (progress/observe! heartbeat (assoc status "status" "succeeded") -69999 writer)]
+       initial (artifact.preparation-progress/observe! nil noisy -100000 writer)
+       same (artifact.preparation-progress/observe! initial status -70001 writer)
+       heartbeat (artifact.preparation-progress/observe! same status -70000 writer)
+       done (artifact.preparation-progress/observe! heartbeat (assoc status "status" "succeeded") -69999 writer)]
   (is (= initial same))
   (is (= 3 (count @seen)))
   (is (= [false true false] (mapv #(get % "heartbeat") @seen)))
@@ -17,9 +24,9 @@
   (is (= "artifact-preparation" (get (first @seen) "event")))))
 (deftest observer-failure-cannot-replace-job-state-or-fabricate-authority
  (let [broken (fn [_] (throw :observer-broken))
-       saved (progress/observe! nil status 100 broken)]
+       saved (artifact.preparation-progress/observe! nil status 100 broken)]
   (is (= "running" (get-in saved [:frame "status"])))
-  (is (= saved (progress/observe! saved (assoc status "id" "private-invalid-id") 200 broken)))
-  (is (try (progress/frame! (assoc status "status" "made-up")) false (catch _ true)))
+  (is (= saved (artifact.preparation-progress/observe! saved (assoc status "id" "private-invalid-id") 200 broken)))
+  (is (try (artifact.preparation-progress/frame! (assoc status "status" "made-up")) false (catch _ true)))
   (is (= #{"id" "kind" "status" "workerAlive" "needsRecovery" "cancelRequested" "version" "event"}
          (set (keys (:frame saved)))))))

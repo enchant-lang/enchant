@@ -23,6 +23,8 @@
        unclaimed (str ordinary ".unclaimed") unclaimed-module (BeamLisp.Emit/module_for unclaimed)
        environment (BeamLisp.Env/fork)
        input (source-function aot "(defn- sdk_inventory_input []")
+       _ (assert (and (String/contains? input "(File/read! image)")
+                      (String/contains? input "(tuple :Elixir.BeamLisp.AOT :sdk_inventory_input priv)")))
        classification (source-function aot "(defn sdk_namespace_classification")
        route (source-function loader "(defn- source_less_namespace_route")
        source (str
@@ -33,7 +35,14 @@
         "(= :partial m) (erlang/term_to_binary (Map/put (erlang/binary_to_term b (list :safe)) :modules {}) (list :deterministic)) "
         "(= :changing m) (let [n (Process/get :source_less_control_reads 0)] "
         "(Process/put :source_less_control_reads (+ n 1)) (when (= n 0) b)) :else b)))\n"
-        (String/replace input "(File/read! image)" "(probe_read_input image)")
+        ;; K1b (37ab08fe8) memoizes the inventory under an immutable root, keyed
+        ;; on BeamLisp.AOT. The probe's modes model a changing image, so the copy
+        ;; keys its own memo and treats every root as mutable: each call reads.
+        "(defn immutable_root? [_] false)\n"
+        (-> input
+            (String/replace "(File/read! image)" "(probe_read_input image)")
+            (String/replace "(tuple :Elixir.BeamLisp.AOT :sdk_inventory_input priv)"
+                            "(tuple :Elixir.BeamLisp.SourceLessNamespaceControl :sdk_inventory_input priv)"))
         classification
         (String/replace route "(BeamLisp.AOT/sdk_namespace_classification ns)" "(sdk_namespace_classification ns)")
         "(defn route [n] (source_less_namespace_route n))\n")
