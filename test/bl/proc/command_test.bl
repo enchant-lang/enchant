@@ -2,9 +2,29 @@
  (:require [proc.command :as command] [proc.admission :as admission]
            [reload.generation :as generation]))
 
+(defn- platform-executor
+ "The executor package a checkout platform records in its platform.json."
+ [platform]
+ (let [record (when platform (Path/join platform "platform.json"))]
+  (when (and record (File/regular? record))
+   (get (Jason/decode! (File/read! record)) "executor"))))
+
+(defn- executor-package
+ "The exact executor package: a station's explicit one, else the one the selected
+  SDK's own platform pins (the platform, directly or through the SDK's artifact)."
+ []
+ (or (System/get_env "STATION_COMMAND_EXECUTOR_PACKAGE")
+     (platform-executor (System/get_env "BL_ARTIFACT_PLATFORM"))
+     (let [sdk (System/get_env "BL_SDK_PRODUCT")
+           artifact (when sdk (Path/join sdk "artifact.json"))]
+      (when (and artifact (File/regular? artifact))
+       (platform-executor (get (Jason/decode! (File/read! artifact)) "platform"))))
+     (throw (ex-info "no command executor package: set STATION_COMMAND_EXECUTOR_PACKAGE or run under an SDK platform"
+                     {:kind :command-executor-unavailable}))))
+
 (defn- fixture [action]
  (let [root (str (System/get_env "HOME") "/tmp/command-facade-" (System/system_time :nanosecond))
-       platform (str root "/platform") package (System/fetch_env! "STATION_COMMAND_EXECUTOR_PACKAGE")
+       platform (str root "/platform") package (executor-package)
        before (System/get_env "BL_ARTIFACT_PLATFORM")]
   (File/mkdir_p! (str platform "/bin"))
   (File/ln_s! (str package "/bin/bl-command-executor") (str platform "/bin/bl-command-executor"))

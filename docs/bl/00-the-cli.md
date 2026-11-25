@@ -956,12 +956,22 @@ Every variable `bl` reads, once. A preference belongs in `env.bl`, `~/.config/bl
 | `BL_DEMO_EXPORT` | override | `1`: export rendered scenario demo captures |
 | `BL_STARTUP_PROFILE` | override | `1`: report detailed project-loading measurements |
 | `BL_CHECKOUT_COLD` / `BL_CHECKOUT_ROOT` / `BL_CHECKOUT_GENERATION` / `BL_CHECKOUT_SOURCE_GENERATION` | protocol | checkout transport root, runtime generation and project-source generation supplied by the launcher |
+| `BL_CHECKOUT_PLATFORM_SELECTED` | protocol | set by a checkout client that selected the platform for the client it execs, so that one may record itself in `.bl/checkout-platform`; never reaches the VM |
+| `BL_CHECKOUT_DEV_OVERLAY` | override | `0`: engine edits are not overlaid on the selected SDK; every engine file keys the VM again |
+| `BL_SDK_REUSE_CURRENT` | override | `1`: a checkout runs on the current published SDK instead of preparing one for engine edits (`bin/bl realm stop` sets it) |
+| `BL_CHECKOUT_DIGEST_CACHE` | override | `0`: ignore the recorded checkout stat listing and digest the tree again |
+| `BL_CHECKOUT_GENERATION_SERVICE` | override | `0`: the checkout client computes generation tokens itself instead of asking the tree's resident service |
+| `BL_CHECKOUT_GENERATION_DEBUG` / `BL_CHECKOUT_PHASE_TIMES` | diagnostic | report why the generation service did not answer; `1`: one stderr line per checkout-client phase with its time |
 | `BEAM_LISP_CODE_PATH` | override | colon-separated directories of prebuilt AOT beams to add to the VM code path |
 | `BEAM_LISP_AOT_CACHE` / `BEAM_LISP_AOT_CACHE_DIR` | override | turn the AOT cache off; move it |
 | `BEAM_LISP_AOT_REPAIR` / `BEAM_LISP_AOT_STRICT` | override | whether a stale library beam is repaired in place; whether staleness is an error |
 | `BEAM_LISP_DEV` / `BEAM_LISP_RELOAD` / `BEAM_LISP_IMAGE` | declaration | what a tree says about itself to the reloader and the image builder |
 | `BEAM_LISP_MODEL_DIR` | override | where the embedding model's weights live |
 | `BEAM_LISP_Z3` / `BEAM_LISP_Z3_FORCE` | workaround | z3 provisioning (to be fixed, then deleted) |
+| `BL_CHECK_PROGRESS` | diagnostic | `1`: `bl check` names each source on stderr as it analyzes it |
+| `BL_REALM_UNIT_RESTORE` | override | `0`, `off` or `false`: a realm compiles every top-level unit from source instead of restoring its keyed compiled form |
+| `BL_REALM_UNIT_TIMES` | diagnostic | one stderr line per realm unit restore or compile, with its wall time |
+| `BL_CUSTODY_SCAN_CHECK` | diagnostic | after each exact-key custody cleanup, also run the full-table scan and fail on any row it still finds |
 | `BL_PROFILE_SEAMS` / `BL_PROFILE_TRACE` | diagnostic | record runtime seam timings and native trace profiles |
 | `BEAM_LISP_NIF_TRACE` | test | trace native calls |
 | `BL_USE` | override | the build to run here, overriding every other rule (`stable`, `latest`, `commit:SHA`, …) |
@@ -979,12 +989,14 @@ Every variable `bl` reads, once. A preference belongs in `env.bl`, `~/.config/bl
 | `BL_ORACLE_SESSIONS` | override | where the oracle looks for sessions |
 | `BL_SEED_EBIN` / `BL_SEED_EBIN_FALLBACK` | override | the beam directory `bl seed` reads (`--ebin` is the flag) |
 | `BL_BIN` / `BL_ROOT` / `BL_BUILD_ID` / `BL_BOOT_REEXECED` / `BL_EBIN` | protocol | the launcher's handoff to the VM: which launcher, which tree, which build. Do not set these |
-| `BL_SDK_PRODUCT` / `BL_ARTIFACT_PLATFORM` / `BL_CHECKOUT_PLATFORM` / `BL_CHECKOUT_SDK_INPUTS` | protocol | immutable SDK selection, its platform and captured checkout inputs, supplied by the Nix launcher |
+| `BL_SDK_PRODUCT` / `BL_SDK_INPUTS` / `BL_ARTIFACT_PLATFORM` / `BL_CHECKOUT_PLATFORM` / `BL_CHECKOUT_SDK_INPUTS` | protocol | immutable SDK selection, its inputs, its platform and captured checkout inputs, supplied by the Nix launcher; a warm VM keeps its own values |
+| `BL_SDK_SHARDS` / `BL_SDK_SHARD` / `BL_SDK_SHARD_VERIFY` | protocol | the library producer's shard count, one shard child's `i/k` share, and `1`: shard even when the previous store is current (qualifies sharding) |
 | `BL_PREPARATION_COORDINATOR` / `BL_PREPARED_NATIVES` / `BL_PREVIOUS_UNIT_STORE` | protocol | retained preparation coordinator, native products and prior qualified AOT units used by the producer |
 | `BL_COMPILER_EMITTER_CONTEXT` | protocol | Nix-owned identity of the exact OTP, Elixir, dependencies and native products used for compiler-unit reuse |
 | `BL_INTERNAL_PRODUCER` / `BL_ARTIFACT_TOOL_PATH` | protocol | trusted Nix worker entry and its declared executable search path |
 | `BL_NATIVE_PROVIDER` | protocol | native production provider; the accepted value is `nix` |
 | `BEAM_LISP_CUSTODY_COMMAND_V1` | protocol | serialized native custody request passed to an isolated command process |
+| `BEAM_LISP_CUSTODY_INPUT_V1` / `BEAM_LISP_CUSTODY_STREAM_V1` | protocol | markers a command executor prints for `--custody-input-protocol` / `--custody-stream-protocol`; `proc.command` refuses an executor that lacks them |
 | `BL_RUNTIME_PROGRAM` | protocol | emitted runtime artifact selected by its release launcher |
 | `BL_SEED_DIR` | test | seed setting cleared from isolated release children |
 | `BL_TEST_TIMEOUT` / `BL_TEST_TIMES` / `BL_TEST_UID` / `BL_SELFBUILD_GATE` | test | test-runner seams |
