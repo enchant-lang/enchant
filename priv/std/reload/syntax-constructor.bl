@@ -45,6 +45,16 @@
   (when (= :__struct__ (:val value)) (refuse! :opaque-struct))
   (:val value)))
 
+;; map_lit's argument as the compiler emits it (compile-map): a cons chain of
+;; key, value, key, value. Its keys get the same literal-key proof as a :map
+;; node's; anything else is not a map literal this interpreter can prove.
+(defn- map-lit-keys [node]
+ (loop [n node out []]
+  (case (:op n)
+   :enil (if (even? (count out)) (take-nth 2 out) (refuse! :map-literal-shape))
+   :cons (recur (:tail n) (conj out (:head n)))
+   (refuse! :map-literal-shape))))
+
 (defn shape!
  "Prove eager, finite, first-order construction from actual ANF and parameter
   shapes. No globals, user calls, callbacks, recursion, lazy values or arbitrary
@@ -97,8 +107,10 @@
                 (= target [:Elixir.BeamLisp.Ns.Rt :splice 2])
                  (if (and (contains? #{:nil :list :vector :sequence} (first shapes))
                           (= :list (second shapes))) :list (refuse! :opaque-splice))
+                (= target [:Elixir.BeamLisp.Ns.Rt :map_lit 1])
+                 (do (doseq [k (map-lit-keys (first (:args node)))] (literal-key k)) :data)
                 (contains? #{[:Elixir.BeamLisp.Ns.Rt :get 2] [:Elixir.BeamLisp.Ns.Rt :get 3]
-                             [:Elixir.BeamLisp.Ns.Rt :hash_key 1] [:Elixir.BeamLisp.Ns.Rt :map_lit 1]} target) :data
+                             [:Elixir.BeamLisp.Ns.Rt :hash_key 1]} target) :data
                 :else (refuse! {:remote target})))
              (refuse! {:operation (:op node)})))]
    (let [shape (walk expression bindings 0)]
