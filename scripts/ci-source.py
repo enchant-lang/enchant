@@ -7,6 +7,10 @@ import subprocess
 ROOTS = {'.gitignore', '.github', 'AGENTS.md', 'README.md', 'README.bl.org', 'bin', 'nix',
          'scripts', 'test', 'priv', 'native', 'tooling', 'vendor', 'packages', 'docs', 'research',
          'examples', 'env.bl', 'bl.lock', 'flake.nix', 'flake.lock', 'rust-toolchain', 'rust-toolchain.toml'}
+# Recorded research evidence: 2.2 GB in 22k files (2026-11-25), read by no
+# bounded check. Capturing it copied it into the store for every check run.
+# Keep in step with the excluded list in nix/ci-check.nix.
+EXCLUDED = ('research/formal-logic/evidence/',)
 
 
 def capture(project, snapshot):
@@ -16,7 +20,7 @@ def capture(project, snapshot):
     copied = {}
     for raw in sorted(set(names.split(b'\0')) - {b''}):
         name = raw.decode()
-        if Path(name).parts[0] not in ROOTS:
+        if Path(name).parts[0] not in ROOTS or name.startswith(EXCLUDED):
             continue
         source = project / name
         if not source.is_file():

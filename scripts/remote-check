@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""Run CI's bounded test checks on a bigger host, in parallel, and rerun only what failed.
+
+    scripts/remote-check --out DIR                     # the whole bounded suite
+    scripts/remote-check --out DIR --failed PREV_DIR   # only PREV_DIR's failures
+    scripts/remote-check --out DIR test/bl/a_test.bl test/bl/b_test.bl
+
+Each group is CI's own check (`nix/ci-check.nix`, the bounded VM, the same
+per-file receipts), built on the remote host's Nix daemon. Nothing about a test
+changes; only where it runs and how many run at once.
+
+- Source: captured exactly as CI captures it (`scripts/ci-source.py`), then
+  rsynced into one mirror on the host, so a rerun sends only changed files.
+- SDK: built on the host from the mirrored source (nix/remote-sdk.nix, the
+  production ci-check.nix runs without an SDK), with the host's previous SDK
+  as `previous`, so unchanged units are restored. Shipping a 6.5 GB SDK
+  closure over a relayed link took 45 minutes (2026-11-25). --sdk instead names
+  an SDK to use; it is copied only if the host lacks it.
+- Groups: the suite is split into --jobs shards with CI's own partitioner; a
+  file list is split by recorded durations. Each group is one bounded VM of
+  --memory MiB and --cpus CPUs. --jobs is lowered when the host lacks memory.
+- Reruns are cheap: a group whose source, request and SDK are unchanged is the
+  same derivation, so Nix answers it from its store without running anything.
+
+Writes DIR/summary.json, DIR/failed.txt (one test file per line) and each
+group's receipts under DIR/group-N/. Exits 0 only when every file passed.
+"""
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+REMOTE_BASE = '/var/tmp/bl-remote-check'
+SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ControlMaster=auto',
+               '-o', 'ControlPath=~/.ssh/bl-remote-check-%r@%h', '-o', 'ControlPersist=120']
+
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name.replace('-', '_'), ROOT / 'scripts' / f'{name}.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def ssh(host, script, **options):
+    return subprocess.run(['ssh', *SSH_OPTIONS, host, 'bash', '-c', shlex.quote(script)],
+                          check=True, text=True, **options)
+
+
+def log(message):
+    print(f'remote-check: {message}', file=sys.stderr, flush=True)
+
+
+def selected_sdk(tree, explicit):
+    path = Path(explicit) if explicit else tree / '.bl/sdks/current-sdk'
+    sdk = path.resolve(strict=True)
+    if not str(sdk).startswith('/nix/store/'):
+        raise SystemExit('remote-check: the SDK must be an immutable store path: ' + str(sdk))
+    metadata = json.loads((sdk / 'artifact.json').read_text())
+    if 'dev' in metadata:
+        raise SystemExit('remote-check: a development SDK (scripts/dev-sdk) is not a check SDK; '
+                         'use its base ' + metadata['dev'].get('base', ''))
+    return sdk, Path(metadata['platform'])
+
+
+def groups_for(files, jobs, durations):
+    """Largest-first onto the least-loaded group, like ci-test-shard.py."""
+    jobs = max(1, min(jobs, len(files)))
+    groups, loads = [[] for _ in range(jobs)], [0] * jobs
+    for name in sorted(files, key=lambda n: (-durations.get(n, 1000), n)):
+        index = min(range(jobs), key=lambda i: (loads[i], i))
+        groups[index].append(name)
+        loads[index] += max(1, durations.get(name, 1000))
+    return [g for g in groups if g]
+
+
+def file_rows(receipts):
+    rows = []
+    path = receipts / 'files.jsonl'
+    if path.is_file():
+        for line in path.read_text().splitlines():
+            row = json.loads(line)
+            if row.get('file') and row.get('status'):
+                rows.append(row)
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--out', type=Path, required=True, help='new local directory for receipts')
+    parser.add_argument('--host', default=os.environ.get('BL_REMOTE_CHECK_HOST', 'root@interface'))
+    parser.add_argument('--sdk', help='use this SDK selection (default: build one on the host from the source)')
+    parser.add_argument('--models', help='pinned model root in the store, for model-backed tests')
+    parser.add_argument('--jobs', type=int, default=6, help='groups run at once (default 6)')
+    parser.add_argument('--cpus', type=int, default=2, help='CPUs per group VM (default 2, as CI)')
+    parser.add_argument('--memory', type=int, default=6144, help='MiB per group VM (default 6144, as CI)')
+    parser.add_argument('--reserve', type=int, default=12288,
+                        help='MiB the host keeps for its own use (default 12288)')
+    parser.add_argument('--failed', type=Path, help="rerun only this earlier run's failed.txt")
+    parser.add_argument('files', nargs='*')
+    args = parser.parse_args()
+    if args.out.exists():
+        parser.error('--out must not exist; keep earlier receipts')
+    if args.failed and args.files:
+        parser.error('use either --failed or explicit files')
+
+    tree = ROOT
+    sdk, platform = selected_sdk(tree, args.sdk) if args.sdk else (None, None)
+    files = list(args.files)
+    if args.failed:
+        files = [l for l in (args.failed / 'failed.txt').read_text().split() if l]
+        if not files:
+            log('nothing failed in ' + str(args.failed))
+            return 0
+    for name in files:
+        if not (tree / name).is_file() or not name.endswith(('_test.bl', '_test.exs')):
+            parser.error('not a test file in this tree: ' + name)
+
+    # Size the run to the host, never to the default alone.
+    available = int(ssh(args.host, "awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo",
+                        stdout=subprocess.PIPE).stdout.strip())
+    fit = max(1, (available - args.reserve) // args.memory)
+    jobs = min(args.jobs, fit)
+    if jobs < args.jobs:
+        log(f'host has {available} MiB available; running {jobs} groups, not {args.jobs}')
+
+    durations_file = tree / 'scripts/test-durations.json'
+    durations = json.loads(durations_file.read_text()) if durations_file.exists() else {}
+    if files:
+        requests = [{'kind': 'files', 'files': g} for g in groups_for(files, jobs, durations)]
+    else:
+        requests = [{'kind': 'shard', 'index': i, 'count': jobs} for i in range(jobs)]
+
+    started = time.monotonic()
+    # 1. Source, exactly as CI captures it, mirrored onto the host.
+    with tempfile.TemporaryDirectory(prefix='bl-remote-check-') as temporary:
+        snapshot = Path(temporary) / 'source'
+        load('ci-source').capture(tree, snapshot)
+        mirror = f'{REMOTE_BASE}/source'
+        ssh(args.host, f'mkdir -p {mirror} {REMOTE_BASE}/runs {REMOTE_BASE}/roots')
+        subprocess.run(['rsync', '-a', '--delete', '--checksum', '-e', 'ssh ' + ' '.join(SSH_OPTIONS),
+                        f'{snapshot}/', f'{args.host}:{mirror}/'], check=True)
+    log(f'source mirrored ({time.monotonic() - started:.1f} s)')
+
+    # 2. The SDK on the host: built there from the mirrored source unless --sdk.
+    if sdk is None:
+        last = f'{REMOTE_BASE}/roots/sdk-last'
+        build = (f'cd {mirror}; previous=$(readlink -e {last} || true); '
+                 f'nix-build {mirror}/nix/remote-sdk.nix --argstr source {mirror} '
+                 f'${{previous:+--argstr previous $previous}} --out-link {REMOTE_BASE}/roots/sdk-next '
+                 f"--option experimental-features 'nix-command flakes' --option timeout 5700 "
+                 f'> {REMOTE_BASE}/sdk-build.log 2>&1 || {{ tail -25 {REMOTE_BASE}/sdk-build.log >&2; exit 1; }}; '
+                 f'mv -T {REMOTE_BASE}/roots/sdk-next {last}; readlink -e {last}')
+        sdk = ssh(args.host, f'exec 9>{REMOTE_BASE}/lock; flock 9; {build}',
+                  stdout=subprocess.PIPE).stdout.strip().splitlines()[-1]
+        log(f'SDK built on host: {sdk} ({time.monotonic() - started:.1f} s)')
+    else:
+        missing = [p for p in (str(sdk), str(platform))
+                   if subprocess.run(['ssh', *SSH_OPTIONS, args.host, 'test', '-e', p]).returncode != 0]
+        if missing:
+            log('copying the SDK to the host; over a relayed link this takes long')
+            subprocess.run(['nix', 'copy', '--no-check-sigs', '--to', f'ssh-ng://{args.host}', *missing],
+                           check=True, env=dict(os.environ, NIX_SSHOPTS=' '.join(SSH_OPTIONS)))
+        ssh(args.host, f'nix-store --add-root {REMOTE_BASE}/roots/{Path(sdk).name} --indirect --realise {sdk} >/dev/null')
+    models = None
+    if args.models:
+        models = str(Path(args.models).resolve(strict=True))
+        subprocess.run(['nix', 'copy', '--no-check-sigs', '--to', f'ssh-ng://{args.host}', models], check=True,
+                       env=dict(os.environ, NIX_SSHOPTS=' '.join(SSH_OPTIONS)))
+
+    # 3. One bounded CI check per group, all at once, under one lock per host.
+    run = f'{REMOTE_BASE}/runs/{time.strftime("%Y%m%d-%H%M%S")}-{os.getpid()}'
+    extra = f'--argstr models {shlex.quote(models)}' if models else ''
+    lines = [f'set -u; mkdir -p {run}; cd {mirror}']
+    for index, request in enumerate(requests):
+        lines.append(f"printf %s {shlex.quote(json.dumps(request))} > {run}/request-{index}.json")
+    for index in range(len(requests)):
+        lines.append(
+            f'( nix-build {mirror}/nix/ci-check.nix --argstr source {mirror} --argstr request {run}/request-{index}.json'
+            f' --argstr sdk {sdk} {extra} --arg memoryMiB {args.memory} --arg cpuCount {args.cpus}'
+            f' --out-link {run}/group-{index} --max-jobs 1 --option timeout 5700'
+            f" --option experimental-features 'nix-command flakes' > {run}/build-{index}.log 2>&1;"
+            f' echo $? > {run}/exit-{index} ) &')
+    lines.append('wait')
+    script = '\n'.join(lines)
+    log(f'{len(requests)} groups on {args.host} ({args.memory} MiB, {args.cpus} CPUs each)')
+    ssh(args.host, f'exec 9>{REMOTE_BASE}/lock; flock 9; {script}')
+    log(f'groups finished ({time.monotonic() - started:.1f} s)')
+
+    # 4. Receipts back, summary out.
+    args.out.mkdir(parents=True)
+    subprocess.run(['rsync', '-aL', '-e', 'ssh ' + ' '.join(SSH_OPTIONS),
+                    f'{args.host}:{run}/', f'{args.out}/'], check=True)
+    rows, groups, problems = [], [], []
+    for index, request in enumerate(requests):
+        receipts = args.out / f'group-{index}'
+        exit_file = args.out / f'exit-{index}'
+        code = int(exit_file.read_text()) if exit_file.is_file() else None
+        result = json.loads((receipts / 'result.json').read_text()) if (receipts / 'result.json').is_file() else {}
+        group_rows = file_rows(receipts)
+        rows += group_rows
+        groups.append({'index': index, 'request': request, 'build_exit': code,
+                       'status': result.get('status'), 'seconds': result.get('seconds'),
+                       'files': len(group_rows)})
+        if code != 0 or not result:
+            problems.append(f'group {index}: build exit {code}; see {args.out}/build-{index}.log')
+    failed = sorted({r['file'] for r in rows if r['status'] != 'passed'})
+    passed = sum(1 for r in rows if r['status'] == 'passed')
+    (args.out / 'failed.txt').write_text(''.join(f + '\n' for f in failed))
+    summary = {'host': args.host, 'sdk': str(sdk), 'jobs': len(requests), 'files': len(rows),
+               'passed': passed, 'failed': failed, 'groups': groups, 'problems': problems,
+               'seconds': round(time.monotonic() - started, 1)}
+    (args.out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+    for row in rows:
+        if row['status'] != 'passed':
+            detail = (row.get('details') or [{}])[0]
+            message = str(detail.get('message') or detail.get('actual') or '')[:160]
+            print(f"{row['status']:10} {row['file']}  {message}")
+    for problem in problems:
+        print('problem    ' + problem)
+    print(f"{passed} passed, {len(failed)} failed of {len(rows)} files in {summary['seconds']} s "
+          f"({len(requests)} groups on {args.host}); rerun: scripts/remote-check --failed {args.out} --out NEW")
+    return 0 if not failed and not problems and rows else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
