@@ -24,8 +24,8 @@ holds the reasoning, and `research/checked-tiles/evidence/` holds the measuremen
 | Body edit, then `bl test` (`m1.py`) | ~300 ms; ~240 ms with E1 (batch 30) | 448–500 ms | 200 ms (revisit) |
 | `priv/lib` edit, then the next command | 850–936 ms | 1.1–1.5 s | ≤ 600 ms, then 400 (L1) |
 | First command in a fresh checkout VM | ~6.1 s | 5.8 s | `--cold` (M3b, revisit) |
-| SDK after a `priv/host` comment | 611–670 s (668/668 units restored) | ~2,500 s | ≤ 3 min dev SDK (N4d) |
-| SDK after a `priv/boot` edit | ~1,720 s | 2,967 s | N4d, then per-unit cutoff |
+| SDK after a `priv/host` comment | release: 611–670 s; **dev SDK (N4d, 🧪): 11.5 s** to the first answer | ~2,500 s | — |
+| SDK after a `priv/boot` edit | ~1,720 s (dev SDK refuses it) | 2,967 s | per-unit cutoff |
 
 The one rule behind every card: a cost should scale with what changed, not
 with the size of the tree, the SDK or the compiler.
@@ -100,7 +100,8 @@ per batch, and runs the gate tests.** A card is ✅ only after that gate.
 | client speed or behaviour | run the binary cargo built, the way `bin/bl` does: `$WT/.cargo-target/release/drop-launcher --checkout $MAIN -- run /tmp/x.bl`, with `BL_CHECKOUT_PLATFORM`, `BL_BIN` and the rest exported as in `$MAIN/bin/bl` | ms |
 | a BL file the coordinator or a script runs directly (`nix/*.bl`, `scripts/*.bl`, `research/**.bl`) | `$MAIN/bin/bl run FILE ...` or a test file next to it, on the main SDK | seconds |
 | `priv/lib` and most `priv/std` code | **Hot path (U15, batch 21):** in a checkout, `./bin/bl` compiles a changed library file inside the warm VM under the SDK's module names; the next request sees it in about 1 s. Held back, still needing an SDK: the 7 compiler-key `priv/std` files, `priv/std/vm/**`, `bl/daemon.bl`, `bl/cli.bl`, `bl/dev-overlay.bl` (list: `nix/dev-reload.json`). A new or deleted library file, a macro already expanded elsewhere and a captured `def` value need an SDK. `BL_CHECKOUT_DEV_OVERLAY=0` turns it off. | about 1 s |
-| `priv/boot`, `priv/host` | **No hot path:** check host logic with `scripts/check-runtime-hosts`; the real check is the integration gate | the gate |
+| `priv/host/*.bl` pinned runtime hosts (not `aot.bl`, `aot_cache.bl` or another compiler-key host) | **Dev SDK (N4d):** `work run --memory 4G --timeout 1500 -- python3 scripts/dev-sdk --select` in the tree, then `./bin/bl ...` runs on it. It compiles only the edited units with the current SDK's own compiler (one cold VM of that SDK), reflinks the rest of the SDK into a local store product marked `dev`, and records it under the tree's fingerprint. The tree's `.bl/sdks` must hold the base SDK's `result-sdk` and `source-engine` (a lane worktree: link them as `research/substrate-ab/m1/copy.sh` does). Guard against a fallback preparation with `flock .bl/sdks/preparation.lock sleep N &` and `BL_SDK_LOCK_WAIT=0`: a preparation then exits 75. Never published, never a predecessor; plain `scripts/prepare-checkout-sdk` replaces it with the qualified SDK. | 6–8 s, then the first command's VM start (3–9 s) |
+| `priv/boot`, compiler-key hosts | **No hot path:** `scripts/dev-sdk` refuses them by name; check host logic with `scripts/check-runtime-hosts`; the real check is the integration gate | the gate |
 | measurement only | `work run` the probe with 3+ runs; report median and spread and the machine load (`uptime`) | — |
 
 `scripts/check-runtime-hosts` is meant for host checks without an SDK, but it
@@ -234,20 +235,47 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
      4 runs, with the load recorded.
 - **Done when.** Step 8 is recorded here.
 
-#### N4d ⏳ A dev SDK outside QEMU: a `priv/host` edit runnable in ≤ 3 min · S+ · `nix/bl-drop.nix`, `priv/build/selfbuild.bl`, `scripts/prepare-checkout-sdk`
-- **Where N4 stands.** N4a (restored units by reference), N4b (P boots the previous compiler; C elided), N4c (library-runtime key: 668/668 units restored on a host comment) and M4 are done; see the archive. A `priv/host` comment still takes 611–670 s. Almost all of that is the fixed pipeline: Nix evaluation and copying, P and B in a 4-CPU QEMU VM, and the library's fixed phases.
-- **Change.** Give checkouts a dev SDK path that builds on Work, outside QEMU and outside the release pipeline:
-  - compile only the edited host or boot units against the current SDK's compiler;
-  - path-normalise their beams, so they are byte-equal to what the store build would make;
-  - restore every library unit whose `library-runtime-key` holds;
-  - assemble an image that `./bin/bl` can run.
-  The release SDK is unchanged and stays the qualification. A dev SDK is never published; it is marked so that `release.yml` and the selection record refuse it.
-- **Done when.**
-  - A `priv/host/delay.bl` comment is runnable through `./bin/bl` in ≤ 3 min end to end, on a loaded host.
-  - Its beams for unchanged units match the store SDK's byte for byte.
-  - The ten files pass on it.
-  - A `priv/boot` edit either works the same way or is refused with a clear message.
-- **Background.** N4's measured breakdown (2026-11-23) lists where a one-file edit's 440 s goes, phase by phase, along with the pitfall that two layered SDKs in a row must both prepare. It is under N4 in `ROSTER-archive.md`. Read the full build log on the build station (`nix log`), not the 64 KB foundry events file.
+#### N4d 🧪 A dev SDK outside QEMU: a `priv/host` edit runnable in ≤ 3 min · lane `lane/n4d` · `scripts/dev-sdk`
+- **Where the 611–670 s went** (the 2026-11-24 `delay.bl`-comment SDK, library 668/668 restored; `nix log` on the build station, de-duplicated; each derivation's log time is its end):
+  | Step | Wall | Inside |
+  |---|---|---|
+  | engine snapshot, coordinator, producer drv | ~45 s | the producer drv's build is 2 s on nixbuild.net; the rest is queue and copying |
+  | generation P (QEMU) | 117 s | probe 14.7 s; generation 40.4 s (1 compiled, 91 cached); the rest VM, setup, output |
+  | generation B (QEMU) | 101 s | generation 38.4 s (1 compiled) |
+  | C (elided) + `compiler-1` | 34 s | the qualification itself is 3 s |
+  | library (QEMU) | 273 s | producer 196 s (library 84.8 s, of which child-produce 28.2 s; assemble-runtime 16.1 s; prime-freshness 15.7 s), setup 14.7 s, copy-sdk-library 29.6 s |
+  | image + selection | 55 s | packing the 136 MB drop |
+  The edit's own compile is about 20 ms. Against its predecessor, that SDK's image differs in exactly seven files: `Delay.beam` twice, `manifest.term` twice, `.bl-host-stage`, `priv/host/delay.bl` and `seed-metadata.term`. `sdk-code.term`, `precompiled.term`, `image-metadata.term` and every library unit are the same bytes.
+- **Change.** `scripts/dev-sdk [--from SDK] [--select]` (with `scripts/dev-sdk-compile.bl`, `scripts/dev-sdk.nix`, `scripts/dev-sdk-builder.py`):
+  - It diffs the tree against the base SDK's captured engine source. Anything but a pinned `priv/host` unit is refused, naming `scripts/prepare-checkout-sdk`: `priv/boot`, the compiler-key hosts (`aot.bl`, `aot_cache.bl`, `emit.bl` …), library sources (with a pointer to U15) and other engine inputs.
+  - One cold VM of the base SDK (`bin/bl-cold run`) compiles the edited units with the producer's exact options and root-relative source label, rewrites the floor manifest and regenerates `seed-metadata.term` (`AOT/prime_seed_metadata!`).
+  - A unit whose fresh compile equals the base beam except for labels (`bl_source_hash`, and the `bl_execution_clauses` ANF identities, which depend on what the compiling VM did before) becomes the base beam relabelled, which is what the release producer makes for such an edit. Env and PackageAuthority compile to different code in that VM even from unchanged Source. They are judged against the base Source compiled in the same VM, kept per base SDK in `.bl/dev-sdk-reference/`, and reported as `reproducible: false`.
+  - A local derivation (`--max-jobs 1`) copies the base image with `copy_file_range`, so btrfs shares its extents. It replaces the seven files, writes the launchers for its own path, and adds `dev` to `artifact.json`. The image must hold real files: the runtime resolves SDK paths physically and refuses a symlink out of its root (`AOT/physical_sdk_path`), so a symlink farm fails at the first warm VM.
+  - `--select` records the product under the tree's exact engine fingerprint (a `builtins.path` capture of the engine source, `selection.v1`, a `dev-sdk` marker) and retires the tree's previous dev SDK.
+  - Refusals:
+    - `prepare-checkout-sdk` takes a dev SDK's base as `previous`;
+    - a plain `prepare-checkout-sdk` replaces the dev SDK with the qualified one;
+    - `verify_selection` accepts a dev SDK only where its marker names it;
+    - `nix/bl-drop.nix` throws on a dev predecessor;
+    - `ci-check` and `ci-host-nix-check` refuse one.
+- **Measured (2026-11-25, scratch copy of main via `copy.sh`, load 11–13.5).**
+  - A `delay.bl` comment to the first `./bin/bl run` answer took **11.5 s** median over 3 cycles (9.2–15.2 s).
+    - `dev-sdk` itself: 6.3–7.6 s. The compile VM takes 2.4 s (the unit itself 23–27 ms) and assembly 2.8–4.1 s. The product shares its extents with the base.
+    - The first command's VM start: 3.0–8.5 s, against 2.3–3.4 s for the base SDK in the same session.
+  - An earlier build of the product on the Build host took 21–25 s, copied 585 MB back per edit and failed twice there (one `ENOSPC`), so the dev SDK now builds locally.
+  - An executed-code edit (a new `defn` in `delay.bl`) is live through `./bin/bl` 10.7 s after the edit: `(BeamLisp.Delay/n4d_probe)` answers 42. Its library is reported "kept from base", because the release path would recompile it.
+  - An `env.bl` comment took 111.6 s the first time (Env compiled twice, 107 s at load 7–10). The next one took 21.4 s, because the base Source's compile is cached per base SDK.
+- **Byte equality.**
+  - From the 2026-11-24 SDK's predecessor, with that SDK's `delay.bl`, the dev path produces its `Delay.beam`, `manifest.term` and `seed-metadata.term` byte for byte (`cmp`). sha256(manifest) equals its `.bl-host-stage` (929ed0b9…).
+  - Of the 60 pinned host units compiled unchanged on the current SDK, 58 come out identical through the relabel rule; Env and PackageAuthority differ in code there. An `env.bl` comment yields the base Env with only its 64-byte label changed.
+- **The ten files pass on a dev SDK:** 10 files, 317 tests, 64.7 s.
+- **Gate.** `python3 -m unittest scripts.tests.test_dev_sdk scripts.tests.test_checkout_predecessor`, plus one cycle on the integration tree after merge:
+  1. comment `priv/host/delay.bl`;
+  2. `scripts/dev-sdk --select`;
+  3. `./bin/bl run` of `(println 42)`, then the ten files;
+  4. `git checkout` the file;
+  5. `scripts/prepare-checkout-sdk` must select the qualified SDK again, with `previous` the base and not the dev SDK.
+- **Not done.** `priv/boot` edits are refused: the boot compiler's new generation would need P/B semantics. A code edit's library is kept from the base rather than recompiled. The client's 360 s wait after a failed VM start (a stale `.start` marker; seen four times here) is a separate bug.
 
 #### L1 ⏳ A library edit costs its compile · S+ · `priv/host` (`aot.bl`, `env.bl`, `loader.bl`), `priv/std/bl/dev-overlay.bl` · after N4d
 - **Why.** A one-function `priv/lib/scene/core.bl` edit takes 850–936 ms to show up in the next command, against about 300 ms for a project body edit. M4 removed the client stall and the full SDK inventory; E1's profile shows what is left:
