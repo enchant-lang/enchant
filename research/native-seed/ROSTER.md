@@ -44,6 +44,7 @@ Order chosen on 2026-11-25:
 | 2 | **R1** Release v2026.12 | Installed `bl` is v2026.12, remeasured warm and cold |
 | 3 | **N4d** Dev SDK outside QEMU | A `priv/host` edit runnable in ≤ 3 min |
 | 4 | **L1** A library edit costs its compile | `m1.py` `lib/first` and `lib/repeat` ≤ 600 ms median (then 400) |
+| 5 | **S1** Stale start marker | A killed start doesn't make the next command wait |
 | — | Revisit round | Entries in `ROSTER-revisit.md`, after N4d |
 
 ## How a card gets done: work, check inside, one integration gate
@@ -270,6 +271,11 @@ Sonnet; **S+** = Sonnet with a long budget, or Opus.
   - The ten files pass on it.
   - A `priv/boot` edit either works the same way or is refused with a clear message.
 - **Background.** N4's measured breakdown (2026-11-23) lists where a one-file edit's 440 s goes, phase by phase, along with the pitfall that two layered SDKs in a row must both prepare. It is under N4 in `ROSTER-archive.md`. Read the full build log on the build station (`nix log`), not the 64 KB foundry events file.
+
+#### S1 ⏳ A stale start marker makes the next command wait 6 minutes · H/S · `tooling/drop` (`checkout.rs`, `launcher.rs`), `priv/std/vm/client.bl`
+- **Seen by N4d (2026-11-25).** After a warm-VM start fails, the launcher's `.start` marker stays behind, and the next command waits up to 360 s for a VM that will never listen. That cost the N4d agent several 300–360 s waits.
+- **Change.** Write the marker with the starting process's pid and boot time. A waiter checks that the process is alive (and is the same process) before waiting, and removes a dead marker at once. `vm.client/stop`'s marker wait follows the same rule.
+- **Done when.** Kill a starting VM with `SIGKILL` before it listens. The next `./bin/bl run` starts a fresh VM within its normal start time, not after 360 s. Add this to `test/scripts/checkout_transport.py`.
 
 #### L1 ⏳ A library edit costs its compile · S+ · `priv/host` (`aot.bl`, `env.bl`, `loader.bl`), `priv/std/bl/dev-overlay.bl` · after N4d
 - **Why.** A one-function `priv/lib/scene/core.bl` edit takes 850–936 ms to show up in the next command, against about 300 ms for a project body edit. M4 removed the client stall and the full SDK inventory; E1's profile shows what is left:
