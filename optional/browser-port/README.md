@@ -254,6 +254,11 @@ journeys that need an observable destination rather than a `Page.navigate`
 protocol reply. It schedules one real `location.assign`, then observes the exact
 requested HTTP(S) URL and a newly parsed document, including same-URL reloads.
 It shares one timeout budget and never resubmits an uncertain navigation.
-Redirects to another URL fail. The returned document may be `interactive`:
-complete resources and application readiness require separate assertions.
+Redirects to another URL fail by default. When a journey expects a redirect,
+name its exact arrival explicitly: `(page/navigate-document! page requested-url
+30000 expected-url)`. The same deadline and new-document check apply; a different
+arrival still fails, even if the old page already had the expected URL. The
+result retains `requested-url`, the observed arrival `url`, and `redirected`.
+The returned document may be `interactive`: complete resources and application
+readiness require separate assertions.
 `navigate!` retains its existing raw CDP behavior.
