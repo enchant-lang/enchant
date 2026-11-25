@@ -73,3 +73,42 @@
    (is (= 1 @redirects))
    (is (= 3 @documents))
    (finally (page/close! p) (Supervisor/stop server :normal 30000) (File/rm_rf! root)))))
+
+
+(deftest an-explicit-redirect-arrival-still-requires-a-new-document-without-retry
+ (let [root (str "/tmp/bl-redirect-arrival-test-" (erlang/unique_integer (list :positive)))
+       requests (atom {}) port (free-port) origin (str "http://127.0.0.1:" port)
+       arrival (str origin "/arrival")
+       server (elem (web/serve {:port port :ip (tuple 127 0 0 1) :log :off
+                 :plug (fn [c]
+                  (let [path (web/path c)]
+                   (swap! requests update path (fn [n] (inc (or n 0))))
+                   (case path
+                    "/redirect" (web/redirect c "/arrival")
+                    "/unexpected" (web/redirect c "/wrong")
+                    "/arrival" (web/html c 200 "<p id='arrived'>Arrival</p>")
+                    (web/html c 200 "<p>Different destination</p>"))))}) 1)
+       p (page/open! {:width 640 :height 480 :launch
+            {"profile" (str root "/profile") "runtime" (str root "/runtime")
+             "chromium" (System/get_env "CHROMIUM") "compositor" (System/get_env "SWAY")
+             "vnc" (System/get_env "WAYVNC") "width" 640 "height" 580}})]
+  (try
+   (let [result (page/navigate-document! p (str origin "/redirect") 10000 arrival)]
+    (is (= arrival (get result "url") (page/current-url p)))
+    (is (= (str origin "/redirect") (get result "requested-url")))
+    (is (= true (get result "redirected")))
+    (is (= false (get result "retried"))))
+   (is (= 1 (get @requests "/redirect")))
+   (is (= 1 (get @requests "/arrival")))
+   ; The old page already has the expected URL: it cannot satisfy the next
+   ; navigation after a different redirect replaces its document.
+   (is (some? (try (page/navigate-document! p (str origin "/unexpected") 1000 arrival)
+                  nil (catch e (ex-message e)))))
+   (page/wait-url! p #(= (str origin "/wrong") %))
+   (is (= 1 (get @requests "/unexpected")))
+   (is (= 1 (get @requests "/wrong")))
+   (let [before @requests]
+    (is (some? (try (page/navigate-document! p (str origin "/redirect") 1000 "file:///tmp/wrong")
+                   nil (catch e (ex-message e)))))
+    (is (= before @requests)))
+   (finally (page/close! p) (Supervisor/stop server :normal 30000) (File/rm_rf! root)))))

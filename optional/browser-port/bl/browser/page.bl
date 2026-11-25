@@ -119,29 +119,34 @@
 (defn navigate-document!
   "Opt-in real renderer navigation with an observed document barrier. Schedule
    location.assign once; never retry an uncertain operation. Require the exact
-   requested HTTP(S) URL, a new document (including same-URL reloads), and a
+   arrival URL (the request URL by default), a new document (including same-URL reloads), and a
    parsed DOM. This does not promise complete resources or application readiness;
-   callers must assert their own ready components. Redirects to another URL fail.
+   callers must assert their own ready components. Redirects fail unless the
+   four-argument form supplies an exact expected arrival URL; no URL predicate
+   or retry silently accepts a different destination.
    All barriers share one timeout budget; no Page.navigate reply is fabricated."
   ([page url] (navigate-document! page url 30000))
-  ([page url timeout-ms]
+  ([page url timeout-ms] (navigate-document! page url timeout-ms url))
+  ([page url timeout-ms expected-url]
    (when-not (and (string? url) (or (starts-with? url "http://") (starts-with? url "https://"))
+                  (string? expected-url) (or (starts-with? expected-url "http://") (starts-with? expected-url "https://"))
                   (integer? timeout-ms) (pos? timeout-ms))
-     (throw (ex-info "Document navigation requires an HTTP(S) URL and positive timeout" {})))
+     (throw (ex-info "Document navigation requires HTTP(S) request/arrival URLs and positive timeout" {})))
    (let [deadline (+ (erlang/monotonic_time :millisecond) timeout-ms)
          marker (str "__blDepartingDocument" (erlang/unique_integer (list :positive)))
          remaining (fn [] (let [ms (- deadline (erlang/monotonic_time :millisecond))]
                            (when-not (pos? ms) (throw (ex-info "Browser document navigation timed out" {}))) ms))]
     (evaluate! page (str "(()=>{window[" (interop/->json marker) "]=true;setTimeout(()=>location.assign("
                          (interop/->json url) "),0);return true})()"))
-    (wait-url! page #(= url %) (remaining))
-    (wait! page (str "location.href===" (interop/->json url) "&&window[" (interop/->json marker)
+    (wait-url! page #(= expected-url %) (remaining))
+    (wait! page (str "location.href===" (interop/->json expected-url) "&&window[" (interop/->json marker)
                      "]!==true&&document.readyState!=='loading'") (remaining))
     (let [_before (remaining) document (evaluate! page "({url:location.href,ready:document.readyState})")
           _after (remaining)]
-     (when-not (and (= url (get document "url")) (contains? #{"interactive" "complete"} (get document "ready")))
+     (when-not (and (= expected-url (get document "url")) (contains? #{"interactive" "complete"} (get document "ready")))
        (throw (ex-info "Browser document changed after navigation observation" {})))
-     {"method" "renderer-location-assign" "url" url "document" document "retried" false}))))
+     {"method" "renderer-location-assign" "requested-url" url "url" expected-url
+      "redirected" (not= url expected-url) "document" document "retried" false}))))
 
 (defn click!
   "Click a visible CSS target through real CDP input. Return normalized source
