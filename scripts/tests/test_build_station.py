@@ -81,7 +81,7 @@ class BuildStationTests(unittest.TestCase):
         with patch.object(STATION, 'command', command), patch.object(STATION.Path, 'readlink', return_value=Path(OUTPUT)):
             rows = STATION.client(value, '/tmp/owned-root', description)
         self.assertEqual(OUTPUT, rows[0]['outputs']['out'])
-        self.assertEqual(['nix', 'copy', '--to', description['storeUri']], calls[0][0][:4])
+        self.assertEqual(['nix', 'copy', '--no-check-sigs', '--to', description['storeUri']], calls[0][0][:5])
         self.assertIn(SDK, calls[0][0])
         self.assertEqual(str(STATION.PLATFORM / 'bin/beam-build-station'), calls[1][0][-1])
         self.assertEqual(['nix', 'copy', '--from', description['storeUri'], DERIVATION], calls[2][0])
