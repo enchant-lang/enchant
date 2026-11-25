@@ -33,14 +33,14 @@ with the size of the tree, the SDK or the compiler.
 ## The plan (2026-11-25)
 
 Order chosen on 2026-11-25:
-1. Land batch 30 and ship it.
+1. Ship what main has (v2026.12). Batch 30 found a fresh-VM stall at its gate, so it waits for the next release.
 2. Make SDK edits cheap to try (N4d). Every later host or boot card, and every
    revisit, waits on a 30–40 minute gate until then.
 3. Take the library edit, the largest edit cost a user still notices.
 
 | Order | Card | Done when |
 |---|---|---|
-| 1 | **B30** E1 + T5 + W4 (gate running) | Gate 30 green, merged |
+| 1 | **B30** E1 + T5 + W4 (gate 30: fresh-VM stall, not merged) | No `first-in-fresh-vm` row slower than main, interleaved |
 | 2 | **R1** Release v2026.12 | Installed `bl` is v2026.12, remeasured warm and cold |
 | 3 | **N4d** Dev SDK outside QEMU | A `priv/host` edit runnable in ≤ 3 min |
 | 4 | **L1** A library edit costs its compile | `m1.py` `lib/first` and `lib/repeat` ≤ 600 ms median (then 400) |
@@ -189,7 +189,29 @@ If a gate fails, the card goes back to 🔨 with the failure.
 Suggested model per card: **H** = Haiku can do it from this text; **S** =
 Sonnet; **S+** = Sonnet with a long budget, or Opus.
 
-#### B30 🧪 Batch 30: E1, T5 and W4 · integrator
+#### B30 🔨 Batch 30: E1, T5 and W4 · not merged: the first command in a fresh VM stalls · integrator
+- **Gate 30 (2026-11-25, SDK `ynjnpx9x`, prep 1,819 s, load 13–17).** Every test passed:
+  - the E1 and T5 files: 11 files;
+  - `sdk_loading_batch` in all three placements;
+  - five rounds of 4-way `seed_*_abi` in one realm, with 0 failures;
+  - the M2 tests, the ten files in both orders, and the "more" group;
+  - all four scripts.
+
+  `m1.py`: `warm/test` 87 ms, against 135 ms on batch 29. `body/first/test` 310 ms, level with batch 29 (306). `lib/first` 1,052 ms, against 936.
+- **Blocker.** `first-in-fresh-vm/test` regressed intermittently. An interleaved A/B (`realm stop`, then `bl test scene/frame_plan_test`, load 13–15) against a private copy of main on the batch-29 SDK:
+
+  | Run | 1 | 2 | 3 | 4 | 5 | 6 |
+  |---|---|---|---|---|---|---|
+  | batch 29 (ms) | 8,725 | 5,661 | 5,410 | 4,973 | 5,067 | 5,462 |
+  | batch 30 (ms) | 24,260 | 9,567 | 5,882 | 4,785 | 10,088 | 22,343 |
+
+  `m1.py` gave 5.7, 7.8, 18.7, 10.6 and 53.9 s. Client phases are about 9–15 ms, so the stall is inside the VM. `--cold` rows are normal (cold test about 3.6 s).
+- **Suspects.**
+  - T5's lease change (`env.bl` `sdk_runtime_inventory_cached!`).
+  - W4's two-identical-answers path in `sdk_declaration_kind`, which has a 5 s deadline. Several queries would add up to stalls of 10–24 s.
+  - W4's `Link/forward`.
+  - E1's one-pass test load (`d6a1ab316`).
+- **Next.** Trace a stalled fresh VM on a copy of the integration tree, whose SDK is retained. Check for stalls in multiples of 5 s. Then fix the cause or drop the commit. Do this before the next gate.
 - **E1 (`d6a1ab316`).** A test file loads as one declaration pass.
   - Body edit then test: 300 → 239 ms.
   - Unchanged warm test: 115 → 67 ms.
