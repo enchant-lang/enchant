@@ -7,11 +7,17 @@
 ; exact-named beam whose `__struct__/0,1` pair and `__info__/1` are SYNTHESIZED
 ; by the `:struct_fields` option — no `defstruct`, no Elixir source.
 ;
-; KEYING. Every element is stored through `BeamLisp.Ns.Rt.hash_key/1`, the
-; canonical key of its `=` class (Q3). Metadata, `1` against `1.0` and decimal
-; scale are invisible to `=`, so they must be invisible to set membership too —
-; otherwise two equal values both live in the set. `new`/`add`/`del`/`member?`
-; are the four key boundaries and all four normalize.
+; KEYING. Every element is keyed in `:members` by `BeamLisp.Ns.Rt.hash_key/1`,
+; the canonical key of its `=` class (Q3). Metadata, `1` against `1.0` and
+; decimal scale are invisible to `=`, so they must be invisible to set
+; membership too — otherwise two equal values both live in the set.
+;
+; STORED MEMBERS. A member is the value as it was FIRST added (Clojure's rule):
+; `(conj #{} 100.50M)` holds 100.50M, `(conj #{1.0} 1)` holds 1.0. When a
+; member's representative (`Rt.key_rep/2`) differs from its canonical key, the
+; struct carries an optional `:reps` field, #{canonical => representative}.
+; A set without such a member has no `:reps` field at all, so `add`, `member?`
+; and `count` are what they were and `to_list`/`del` pay one `is_map_key`.
 ;
 ; THE STRUCT IS BUILT BY HAND, never by calling the synthesized `__struct__/1`.
 ; A pinned file cannot name it: an unqualified `__struct__` is not a unit defn,
@@ -32,31 +38,88 @@
 (ns host.set)
 
 (defn new
-  "The empty set, or the set of `enum`'s distinct elements. The `:members`
-   store is a `MapSet`, so a bl vector or any Enumerable seq is accepted. Each
-   element is keyed by `Rt.hash_key`, like `add` — set literals, `(set coll)`
-   and quoted sets all arrive here, and `#{1 1.0}` is one member (Q3)."
+  "The empty set, or the set of `enum`'s distinct elements, the first of each
+   `=` class kept as written. A bl vector or any Enumerable seq is accepted.
+   Set literals, `(set coll)` and quoted sets all arrive here, and `#{1 1.0}`
+   is one member (Q3)."
   ([] (let [mod (erlang/element 2 (erlang/fun_info (fn [] nil) :module))]
         (maps/put :members (MapSet/new) (maps/put :__struct__ mod (maps/new)))))
-  ([enum] (let [mod (erlang/element 2 (erlang/fun_info (fn [] nil) :module))]
-            (maps/put :members (MapSet/new enum (fn [x] (BeamLisp.Ns.Rt/hash_key x)))
-              (maps/put :__struct__ mod (maps/new))))))
+  ([enum] (let [mod (erlang/element 2 (erlang/fun_info (fn [] nil) :module))
+                xs (Enum/to_list enum)
+                hks (lists/map (fn [x] (BeamLisp.Ns.Rt/hash_key x)) xs)
+                s (maps/put :members (MapSet/new hks) (maps/put :__struct__ mod (maps/new)))]
+            (if (erlang/=:= hks xs)
+              s
+              ; some member is not its own canonical key: record the first
+              ; representative of each class, in order
+              (let [reps (erlang/element 2
+                           (lists/foldl
+                             (fn [x acc]
+                               (let [hk (BeamLisp.Ns.Rt/hash_key x)
+                                     seen (erlang/element 1 acc)]
+                                 (if (erlang/is_map_key hk seen)
+                                   acc
+                                   (let [r (BeamLisp.Ns.Rt/key_rep x hk)]
+                                     (tuple (maps/put hk true seen)
+                                            (if (erlang/== nil r) (erlang/element 2 acc)
+                                              (maps/put hk r (erlang/element 2 acc))))))))
+                             (tuple (maps/new) (maps/new))
+                             xs))]
+                (if (erlang/== 0 (erlang/map_size reps)) s (maps/put :reps reps s)))))))
+
+(defn new_exact
+  "A set whose `:members` are `forms` EXACTLY as given, never keyed: the CODE
+   a set literal hands a macro (priv/boot/compiler.bl `datum-in`). Its members
+   are forms still to be evaluated, so `#{(f 0.0) (f -0.0)}` keeps both. It is
+   a container of code, not a value-keyed set: membership by `=` is not
+   promised on it."
+  [forms]
+  (let [mod (erlang/element 2 (erlang/fun_info (fn [] nil) :module))]
+    (maps/put :members (MapSet/new forms) (maps/put :__struct__ mod (maps/new)))))
 
 (defn add
   "Set with `x` added (idempotent). `x` is keyed by `Rt.hash_key`, so a value
-   and its metadata-bearing twin are ONE member."
+   and its metadata-bearing twin are ONE member; an existing member keeps the
+   form it was first added in."
   [s x]
-  (maps/put :members (MapSet/put (maps/get :members s) (BeamLisp.Ns.Rt/hash_key x)) s))
+  (let [hk (BeamLisp.Ns.Rt/hash_key x)
+        ms (maps/get :members s)]
+    (if (erlang/=:= hk x)
+      (maps/put :members (MapSet/put ms hk) s)
+      (if (MapSet/member? ms hk)
+        s
+        (let [r (BeamLisp.Ns.Rt/key_rep x hk)
+              s2 (maps/put :members (MapSet/put ms hk) s)]
+          (if (erlang/== nil r)
+            s2
+            (maps/put :reps (maps/put hk r (maps/get :reps s (maps/new))) s2)))))))
 
 (defn del
-  "Set with `x` removed (idempotent), by `Rt.hash_key`."
+  "Set with `x` removed (idempotent), by `Rt.hash_key`, its stored form too."
   [s x]
-  (maps/put :members (MapSet/delete (maps/get :members s) (BeamLisp.Ns.Rt/hash_key x)) s))
+  (let [hk (BeamLisp.Ns.Rt/hash_key x)
+        s2 (maps/put :members (MapSet/delete (maps/get :members s) hk) s)]
+    (if (erlang/is_map_key :reps s2)
+      (let [reps (erlang/map_get :reps s2)]
+        (if (erlang/is_map_key hk reps)
+          (if (erlang/== 1 (erlang/map_size reps))
+            (maps/remove :reps s2)
+            (maps/put :reps (maps/remove hk reps) s2))
+          s2))
+      s2)))
 
 (defn member?
   "Membership by `Rt.hash_key`."
   [s x]
   (MapSet/member? (maps/get :members s) (BeamLisp.Ns.Rt/hash_key x)))
+
+(defn get
+  "The STORED member equal to `x`, or `default`: `(get #{1.0} 1)` is 1.0."
+  [s x default]
+  (let [hk (BeamLisp.Ns.Rt/hash_key x)]
+    (if (MapSet/member? (maps/get :members s) hk)
+      (if (erlang/is_map_key :reps s) (maps/get hk (erlang/map_get :reps s) hk) hk)
+      default)))
 
 (defn count
   "Cardinality."
@@ -64,7 +127,11 @@
   (MapSet/size (maps/get :members s)))
 
 (defn to_list
-  "The members as a list. Iteration order is set-internal, as in Clojure —
-   never sorted, and never promised stable across builds."
+  "The members as a list, each as it was first added. Iteration order is
+   set-internal, as in Clojure — never sorted, and never promised stable
+   across builds."
   [s]
-  (MapSet/to_list (maps/get :members s)))
+  (if (erlang/is_map_key :reps s)
+    (let [reps (erlang/map_get :reps s)]
+      (lists/map (fn [hk] (maps/get hk reps hk)) (MapSet/to_list (maps/get :members s))))
+    (MapSet/to_list (maps/get :members s))))

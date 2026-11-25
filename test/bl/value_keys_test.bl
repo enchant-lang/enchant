@@ -49,10 +49,11 @@
  (is (= :d (get {0.1M :d} 0.10M)))
  (is (= 1 (count {1 :a 1.0 :b})))
  (is (= :b (get {1 :a 1.0 :b} 1)))
- (is (erlang/=:= [1] (vec (keys {1.0 :x}))))
- (is (erlang/=:= [0] (vec (keys {-0.0 :x}))))
- (is (erlang/=:= [1.5] (vec (keys {1.50M :x}))))
- (is (d/same-representation? 0.1M (first (keys {0.10M :x}))))
+ ;; a key is STORED as written (stored-representatives-are-kept, below)
+ (is (erlang/=:= [1.0] (vec (keys {1.0 :x}))))
+ (is (erlang/=:= [-0.0] (vec (keys {-0.0 :x}))))
+ (is (d/same-representation? 1.50M (first (keys {1.50M :x}))))
+ (is (d/same-representation? 0.10M (first (keys {0.10M :x}))))
  (is (erlang/=:= 1 (first (find {1 :x} 1.0))))
  (is (= [1 :x] (find {1 :x} 1.0)))
  (is (contains? {1 :x} 1.0))
@@ -78,7 +79,7 @@
   (is (float? (second (get g 1)))))
  (is (= [1 2] (vec (distinct [1 1.0 2]))))
  (is (= :x (get (sorted-map 1.5M :x) 1.50M)))
- (is (erlang/=:= [1] (vec (keys (sorted-map 1.0 :x)))))
+ (is (erlang/=:= [1.0] (vec (keys (sorted-map 1.0 :x)))))
  (is (contains? (sorted-set 1 2 3) 2.0))
  (is (= 1 (count (sorted-set 1 1.0 1M))))
  (is (float? (get {:a 1.0} :a)))
@@ -130,7 +131,7 @@
 
 (deftest quoted-and-syntax-maps-have-canonical-keys
  (is (= :x (get '{1.0 :x} 1)))
- (is (erlang/=:= [1] (vec (keys '{1.0 :x}))))
+ (is (erlang/=:= [1.0] (vec (keys '{1.0 :x}))))
  (is (= 1 (count '{1 :a 1.0 :b})))
  (is (= 1 (count '#{1 1.0})))
  (let [syntax (syntax/from-datum (maps/put 1.0 :x (maps/new))
@@ -153,3 +154,107 @@
   (is (= :float (maps/get 1.0 m)))
   (is (= false (maps/is_key 1.0 (maps/put 1 :int (maps/new)))))
   (is (= :int (get m 1.0)))))
+
+;; ── stored representatives ────────────────────────────────────────────────
+;; Clojure's rule: a set member or map key is the value AS FIRST INSERTED; a
+;; later equal key changes only the value. Lookup, `=`, hashing and order still
+;; go by the canonical key. The release blocker: a datom relation result (a
+;; set of tuples) turned stored 100.50M balances into the float 100.5.
+
+(defn- dec2? [x] (d/same-representation? 100.50M x))
+
+(deftest stored-representatives-are-kept
+ (is (dec2? (first (conj #{} 100.50M))))
+ (let [s (conj #{1.0} 1)]
+  (is (= 1 (count s)))
+  (is (erlang/=:= 1.0 (first s))))
+ (is (erlang/=:= 1.0 (get #{1.0} 1)))
+ (is (erlang/=:= 1.0 (#{1.0} 1)))
+ (is (dec2? (first (keys {100.50M :x}))))
+ (is (dec2? (first (keys (assoc {} 100.50M :x)))))
+ (let [k 100.50M] (is (dec2? (first (keys {k :x})))))
+ (is (= :one (get {1 :one} 1.0)))
+ (is (contains? #{1} 1.0))
+ (is (contains? {100.50M :x} 100.5))
+ (is (= :x (get {100.50M :x} 100.5M)))
+ ;; assoc of an equal key replaces only the value
+ (let [m (assoc {1.0 :a} 1 :b)]
+  (is (= :b (get m 1)))
+  (is (erlang/=:= [1.0] (vec (keys m)))))
+ (is (erlang/=:= [1] (vec (keys (assoc {1 :a} 1.0 :b)))))
+ (is (erlang/=:= 1.0 (first (find {1.0 :a} 1))))
+ (is (erlang/=:= [1.0] (vec (keys (merge {1.0 :a} {1 :b})))))
+ (is (= :b (get (merge {1.0 :a} {1 :b}) 1)))
+ ;; a member inside a tuple, and through `into`
+ (is (dec2? (second (first (into #{} [["bank" 100.50M]])))))
+ (is (dec2? (first (keys (into {} [[100.50M :x]])))))
+ ;; seq, vec, reduce, reduce-kv and printing expose the stored forms
+ (is (= "#{100.50M}" (pr-str #{100.50M})))
+ (is (= "{100.50M :x}" (pr-str {100.50M :x})))
+ (is (dec2? (first (vec #{100.50M}))))
+ (is (dec2? (first (first (seq {100.50M :x})))))
+ (is (dec2? (reduce (fn [_ x] x) nil #{100.50M})))
+ (is (dec2? (reduce-kv (fn [_ k _] k) nil {100.50M :x})))
+ (is (dec2? (first (first (vec {100.50M :x})))))
+ ;; count, dissoc and disj see one key and drop its stored form
+ (is (= 1 (count {100.50M :x})))
+ (is (= 2 (count {100.50M :x 2 :y})))
+ (is (= {} (dissoc {1.0 :a} 1)))
+ (is (= 0 (count (dissoc {1.0 :a} 1))))
+ (is (erlang/=:= [1] (vec (keys (assoc (dissoc {1.0 :a} 1) 1 :b)))))
+ (is (erlang/=:= [1] (vec (conj (disj #{1.0} 1) 1))))
+ ;; equality, hashing and nesting go by `=`
+ (is (= #{1} #{1.0}))
+ (is (= {1 :a} {1.0 :a}))
+ (is (= (BeamLisp.Ns.Rt/semantic-hash {1 :a}) (BeamLisp.Ns.Rt/semantic-hash {1.0 :a})))
+ (is (= (BeamLisp.Ns.Rt/semantic-hash #{1}) (BeamLisp.Ns.Rt/semantic-hash #{1.0})))
+ (is (= :n (get {#{1.0} :n} #{1})))
+ (is (= :n (get {{1.0 :a} :n} {1 :a})))
+ (is (erlang/=:= (hk #{1}) (hk #{1.0})))
+ (is (erlang/=:= (hk {1 :a}) (hk {1.0 :a})))
+ ;; metadata is still not part of a key (as in v2026.11)
+ (is (nil? (meta (first (keys {(with-meta [1] {:a 1}) :x})))))
+ ;; quoted data
+ (is (erlang/=:= [1.0] (vec '#{1.0})))
+ ;; common keys carry no table
+ (is (= false (erlang/is_map_key :"$bl/key-reps" {:a 1 "s" 2 3 4})))
+ (is (= false (erlang/is_map_key :reps #{:a "s" 3}))))
+
+(deftest stored-representatives-through-transients-and-sorted
+ ;; 2000 entries from a vector: `into` takes its transient path
+ (let [xs (mapv (fn [i] (BeamLisp.Decimal/of (* 10 i) 2)) (range 2000))
+       s (into #{} xs)
+       m (into {} (mapv (fn [x] [x :v]) xs))]
+  (is (= 2000 (count s)))
+  (is (= 2000 (count m)))
+  (is (every? (fn [x] (= 2 (BeamLisp.Decimal/scale x))) s))
+  (is (every? (fn [k] (= 2 (BeamLisp.Decimal/scale k))) (keys m))))
+ (is (dec2? (first (keys (persistent! (assoc! (transient {}) 100.50M :x))))))
+ (is (dec2? (first (persistent! (conj! (transient #{}) 100.50M)))))
+ (is (dec2? (first (sorted-set 100.50M))))
+ (is (dec2? (first (keys (sorted-map 100.50M :x)))))
+ (is (erlang/=:= 1.0 (first (conj (sorted-set 1.0) 1))))
+ (is (erlang/=:= 1.0 (get (sorted-set 1.0) 1)))
+ (is (erlang/=:= 1.0 (first (find (sorted-map 1.0 :a) 1))))
+ (is (erlang/=:= [1.0] (vec (keys (assoc (sorted-map 1.0 :a) 1 :b)))))
+ (is (= :b (get (assoc (sorted-map 1.0 :a) 1 :b) 1))))
+
+(deftest a-macro-receives-a-set-literal-as-written
+ ;; CODE is not keyed: `#{(f 0.0) (f -0.0)}` reaches the macro with both forms
+ (is (= 2 (count #{(str 0.0) (str -0.0)})))
+ (is (= #{"0.0" "-0.0"} #{(str 0.0) (str -0.0)})))
+
+(deftest common-keys-cost-nothing-extra
+ ;; timing guard, printed for the report: keyword and integer keys take the
+ ;; same path as before the stored-representative change
+ (let [n 200000
+       t0 (erlang/monotonic_time :microsecond)
+       m (loop [i 0 m {}] (if (< i n) (recur (inc i) (assoc m (rem i 1000) i)) m))
+       t1 (erlang/monotonic_time :microsecond)
+       _ (loop [i 0 acc 0] (if (< i n) (recur (inc i) (+ acc (get m (rem i 1000) 0))) acc))
+       t2 (erlang/monotonic_time :microsecond)
+       s (loop [i 0 s #{}] (if (< i n) (recur (inc i) (conj s (rem i 1000))) s))
+       t3 (erlang/monotonic_time :microsecond)]
+  (println "value-keys timing (us) assoc/get/conj x" n ":" (- t1 t0) (- t2 t1) (- t3 t2))
+  (is (= 1000 (count m)))
+  (is (= 1000 (count s)))))
