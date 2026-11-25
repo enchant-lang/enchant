@@ -1065,7 +1065,9 @@
               (recur (k-cons (seq-entry (erlang/element 1 pr) (erlang/element 2 pr)) acc)
                      (erlang/tl ps))))))
 
-(defn- map-entries [m] (pairs->entries (erlang/apply :maps :to_list (seq-one m))))
+(declare map-pairs map-size)
+
+(defn- map-entries [m] (pairs->entries (map-pairs m)))
 (defn- sorted-entries [m] (pairs->entries (BeamLisp.Sorted/map_to_list m)))
 
 (defn- record-entries [r]
@@ -1221,7 +1223,7 @@
       (erlang/== kd :set) (BeamLisp.Set/count x)
       (erlang/== kd :sorted-set) (BeamLisp.Sorted/set_count x)
       (erlang/== kd :sorted-map) (BeamLisp.Sorted/map_count x)
-      (erlang/== kd :map) (erlang/map_size x)
+      (erlang/== kd :map) (map-size x)
       (erlang/== kd :record) (erlang/- (erlang/map_size x) 1)
       (erlang/== kd :tuple) (erlang/tuple_size x)
       (erlang/== kd :opaque) (erlang/- (erlang/map_size x) 1)
@@ -1573,13 +1575,18 @@
       :else (recur (erlang/+ i 1)))))
 
 (defn- key-dirty-map? [m]
+  ; a map that stores representatives (see "stored representatives") holds
+  ; a non-canonical key by definition
+  (cond
+    (erlang/is_map_key :"$bl/key-reps" m) true
+    :else
   (loop [iter (maps/iterator m)]
     (let [nx (maps/next iter)]
       (cond
         (erlang/== nx :none) false
         (key-dirty? (erlang/element 1 nx)) true
         (key-dirty? (erlang/element 2 nx)) true
-        :else (recur (erlang/element 3 nx))))))
+        :else (recur (erlang/element 3 nx)))))))
 
 (defn- vector-dirty? [x]
   (cond
@@ -1625,7 +1632,7 @@
   (maps/from_list (k-to-list
                     (map (fn [pair] (tuple2 (hash-hash-key (erlang/element 1 pair))
                                             (hash-hash-key (erlang/element 2 pair))))
-                         (maps/to_list m)))))
+                         (maps/to_list (maps/remove :"$bl/key-reps" m))))))
 
 (defn- canon-vector [x]
   (cond
@@ -1674,6 +1681,158 @@
     (erlang/is_list x) (cond (key-dirty-list? x) (canon-list x) :else x)
     :else x))
 
+
+
+;; ── stored representatives ─────────────────────────────────────────────────
+; THE LAW, second half (Clojure's): a set member or a map key is the value AS
+; IT WAS FIRST INSERTED. Lookup, equality, hashing and order go by the
+; canonical key above; what `seq`, `keys`, `first`, printing and `find` show
+; is the stored representative. `(conj #{} 100.50M)` holds 100.50M (scale 2),
+; not the float 100.5; `(conj #{1.0} 1)` still holds 1.0.
+;
+; THE STORE. Plain maps stay plain BEAM maps keyed by the canonical key, so
+; `get`, `contains?` and the raw `maps:get` of interop are unchanged. A key
+; whose representative differs from its canonical key (an integral float, a
+; decimal, -0.0, a composite holding one) records the representative in ONE
+; hidden entry, `:"$bl/key-reps"` => #{canonical => representative}. A set
+; struct keeps the same table in an optional `:reps` field (host/set.bl);
+; sorted collections store the representative in the tree (host/sorted.bl).
+;
+; THE COMMON CASE COSTS NOTHING. A key that is its own canonical key (a
+; keyword, string, integer, any term with no float/decimal/metadata inside) is
+; put exactly as before; `count`, `seq` and `dissoc` pay one `is_map_key` on
+; an atom to learn that the table is absent. Metadata is NOT kept: a
+; representative is the key with its metadata stripped, as in v2026.11.
+
+(declare key-put map-pairs key-strip)
+
+(defn- key-strip-list [xs]
+  (cond
+    (erlang/is_list xs)
+    (let [ys (k-to-list (lists/map (fn [e] (key-strip e)) xs))]
+      (cond (erlang/=:= ys xs) xs :else ys))
+    :else xs))
+
+(defn- key-strip
+  "`x` with its metadata stripped everywhere, numbers exactly as written; `x`
+   itself when there is none."
+  [x]
+  (cond
+    (erlang/is_integer x) x
+    (erlang/is_atom x) x
+    (erlang/is_binary x) x
+    (erlang/is_float x) x
+    (erlang/is_tuple x)
+    (cond (meta-wrapper? x) (key-strip (erlang/element 2 x))
+          :else (let [xs (erlang/tuple_to_list x) ys (key-strip-list xs)]
+                  (cond (erlang/=:= ys xs) x :else (erlang/list_to_tuple ys))))
+    (erlang/is_map x)
+    (let [mod (hash-struct-mod x)]
+      (cond
+        (erlang/== mod nil)
+          (let [ps (map-pairs x)
+                qs (lists/map (fn [p] (tuple2 (key-strip (erlang/element 1 p)) (key-strip (erlang/element 2 p)))) ps)]
+            (cond (erlang/=:= ps qs) x
+                  :else (lists/foldl (fn [p acc] (key-put acc (erlang/element 1 p) (erlang/element 2 p))) (maps/new) qs)))
+        (erlang/== mod :"Elixir.BeamLisp.Vector")
+          (let [xs (BeamLisp.Vector/to_list x) ys (key-strip-list xs)]
+            (cond (erlang/=/= ys xs) (BeamLisp.Vector/new ys)
+                  (erlang/== nil (maps/get :meta x nil)) x
+                  (erlang/is_map_key :items x) (maps/put :meta nil x)
+                  :else (BeamLisp.Vector/new xs)))
+        (erlang/== mod :"Elixir.BeamLisp.Set")
+          (let [xs (BeamLisp.Set/to_list x) ys (key-strip-list xs)]
+            (cond (erlang/=:= ys xs) x :else (BeamLisp.Set/new ys)))
+        (BeamLisp.Record/record_module? mod)
+          (maps/map (fn [f v] (cond (erlang/== f :__struct__) v :else (key-strip v))) x)
+        :else x))
+    (erlang/is_list x) (key-strip-list x)
+    :else x))
+
+(defn key_rep
+  "The representative to store for key `k` whose canonical key is `hk`, or nil
+   when the canonical key itself is what was written (the common case)."
+  [k hk]
+  (cond
+    (erlang/=:= hk k) nil
+    :else (let [r (key-strip k)]
+            (cond (erlang/=:= r hk) nil :else r))))
+
+(defn- key-stored
+  "What a sorted collection stores for `k`: its representative, or `hk`."
+  [k hk]
+  (cond
+    (erlang/=:= hk k) k
+    :else (let [r (key_rep k hk)] (cond (erlang/== nil r) hk :else r))))
+
+(defn- key-put
+  "`(assoc m k v)` on a plain map. A new key's representative is recorded
+   when it differs from the canonical key; an existing key keeps the one it
+   has (the first inserted wins), only the value changes."
+  [m k v]
+  (let [hk (hash-hash-key k)]
+    (cond
+      (erlang/=:= hk k) (maps/put hk v m)
+      (erlang/is_map_key hk m) (maps/put hk v m)
+      :else
+      (let [r (key_rep k hk)]
+        (cond
+          (erlang/== nil r) (maps/put hk v m)
+          :else (maps/put :"$bl/key-reps"
+                          (maps/put hk r (maps/get :"$bl/key-reps" m (maps/new)))
+                          (maps/put hk v m)))))))
+
+(defn- key-del
+  "`(dissoc m k)` on a plain map, its representative included. A raw map
+   built outside the key paths may hold the exact term instead, so both go."
+  [m k]
+  (let [hk (hash-hash-key k)
+        d (cond (erlang/=:= hk k) (maps/remove hk m) :else (maps/remove k (maps/remove hk m)))]
+    (cond
+      (erlang/is_map_key :"$bl/key-reps" d)
+      (let [reps (erlang/map_get :"$bl/key-reps" d)]
+        (cond
+          (erlang/== false (erlang/is_map_key hk reps)) d
+          (erlang/== 1 (erlang/map_size reps)) (maps/remove :"$bl/key-reps" d)
+          :else (maps/put :"$bl/key-reps" (maps/remove hk reps) d)))
+      :else d)))
+
+(defn- map-size [m]
+  (cond (erlang/is_map_key :"$bl/key-reps" m) (erlang/- (erlang/map_size m) 1)
+        :else (erlang/map_size m)))
+
+(defn- map-pairs
+  "A plain map's `{key, value}` pairs, each key its stored representative."
+  [m]
+  (cond
+    (erlang/is_map_key :"$bl/key-reps" m)
+    (let [reps (erlang/map_get :"$bl/key-reps" m)]
+      (lists/map (fn [p] (let [k (erlang/element 1 p)]
+                           (cond (erlang/is_map_key k reps) (tuple2 (erlang/map_get k reps) (erlang/element 2 p))
+                                 :else p)))
+                 (maps/to_list (maps/remove :"$bl/key-reps" m))))
+    :else (maps/to_list m)))
+
+(defn- map-stored-key
+  "The key `m` stores for canonical key `hk`."
+  [m hk]
+  (cond
+    (erlang/is_map_key :"$bl/key-reps" m) (maps/get hk (erlang/map_get :"$bl/key-reps" m) hk)
+    :else hk))
+
+;; the exported key boundary, for host modules and compiled literals
+(defn key_put [m k v] (key-put m k v))
+(defn key_del [m k] (key-del m k))
+(defn key_pairs [m] (map-pairs m))
+
+(defn map_lit
+  "A map literal whose keys are not all keywords, strings or integers:
+   `kvs` is the flat key/value list, in source order."
+  [kvs]
+  (loop [m (maps/new) xs kvs]
+    (cond
+      (erlang/== xs ()) m
+      :else (recur (key-put m (erlang/hd xs) (erlang/hd (erlang/tl xs))) (erlang/tl (erlang/tl xs))))))
 
 ;; ════ rt.number ════════════════════════════════════════════════════════════════
 ; rt/number.bl — the ONE exact rational projection for finite numbers.
@@ -2231,6 +2390,17 @@
    cannot tell a call from a docstring)."
   (hash-hash-key k))
 
+(defn- sorted-add
+  "Add `v` to a sorted set: ordered by its canonical key, stored as written."
+  [s v]
+  (let [hk (hash-hash-key v)] (BeamLisp.Sorted/set_add_key s hk (key-stored v hk))))
+
+(defn- sorted-put
+  "Put `k` into a sorted map: ordered by its canonical key, stored as written
+   when new; an existing key keeps its stored form."
+  [m k v]
+  (let [hk (hash-hash-key k)] (BeamLisp.Sorted/map_put_key m hk (key-stored k hk) v)))
+
 ;; ── GET ────────────────────────────────────────────────────────────────────
 
 (defn coll-get
@@ -2256,13 +2426,9 @@
            (cond (erlang/=:= hk key) (maps/get hk m default)
                  :else (maps/get hk m (maps/get key m default))))
        (erlang/== kd :nil) default
-       (erlang/== kd :set)
-         (let [hk (coll-hash-key key)]
-           (cond (BeamLisp.Set/member? m hk) hk :else default))
+       (erlang/== kd :set) (BeamLisp.Set/get m key default)
        (erlang/== kd :sorted-map) (BeamLisp.Sorted/map_get m (coll-hash-key key) default)
-       (erlang/== kd :sorted-set)
-         (let [hk (coll-hash-key key)]
-           (cond (BeamLisp.Sorted/set_member? m hk) hk :else default))
+       (erlang/== kd :sorted-set) (BeamLisp.Sorted/set_get m (coll-hash-key key) default)
        (erlang/== kd :transient)
          (cond (erlang/== :map (erlang/element 2 m)) (BeamLisp.Transient/get m key default)
                :else default)
@@ -2313,11 +2479,11 @@
        (erlang/== kd :vector) (BeamLisp.Vector/conj x v)
        (erlang/== kd :lazy) (raw-cons v x)
        (erlang/== kd :set) (BeamLisp.Set/add x v)
-       (erlang/== kd :sorted-set) (BeamLisp.Sorted/set_add x (coll-hash-key v))
+       (erlang/== kd :sorted-set) (sorted-add x v)
        (erlang/== kd :sorted-map)
          (let [kv (entry-kv v)]
            (cond (erlang/=/= kv nil)
-                   (BeamLisp.Sorted/map_put x (coll-hash-key (erlang/element 1 kv)) (erlang/element 2 kv))
+                   (sorted-put x (erlang/element 1 kv) (erlang/element 2 kv))
                  :else (raise-argument (erlang/iolist_to_binary
                                          `("conj on a sorted map expects a [k v] entry, got: " ~(Elixir.Kernel/inspect v))))))
        (erlang/== kd :ref-cell)
@@ -2326,9 +2492,9 @@
        (erlang/== kd :map)
          (cond
            (and (erlang/is_tuple v) (erlang/== 2 (erlang/tuple_size v)))
-             (maps/put (coll-hash-key (erlang/element 1 v)) (erlang/element 2 v) x)
+             (key-put x (erlang/element 1 v) (erlang/element 2 v))
            (erlang/=/= nil (entry-kv v))
-             (let [kv (entry-kv v)] (maps/put (coll-hash-key (erlang/element 1 kv)) (erlang/element 2 kv) x))
+             (let [kv (entry-kv v)] (key-put x (erlang/element 1 kv) (erlang/element 2 kv)))
            (erlang/is_list v) (bad-map-entry v (erlang/length v))
            (struct-of? v :"Elixir.BeamLisp.Vector") (bad-map-entry v (BeamLisp.Vector/count v))
            ; a scalar is not an entry of any length: RT had no clause for it
@@ -2379,7 +2545,7 @@
     (cond
       (erlang/== kd :vector) (BeamLisp.Vector/assoc coll key val)
       (erlang/== kd :set) (raise-argument "assoc not supported on a set")
-      (erlang/== kd :sorted-map) (BeamLisp.Sorted/map_put coll (coll-hash-key key) val)
+      (erlang/== kd :sorted-map) (sorted-put coll key val)
       (erlang/== kd :sorted-set) (raise-argument "assoc not supported on a sorted set")
       (erlang/== kd :ref-cell)
         (raise-argument (erlang/iolist_to_binary
@@ -2388,8 +2554,8 @@
         (cond (erlang/== key :__struct__)
                 (raise-argument "assoc on the internal :__struct__ key is not allowed on a record")
               :else (maps/put key val coll))
-      (erlang/== kd :map) (maps/put (coll-hash-key key) val coll)
-      (erlang/== kd :nil) (maps/put (coll-hash-key key) val (maps/new))
+      (erlang/== kd :map) (key-put coll key val)
+      (erlang/== kd :nil) (key-put (maps/new) key val)
       (and (erlang/is_map coll) (erlang/is_atom (maps/get :__struct__ coll nil)))
         (cond (erlang/== key :__struct__) (maps/put key val coll)
               :else (raise-argument "assoc not supported on a struct"))
@@ -2435,17 +2601,16 @@
     (cond
       (erlang/== kd :ref-cell) (no-clause "find" 2 m)
       (erlang/== kd :sorted-map)
-      (let [hk (coll-hash-key key)]
-        (cond (BeamLisp.Sorted/map_has_key? m hk)
-              (coll-entry hk (BeamLisp.Sorted/map_get m hk nil))
-              :else nil))
+      (let [e (BeamLisp.Sorted/map_entry m (coll-hash-key key))]
+        (cond (erlang/== nil e) nil
+              :else (coll-entry (erlang/element 1 e) (erlang/element 2 e))))
       (erlang/== kd :record)
       (cond (erlang/== key :__struct__) nil
             (erlang/is_map_key key m) (coll-entry key (maps/get key m))
             :else nil)
       (erlang/== kd :map)
       (let [hk (coll-hash-key key)]
-        (cond (erlang/is_map_key hk m) (coll-entry hk (maps/get hk m))
+        (cond (erlang/is_map_key hk m) (coll-entry (map-stored-key m hk) (maps/get hk m))
               (erlang/=:= hk key) nil
               (erlang/is_map_key key m) (coll-entry key (maps/get key m))
               :else nil))
@@ -2692,8 +2857,6 @@
     (raw-cons (entry-key (erlang/hd pairs)) (entry-keys (erlang/tl pairs)))
     :else (key-refuse pairs :improper-entries)))
 
-(defn- map-pairs [m]
-  (erlang/apply :maps :to_list (raw-cons m (empty-list))))
 
 ; Every map key except `__struct__` — the declared fields AND anything assoc'd
 ; onto the record. `Record.fields_of` would list only the declared fields and
@@ -3794,7 +3957,7 @@
              "{" (print-record-fields x) "}"))
 
       (erlang/== kd :map)
-      (cat "{" (print-pairs (maps/to_list x)) "}")
+      (cat "{" (print-pairs (map-pairs x)) "}")
 
       ;; A tuple, a foreign struct, a pid, a port, a plain fn — opaque. Hand it
       ;; to `inspect` rather than ENUMERATE it: asking the map path to walk a
@@ -4296,6 +4459,19 @@
   "Iterate a plain map directly. Entries are the same `[k v]` vectors the seq
    protocol yields (`rt.seq/entry`), so `k-reduce` and `k-seq` agree."
   [f acc m]
+  (cond
+    (erlang/is_map_key :"$bl/key-reps" m)
+    ; stored representatives: walk the pairs that carry them
+    (loop [ps (map-pairs m) acc acc]
+      (cond
+        (erlang/== ps ()) acc
+        :else
+        (let [p (erlang/hd ps)
+              acc2 (step f acc (seq-entry (erlang/element 1 p) (erlang/element 2 p)))]
+          (cond
+            (reduce-reduced? acc2) acc2
+            :else (recur (erlang/tl ps) acc2)))))
+    :else
   (loop [iter (erlang/apply :maps :iterator (reduce-one m)) acc acc]
     (let [nx (erlang/apply :maps :next (reduce-one iter))]
       (cond
@@ -4304,7 +4480,7 @@
         (let [acc2 (step f acc (seq-entry (erlang/element 1 nx) (erlang/element 2 nx)))]
           (cond
             (reduce-reduced? acc2) acc2
-            :else (recur (erlang/element 3 nx) acc2)))))))
+            :else (recur (erlang/element 3 nx) acc2))))))))
 
 (defn- reduce-seq [f acc coll]
   (loop [acc acc ys (k-seq coll)]
@@ -4593,7 +4769,7 @@
     (loop [s (BeamLisp.Sorted/set_new ()) ys xs]
       (cond
         (erlang/== ys ()) s
-        :else (recur (BeamLisp.Sorted/set_add s (hash-hash-key (erlang/hd ys))) (erlang/tl ys))))))
+        :else (recur (sorted-add s (erlang/hd ys)) (erlang/tl ys))))))
 
 (defn sorted-sorted-set-of
   "Build an ordered set from a collection's distinct elements.
@@ -4606,7 +4782,7 @@
     (loop [s (BeamLisp.Sorted/set_new ()) ys xs]
       (cond
         (erlang/== ys ()) s
-        :else (recur (BeamLisp.Sorted/set_add s (hash-hash-key (erlang/hd ys))) (erlang/tl ys))))))
+        :else (recur (sorted-add s (erlang/hd ys)) (erlang/tl ys))))))
 
 ;; ── map construction ───────────────────────────────────────────────────────
 
@@ -4623,7 +4799,7 @@
         (erlang/== (erlang/tl ps) ())
         (raise-argument (erlang/iolist_to_binary `("sorted-map: no value supplied for key " ~(Elixir.Kernel/inspect (erlang/hd ps)))))
         :else (let [k (erlang/hd ps) v (erlang/hd (erlang/tl ps))]
-                (recur (BeamLisp.Sorted/map_put m (hash-hash-key k) v) (erlang/tl (erlang/tl ps))))))))
+                (recur (sorted-put m k v) (erlang/tl (erlang/tl ps))))))))
 
 (defn sorted-sorted-map-of
   "RT's `sorted_map_of/1`: an ordered map from a collection of `[k v]` entries,
@@ -4634,10 +4810,10 @@
       (cond
         (and (struct-of? e :"Elixir.BeamLisp.Vector")
              (erlang/== 2 (BeamLisp.Vector/count e)))
-          (BeamLisp.Sorted/map_put m (hash-hash-key (BeamLisp.Vector/nth e 0)) (BeamLisp.Vector/nth e 1))
+          (sorted-put m (BeamLisp.Vector/nth e 0) (BeamLisp.Vector/nth e 1))
         (and (erlang/is_list e) (erlang/=/= e ()) (erlang/is_list (erlang/tl e))
              (erlang/=/= (erlang/tl e) ()) (erlang/== (erlang/tl (erlang/tl e)) ()))
-          (BeamLisp.Sorted/map_put m (hash-hash-key (erlang/hd e)) (erlang/hd (erlang/tl e)))
+          (sorted-put m (erlang/hd e) (erlang/hd (erlang/tl e)))
         :else
           (raise-argument (erlang/iolist_to_binary
                             `("sorted-map-of: not a [k v] entry: " ~(Elixir.Kernel/inspect e))))))

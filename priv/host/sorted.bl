@@ -242,15 +242,38 @@
 
 ; ── sorted map ops ───────────────────────────────────────────────────────
 
+(defn map_put_key
+  "Map with `v` at the key whose canonical form is `hk`. A new key is stored
+   as `k`, its representative; an existing key keeps the form it was first
+   put in and only its value changes (Clojure's rule). `lookup` then
+   `update`/`insert` is the walk `gb_trees:enter` makes itself."
+  [m hk k v]
+  (if (sorted-map? m)
+    (let [ek (encode_key hk)
+          t (erlang/map_get :tree m)
+          r (erlang/apply :gb_trees :lookup (list ek t))]
+      (maps/put :tree
+        (if (erlang/== :none r)
+          (erlang/apply :gb_trees :insert (list ek (tuple k v) t))
+          (erlang/apply :gb_trees :update (list ek (tuple (erlang/element 1 (erlang/element 2 r)) v) t)))
+        m))
+    (function-clause! :map_put_key 4)))
+
 (defn map_put
-  "Map with `k` associated to `v` (replaces an equal key)."
+  "Map with `k` associated to `v`; an equal key already present keeps its
+   stored form. `k` is the canonical key (rt.bl passes one)."
   [m k v]
   (if (sorted-map? m)
-    (maps/put :tree
-      (erlang/apply :gb_trees :enter
-        (list (encode_key k) (tuple k v) (erlang/map_get :tree m)))
-      m)
+    (map_put_key m k k v)
     (function-clause! :map_put 3)))
+
+(defn map_entry
+  "The stored `{key, value}` for canonical key `hk`, or nil."
+  [m hk]
+  (if (sorted-map? m)
+    (let [r (erlang/apply :gb_trees :lookup (list (encode_key hk) (erlang/map_get :tree m)))]
+      (if (erlang/== :none r) nil (erlang/element 2 r)))
+    (function-clause! :map_entry 2)))
 
 (defn map_get
   "Value for `k`, or `default` when absent."
@@ -313,15 +336,32 @@
 
 ; ── sorted set ops ───────────────────────────────────────────────────────
 
+(defn set_add_key
+  "Set with the member whose canonical form is `hk` added, stored as `x`; an
+   equal member already present is kept as it was first added."
+  [s hk x]
+  (if (sorted-set? s)
+    (let [ek (encode_key hk)
+          t (erlang/map_get :tree s)]
+      (if (erlang/apply :gb_trees :is_defined (list ek t))
+        s
+        (maps/put :tree (erlang/apply :gb_trees :insert (list ek (tuple x nil) t)) s)))
+    (function-clause! :set_add_key 3)))
+
 (defn set_add
-  "Set with `x` added (idempotent)."
+  "Set with `x` added (idempotent); `x` is the canonical key."
   [s x]
   (if (sorted-set? s)
-    (maps/put :tree
-      (erlang/apply :gb_trees :enter
-        (list (encode_key x) (tuple x nil) (erlang/map_get :tree s)))
-      s)
+    (set_add_key s x x)
     (function-clause! :set_add 2)))
+
+(defn set_get
+  "The stored member for canonical key `hk`, or `default`."
+  [s hk default]
+  (if (sorted-set? s)
+    (let [r (erlang/apply :gb_trees :lookup (list (encode_key hk) (erlang/map_get :tree s)))]
+      (if (erlang/== :none r) default (erlang/element 1 (erlang/element 2 r))))
+    (function-clause! :set_get 3)))
 
 (defn set_del
   "Set with `x` removed (idempotent)."

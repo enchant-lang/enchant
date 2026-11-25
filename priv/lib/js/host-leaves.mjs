@@ -500,11 +500,14 @@ export { reOpts, badarg, badarith, exactInteger, beamOnly };
 export class Sorted {
   constructor(kind, es, meta) { this.kind = kind; this.es = es; this.meta = meta ?? null; this.blStruct = kw(kind === "map" ? "Elixir.BeamLisp.Sorted.SortedMap" : "Elixir.BeamLisp.Sorted.SortedSet"); }
   find(k) { let lo = 0, hi = this.es.length; while (lo < hi) { const mid = (lo + hi) >> 1; const c = R.compare(this.es[mid][0], k); if (c === 0) return mid; if (c < 0) lo = mid + 1; else hi = mid; } return -(lo + 1); }
-  put(k, v) { const i = this.find(k); const es = this.es.slice(); if (i >= 0) es[i] = [k, v]; else es.splice(-(i + 1), 0, [k, v]); return new Sorted(this.kind, es, this.meta); }
+  /** an equal key already present keeps its stored form (Clojure's rule,
+      host/sorted.bl map_put_key); only the value changes */
+  put(k, v) { const i = this.find(k); const es = this.es.slice(); if (i >= 0) es[i] = [this.es[i][0], v]; else es.splice(-(i + 1), 0, [k, v]); return new Sorted(this.kind, es, this.meta); }
+  add(x) { return this.find(x) >= 0 ? this : this.put(x, x); }
   del(k) { const i = this.find(k); if (i < 0) return this; const es = this.es.slice(); es.splice(i, 1); return new Sorted(this.kind, es, this.meta); }
 }
 const SM = (es) => { let s = new Sorted("map", []); for (const e of es) s = s.put(e[0], e[1]); return s; };
-const SS = (xs) => { let s = new Sorted("set", []); for (const x of xs) s = s.put(x, x); return s; };
+const SS = (xs) => { let s = new Sorted("set", []); for (const x of xs) s = s.add(x); return s; };
 const pairOf = (t) => (t instanceof Tup ? [t.items[0], t.items[1]] : t instanceof Vec ? [t.nth(0), t.nth(1)] : badarg("sorted entry " + R.printStr(t)));
 
 class Transient { constructor(v) { this.v = v; this.blStruct = kw("Elixir.BeamLisp.Transient"); } }
@@ -520,10 +523,15 @@ export const COLLECTIONS = {
   "Elixir.BeamLisp.Set/del/2": (s, x) => s.disj(x),
   "Elixir.BeamLisp.Set/member?/2": (s, x) => s.has(x),
   "Elixir.BeamLisp.Set/count/1": (s) => s.cnt,
+  "Elixir.BeamLisp.Set/get/3": (s, x, d) => s.get(x, d),
+  // no exact (unkeyed) set on JS: the compiler only reaches this on the BEAM
+  "Elixir.BeamLisp.Set/new_exact/1": (l) => { let s = R.EMPTY_SET; for (const x of A.toArray(l)) s = s.conj(x); return s; },
 
   "Elixir.BeamLisp.Sorted/map_new/0": () => new Sorted("map", []),
   "Elixir.BeamLisp.Sorted/map_new/1": (l) => SM(A.toArray(l).map(pairOf)),
   "Elixir.BeamLisp.Sorted/map_put/3": (m, k, v) => m.put(k, v),
+  "Elixir.BeamLisp.Sorted/map_put_key/4": (m, hk, k, v) => m.put(k, v),
+  "Elixir.BeamLisp.Sorted/map_entry/2": (m, k) => { const i = m.find(k); return i >= 0 ? T(...m.es[i]) : null; },
   "Elixir.BeamLisp.Sorted/map_get/3": (m, k, d) => { const i = m.find(k); return i >= 0 ? m.es[i][1] : d; },
   "Elixir.BeamLisp.Sorted/map_has_key?/2": (m, k) => m.find(k) >= 0,
   "Elixir.BeamLisp.Sorted/map_delete/2": (m, k) => m.del(k),
@@ -531,7 +539,9 @@ export const COLLECTIONS = {
   "Elixir.BeamLisp.Sorted/map_to_list/1": (m) => L(m.es.map(([k, v]) => T(k, v))),
   "Elixir.BeamLisp.Sorted/set_new/0": () => new Sorted("set", []),
   "Elixir.BeamLisp.Sorted/set_new/1": (l) => SS(A.toArray(l)),
-  "Elixir.BeamLisp.Sorted/set_add/2": (s, x) => s.put(x, x),
+  "Elixir.BeamLisp.Sorted/set_add/2": (s, x) => s.add(x),
+  "Elixir.BeamLisp.Sorted/set_add_key/3": (s, hk, x) => s.add(x),
+  "Elixir.BeamLisp.Sorted/set_get/3": (s, x, d) => { const i = s.find(x); return i >= 0 ? s.es[i][0] : d; },
   "Elixir.BeamLisp.Sorted/set_del/2": (s, x) => s.del(x),
   "Elixir.BeamLisp.Sorted/set_member?/2": (s, x) => s.find(x) >= 0,
   "Elixir.BeamLisp.Sorted/set_count/1": (s) => s.es.length,

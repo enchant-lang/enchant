@@ -288,6 +288,21 @@ function nodeGet(node, shift, hash, key) {
     return keyEq(k, key) ? node.arr[i + 1] : NOT_FOUND;
   }
 }
+function nodeGetKey(node, shift, hash, key) {
+  for (;;) {
+    if (node instanceof CNode) {
+      const a = node.arr;
+      for (let i = 0; i < a.length; i += 2) if (keyEq(a[i], key)) return a[i];
+      return NOT_FOUND;
+    }
+    const bit = bitpos(hash, shift);
+    if ((node.bitmap & bit) === 0) return NOT_FOUND;
+    const i = 2 * bidx(node.bitmap, bit);
+    const k = node.arr[i];
+    if (k === NODE_MARK) { node = node.arr[i + 1]; shift += 5; continue; }
+    return keyEq(k, key) ? k : NOT_FOUND;
+  }
+}
 // returns [newNode, added?]
 function nodeAssoc(node, shift, hash, key, val) {
   if (node instanceof CNode) {
@@ -376,8 +391,13 @@ export class HMap {
   constructor(cnt, root, meta) { this.cnt = cnt; this.root = root; this.meta = meta || null; this._h = undefined; }
   get(k, dflt) { k = canonKey(k); const v = nodeGet(this.root, 0, hashOf(k), k); return v === NOT_FOUND ? dflt : v; }
   has(k) { k = canonKey(k); return nodeGet(this.root, 0, hashOf(k), k) !== NOT_FOUND; }
+  /** the STORED key equal to `k`, or `dflt` */
+  storedKey(k, dflt) { k = canonKey(k); const s = nodeGetKey(this.root, 0, hashOf(k), k); return s === NOT_FOUND ? dflt : s; }
+  /** The key is stored AS GIVEN (keyEq/hashOf are value-equal, so lookup
+      does not need it canonical); an equal key already present keeps its
+      stored form and only the value changes — Clojure's rule, the BEAM's
+      "stored representatives" (rt.bl). */
   assoc(k, v) {
-    k = canonKey(k);
     const [r, added] = nodeAssoc(this.root, 0, hashOf(k), k, v);
     return r === this.root ? this : new HMap(added ? this.cnt + 1 : this.cnt, r, this.meta);
   }
@@ -441,6 +461,8 @@ export class HSet {
   constructor(m, meta) { this.m = m; this.meta = meta || null; this._h = undefined; }
   get cnt() { return this.m.cnt; }
   has(x) { return this.m.has(x); }
+  /** the STORED member equal to `x`, or `dflt`: `(get #{1.0} 1)` is 1.0 */
+  get(x, dflt) { return this.m.storedKey(x, dflt); }
   conj(x) { const m = this.m.assoc(x, true); return m === this.m ? this : new HSet(m, this.meta); }
   disj(x) { const m = this.m.dissoc(x); return m === this.m ? this : new HSet(m, this.meta); }
   *[Symbol.iterator]() { for (const [k] of this.m) yield k; }
