@@ -23,17 +23,25 @@
         handoff (tuple (tuple other :pending) {:kind :execution-handoff :source (tuple [] owner :ticket)})
         foreign (tuple :foreign-handoff {:kind :execution-handoff :source (tuple [] other :ticket)})
         malformed (tuple :malformed-handoff {:kind :execution-handoff :source :malformed})
-        expected (set [owned scalar overlap handoff foreign malformed])]
+        ;; Since U4b (9e13096c5) the selector returns the owner's own rows only;
+        ;; handoff offers are found by exact key (source_handoff_offers, covered by
+        ;; custody_exact_key_cleanup_test). Every handoff stays in the table.
+        handoffs (set [handoff foreign malformed])
+        expected (set [owned scalar overlap])]
     (Process/put :selection-table table)
     (try
-      (doseq [row expected] (ets/insert table row))
+      (doseq [row (concat expected handoffs)] (ets/insert table row))
       (ets/insert table (tuple (tuple other :callback) {:kind :callback :context :foreign}))
       (ets/insert table (tuple (tuple owner :not :a-two-tuple) {:kind :callback}))
       (doseq [i (range 2048)]
         (ets/insert table (tuple (tuple :sdk_inventory_row i) {:sha256 "digest" :data (list i i i)})))
       (is (= expected (set (select-rows owner))))
       (is (= (count expected) (count (select-rows owner))) "overlap is selected exactly once")
+      (is (empty? (filter (fn [row] (contains? handoffs row)) (select-rows owner)))
+          "a handoff, even one naming the owner as its source, is not an owned row")
       (is (= 2056 (ets/info table :size)) "selection leaves inert metadata and other owners untouched")
+      (doseq [row handoffs]
+        (is (= (list row) (ets/lookup table (elem row 0))) "every handoff is preserved"))
       (ets/delete table (elem owned 0))
       (is (= (disj expected owned) (set (select-rows owner))) "each owner turn observes current rows")
       (finally (Process/delete :selection-table) (ets/delete table)))))

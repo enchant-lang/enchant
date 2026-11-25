@@ -11,7 +11,12 @@ let
     if condition then value else throw "Beam Lisp retained SDK: ${message}";
   passive = path: builtins.unsafeDiscardStringContext (builtins.readFile path);
   metadata = builtins.fromJSON (passive (alias + "/artifact.json"));
-  launcher = passive (alias + "/bin/bl");
+  # Since 8dee94f3b `bin/bl` hands the selection to the shared drop launcher
+  # and `bin/bl-cold` carries the product exports; older selections have only
+  # `bin/bl` with the exports.
+  split = builtins.pathExists (alias + "/bin/bl-cold");
+  launcher = passive (alias + (if split then "/bin/bl-cold" else "/bin/bl"));
+  entry = passive (alias + "/bin/bl");
   rustFiles = root: directory:
     let entries = builtins.readDir (root + "/${directory}"); in
     builtins.concatLists (map (name:
@@ -35,7 +40,8 @@ require (builtins.hashFile "sha256" (alias + "/artifact.json") == descriptorSha2
 require (metadata.version == 1 && metadata.kind == "sdk" && metadata.target == "x86_64-linux")
   "expected a qualified x86_64-linux SDK selection" (
 require (builtins.match "/nix/store/[0-9a-z]{32}-beam-lisp-sdk-selection" sdkReference != null
-  && builtins.match ".*\nexport BL_SDK_PRODUCT=\"${sdkReference}\"\n.*" launcher != null)
+  && builtins.match ".*\nexport BL_SDK_PRODUCT=\"${sdkReference}\"\n.*" launcher != null
+  && (!split || builtins.match ".*--sdk-selection \"${sdkReference}\" .*" entry != null))
   "retained SDK reference does not match the qualified launcher" (
 require (metadata.source == sdkRoot) "SDK Source does not match the qualified selection" (
 require (names == fileNames sdkCrate && matchingFiles)

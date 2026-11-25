@@ -106,18 +106,21 @@
                   :usable usable :invariant invariant :original-loader-unchanged true))
    (if (not= mode "without-redirect")
     (do (assert invariant)
+        ;; the redirect itself never reaches the server's build route
+        (assert (not (some #(= [:Elixir.BeamLisp.Loader :ensure_build_aot] %) (:routes result))))
         (println (if (= mode "original") "SDK_LOADING_CONTEXT_ORIGINAL_READY"
                      "SDK_LOADING_CONTEXT_COPIED_ORIGINAL_READY")))
-    ;; A surviving mutation is a failure of this causal control. Never convert
-    ;; it into a historical closure merely because the fixture ran successfully.
+    ;; Until 61501db8e the managed Loader mailbox could not carry the caller's
+    ;; native admission, so the server route refused this load
+    ;; (:incomplete_generation_execution_lease) and the redirect was the only
+    ;; correct route. The mailbox now mints an actual handoff, so the mutation
+    ;; must still be shown to take effect (the load leaves the redirect for the
+    ;; Loader.Server/AOT route) and that route must keep the same invariant.
     (do
-     (assert (= :incomplete_generation_execution_lease (get-in result [:outcome :error])))
-     (assert (:caller-restored result))
-     (assert retired?)
-     (assert (= false loaded))
-     (assert (= 0 count))
-     (assert (= false invariant))
-     (println "SDK_LOADING_CONTEXT_REDIRECT_CONTROL_CAUGHT"))))
+     (assert (some #(= [:Elixir.BeamLisp.Loader :ensure_build_aot] %) (:routes result)))
+     (assert (some #(= [:Elixir.BeamLisp.AOT :ensure_loaded] %) (:routes result)))
+     (assert invariant)
+     (println "SDK_LOADING_CONTEXT_REDIRECT_CONTROL_SERVER_ROUTE_READY"))))
   (finally
    (g/retire! graph)
    (when (not= "original" mode) (code/purge PROBE) (code/delete PROBE))

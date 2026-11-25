@@ -10,13 +10,29 @@
 ; properties of the running image and a client must neither remove nor relabel
 ; them, so the daemon leaves the VM's own values in place.
 
-(ns warm-request-env-test)
+;
+; The variables belong to the VM, not to every `bl` process: `bin/bl` (the
+; checkout launcher) exports them when it boots the VM, and a VM started from
+; an SDK drop (CI's `bl test`) has neither. So the property is read against the
+; VM's own OS table (`os:getenv`, which the request overlay does not touch):
+; whatever engine variable the VM was booted with, the command sees, unchanged.
+
+(ns warm-request-env-test
+  (:require [vm.osenv]))
+
+(defn- vm-own [name]
+  (let [v (os/getenv (String/to_charlist name))]
+    (when (not= v false) (List/to_string v))))
 
 (deftest the-warm-request-sees-the-vms-engine-environment
-  (let [ebin (System/get_env "BL_EBIN")]
-    (is (some? ebin)
-        "the selected image's ebin is visible to the command")
+  (doseq [name ["BL_ROOT" "BL_EBIN"]]
+    (is (not (and (some? (vm-own name)) (contains? (vm.osenv/overlay) name)))
+        (str "the request overlay neither removes nor relabels the VM's " name))
+    (when-let [own (vm-own name)]
+      (is (= own (System/get_env name))
+          (str "the VM's " name " is visible to the command, unrelabelled"))))
+  (when (vm-own "BL_EBIN")
+    (is (File/dir? (System/get_env "BL_EBIN"))
+        "and names a directory")
     (is (some? (System/get_env "BL_ROOT"))
-        "the selected image root is visible to the command")
-    (is (and (some? ebin) (File/dir? ebin))
-        "and names a directory")))
+        "a VM booted with an image ebin also carries its root")))
