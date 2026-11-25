@@ -6,7 +6,9 @@ import subprocess
 
 ROOTS = {'.gitignore', '.github', 'AGENTS.md', 'README.md', 'README.bl.org', 'bin', 'nix',
          'scripts', 'test', 'priv', 'native', 'tooling', 'vendor', 'packages', 'docs', 'research',
-         'examples', 'env.bl', 'bl.lock', 'flake.nix', 'flake.lock', 'rust-toolchain', 'rust-toolchain.toml'}
+         'examples', 'optional', 'env.bl', 'bl.lock', 'flake.nix', 'flake.lock', 'rust-toolchain', 'rust-toolchain.toml'}
+# `optional/` is read as source by checks (the advice and harness tests read
+# the browser port's real files); it holds no build products in Git.
 # Recorded research evidence: 2.2 GB in 22k files (2026-11-25), read by no
 # bounded check. Capturing it copied it into the store for every check run.
 # Keep in step with the excluded list in nix/ci-check.nix.

@@ -2,12 +2,14 @@
 
 Capture `proc` diagnostics at the boundary that runs work. Fence return values
 keep their existing shape. Tick diagnostics offer a bounded failure receipt.
+`:min-level :info` leaves out debug events, such as the loader's
+`:runtime.phase/completed` timings when a namespace loads inside the scope.
 
 ```beam-lisp
 (ns proc.diagnostics.walkthrough
   (:require [diagnostics :as diag] [proc.fence :as fence] [proc.tick :as tick]))
 (def events (atom []))
-(diag/with-options {:sink #(swap! events conj %)}
+(diag/with-options {:sink #(swap! events conj %) :min-level :info}
   (fence/fence 500 (+ 20 22)))
 ```
 
@@ -16,7 +18,7 @@ keep their existing shape. Tick diagnostics offer a bounded failure receipt.
 ```
 
 ```beam-lisp
-(diag/with-options {:sink #(swap! events conj %)}
+(diag/with-options {:sink #(swap! events conj %) :min-level :info}
   (tick/tick-failed! :demo (ex-info "private transport details" {:kind :transport})))
 (tick/tick-last-failure :demo)
 ```
