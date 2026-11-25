@@ -16,21 +16,48 @@
 
 (defn- hex [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
 
-(defn- code-digest
-  "`unit-store/floor-code-digest`: a floor BEAM's digest without its
-   `bl_source_hash` value, the per-member input of the library-runtime key."
-  [bytes]
+(defn- digest-without
+  "A BEAM's digest with the named attributes' values removed from `Attr`."
+  [bytes names]
   (let [chunks (beam_lib/all_chunks bytes) attr (erlang/binary_to_list "Attr")]
     (hex (erlang/term_to_binary
            (mapv (fn [chunk]
                    (let [id (elem chunk 0) data (elem chunk 1)]
                      (if (= id attr)
                        [id (to-list (remove #(and (erlang/is_tuple %) (= 2 (erlang/tuple_size %))
-                                                  (= :bl_source_hash (elem % 0)))
+                                                  (contains? names (elem % 0)))
                                             (erlang/binary_to_term data)))]
                        [id data])))
                  (elem chunks 2))
            (list :deterministic)))))
+
+;; `unit-store/floor-code-digest`: the per-member input of the library-runtime key.
+(defn- code-digest [bytes] (digest-without bytes #{:bl_source_hash}))
+
+(defn- source-label
+  "The `-bl_source_hash` a beam carries, read without loading it."
+  [bytes]
+  (let [attrs (Keyword/get (elem (elem (beam_lib/chunks bytes (list :attributes)) 1) 1) :attributes)
+        value (Keyword/get attrs :bl_source_hash)]
+    (if (erlang/is_list value) (erlang/hd value) value)))
+
+(defn- relabel
+  "The base beam carrying `source-hash` as its `-bl_source_hash`, when the
+   fresh compile differs from it only in labels: the source hash and the
+   compiler-owned `bl_execution_clauses` ANF identities. Those identities hash
+   the pre-codegen ANF, whose generated names depend on what the compiling VM
+   did before (a producer generation starts from a fresh floor), while the
+   emitted code and every other chunk are the same. The release producer
+   turns such an edit (a comment) into exactly this beam: the base with a new
+   label (2026-11-24 delay.bl-comment SDK). nil when anything else differs."
+  [fresh base source-hash]
+  (let [labels #{:bl_source_hash :bl_execution_clauses}
+        old (source-label base)]
+    (when (and (erlang/is_binary old) (= 64 (erlang/byte_size old))
+               (= (digest-without fresh labels) (digest-without base labels))
+               (= 1 (count (binary/matches base old))))
+      (let [patched (binary/replace base old source-hash)]
+        (when (= source-hash (source-label patched)) patched)))))
 
 (defn- host-opts [entry out leaf source-hash]
   ;; seed/host-opts, with the floor's root-relative source label.
@@ -45,6 +72,7 @@
 (let [request (Jason/decode! (File/read! (System/fetch_env! "DEV_SDK_REQUEST")))
       host-dir (get request "host-dir") out (get request "out")
       seed-dir (get request "seed") stage (get request "stage")
+      base-host (get request "base-host")
       leaves (set (get request "leaves"))
       table (filter (fn [entry] (contains? leaves (Path/basename (:source entry))))
                     (seed/host-sources host-dir))
@@ -60,9 +88,36 @@
                     name (str (Atom/to_string (:module entry)) ".beam")
                     t0 (erlang/monotonic_time :millisecond)
                     _ (BeamLisp.AOT/compile_host_file (:source entry) (host-opts entry out leaf (hex bytes)))
-                    beam (File/read! (Path/join out name))
-                    old (File/read! (Path/join seed-dir name))]
+                    fresh (File/read! (Path/join out name))
+                    old (File/read! (Path/join seed-dir name))
+                    direct (relabel fresh old (hex bytes))
+                    ;; A unit whose compile depends on the compiling VM (Env,
+                    ;; PackageAuthority: their code differs from the store's
+                    ;; even for unchanged Source) is judged against the base
+                    ;; Source compiled HERE: equal code means a label-only edit,
+                    ;; and the store turns that into the base beam relabelled.
+                    reference (when (nil? direct)
+                                (let [dir (Path/join out "base-source")
+                                      base-source (Path/join base-host leaf)
+                                      _ (File/mkdir_p! dir)
+                                      _ (BeamLisp.AOT/compile_host_file base-source
+                                          (host-opts entry dir leaf (hex (File/read! base-source))))]
+                                  (File/read! (Path/join dir name))))
+                    labels #{:bl_source_hash :bl_execution_clauses}
+                    label-only (and reference (= (digest-without fresh labels) (digest-without reference labels)))
+                    relabelled (or direct
+                                   (when label-only
+                                     (let [label (source-label old)]
+                                       (when (= 1 (count (binary/matches old label)))
+                                         (binary/replace old label (hex bytes))))))
+                    beam (or relabelled fresh)
+                    _ (File/write! (Path/join out name) beam)]
                 {"leaf" leaf "module" name "sha256" (hex beam) "base-sha256" (hex old)
+                 "fresh-identical" (= fresh old) "relabelled" (some? relabelled)
+                 ;; false: this unit's compile here differs from the store's
+                 ;; even for unchanged Source, so a code edit's beam is not
+                 ;; the one a release build makes (it runs the edited code).
+                 "reproducible" (or (some? direct) (some? (relabel reference old (source-label old))))
                  "identical" (= beam old) "code-identical" (= (code-digest beam) (code-digest old))
                  "milliseconds" (- (erlang/monotonic_time :millisecond) t0)}))
             table)

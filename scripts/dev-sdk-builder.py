@@ -5,7 +5,6 @@ replaces the files `delta/files/` names (paths relative to
 `lib/beam_lisp-0.1.0`), and writes the launch scripts and artifact.json for
 this product's own path.
 """
-import fcntl
 import json
 import os
 import shutil
@@ -26,17 +25,25 @@ for path in files.rglob("*"):
 info = json.loads((delta / "dev.json").read_text())
 
 
-FICLONE = 0x40049409
-
-
 def clone(source, target):
-    """Reflink `source` (one btrfs filesystem: no data is copied), else copy.
-    The image must hold real files: the runtime resolves every SDK path
+    """Share `source`'s extents (btrfs reflink through copy_file_range, which
+    works across the sandbox's bind mounts where FICLONE answers EXDEV), else
+    copy. The image must hold real files: the runtime resolves every SDK path
     physically and refuses one that escapes its root through a symlink."""
     with open(source, "rb") as src, open(target, "wb") as dst:
+        size, offset = os.fstat(src.fileno()).st_size, 0
         try:
-            fcntl.ioctl(dst.fileno(), FICLONE, src.fileno())
+            while offset < size:
+                count = os.copy_file_range(src.fileno(), dst.fileno(), size - offset, offset, offset)
+                if count == 0:
+                    break
+                offset += count
         except OSError:
+            offset = 0
+        if offset != size:
+            src.seek(0)
+            dst.seek(0)
+            dst.truncate()
             shutil.copyfileobj(src, dst, 1 << 20)
     shutil.copymode(source, target)
 

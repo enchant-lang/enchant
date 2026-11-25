@@ -100,6 +100,24 @@ def classify(root, changed):
     return sorted(hosts), refused
 
 
+def first_extent(path):
+    """The physical offset of a file's first extent (FIEMAP), or None."""
+    import fcntl
+    import struct
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        request = bytearray(struct.pack("=QQLLLL", 0, 0xFFFFFFFFFFFFFFFF, 1, 0, 1, 0) + bytes(56))
+        fcntl.ioctl(descriptor, 0xC020660B, request)
+        return struct.unpack_from("=Q", request, 40)[0] if struct.unpack_from("=L", request, 20)[0] else None
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
 def retained_source(root, base):
     """The captured engine source the base SDK was selected with."""
     for link in sorted((root / ".bl/sdks").glob("*/result-sdk")):
@@ -150,6 +168,7 @@ def main():
         (stage / "bootstrap/seed" / name).symlink_to(seed / name)
     request = out / "request.json"
     request.write_text(json.dumps({"host-dir": str(root / "priv/host"), "out": str(out / "beams"),
+                                   "base-host": os.path.realpath(base / "image/priv/host"),
                                    "seed": str(seed), "stage": str(stage), "leaves": hosts}))
     environment = dict(os.environ, DEV_SDK_REQUEST=str(request), XDG_CACHE_HOME=str(out / "cache"),
                        BL_DAEMON="off")
@@ -183,6 +202,10 @@ def main():
     (files / "ebin/.bl-host-stage").write_text(hashlib.sha256(manifest).hexdigest() + " " + stamp[1])
     shutil.copyfile(stage / "seed-metadata.term", files / "priv/seed-metadata.term")
     kept = all(unit["code-identical"] for unit in result["units"])
+    for unit in result["units"]:
+        if not unit["reproducible"]:
+            print(f"dev-sdk: note: {unit['module']} compiles differently here than in the release producer; "
+                  "its dev beam runs the edited code but is not byte-equal to a release build's", file=sys.stderr)
     info = {"hosts": hosts, "units": result["units"], "manifest-sha256": result["manifest-sha256"],
             "library": "restored: library-runtime key holds" if kept
             else "kept from base: an executed-code edit; the release path recompiles the library"}
@@ -192,8 +215,16 @@ def main():
     python = Path(os.path.realpath(shutil.which("python3"))).parents[1]
     product = run(["nix-build", str(ROOT / "scripts/dev-sdk.nix"), "--argstr", "base", str(base),
                    "--argstr", "delta", str(out / "delta"), "--argstr", "python", str(python),
+                   # On Work, in its sandbox: linking 585 MB of base image on the
+                   # Build host and copying it back costs ~20 s and the disk;
+                   # here copy_file_range shares the base's btrfs extents.
+                   "--max-jobs", "1", "--builders", "",
                    "--out-link", str(out / "result")], stderr=subprocess.DEVNULL if not os.environ.get("DEV_SDK_VERBOSE") else None)
     clock.phase("assemble")
+    # Disk: the product shares the base image's extents (btrfs reflinks).
+    probe = "image/priv/z3/bin/libz3.so"
+    shared = first_extent(Path(product) / probe)
+    shared = shared is not None and shared == first_extent(Path(os.path.realpath(base / probe)))
     selected = None
     if args.select:
         captured = json.loads(run(["nix-instantiate", "--eval", "--read-write-mode", "--json", str(ROOT / "scripts/dev-sdk.nix"),
@@ -222,11 +253,21 @@ def main():
         temporary.symlink_to(product)
         os.replace(temporary, current)
         selected = fingerprint
+        # One dev SDK per tree: retire the earlier ones (their GC roots).
+        for marker in (root / ".bl/sdks").glob("*/dev-sdk"):
+            older = marker.parent
+            if older == directory:
+                continue
+            for name in ("result-sdk", "source-engine", "selection.v1", "dev-sdk"):
+                if (older / name).is_symlink() or (older / name).exists():
+                    (older / name).unlink()
+            if not any(older.iterdir()):
+                older.rmdir()
         clock.phase("select")
     print(json.dumps({"product": product, "base": str(base), "hosts": hosts, "library": info["library"],
-                      "units": [{k: u[k] for k in ("module", "identical", "code-identical", "milliseconds")}
+                      "units": [{k: u[k] for k in ("module", "identical", "relabelled", "reproducible", "code-identical", "milliseconds")}
                                 for u in result["units"]],
-                      "selected": selected, "phases": clock.phases, "seconds": clock.total()}, sort_keys=True))
+                      "selected": selected, "shared-extents": shared, "phases": clock.phases, "seconds": clock.total()}, sort_keys=True))
 
 
 if __name__ == "__main__":
