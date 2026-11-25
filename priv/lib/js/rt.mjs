@@ -1055,6 +1055,7 @@ function escStr(s) {
   return '"' + s.replace(/[\\"\n\t\r]/g, c => c === "\n" ? "\\n" : c === "\t" ? "\\t" : c === "\r" ? "\\r" : "\\" + c) + '"';
 }
 /** `pr-str` — the readable printer. */
+const KEY_REPS = kw("$bl/key-reps");
 export function printStr(x) {
   if (x === null || x === undefined) return "nil";
   // a lazy or partly-lazy seq prints BOUNDED, as rt.bl's print-seq: at most 20
@@ -1077,7 +1078,13 @@ export function printStr(x) {
   if (x instanceof Vec) return "[" + x.toArray().map(printStr).join(" ") + "]";
   if (x === EMPTY) return "()";
   if (x instanceof Cons) { const a = []; for (let p = x; p instanceof Cons; p = p.t) a.push(printStr(p.h)); return "(" + a.join(" ") + ")"; }
-  if (x instanceof HMap) return "{" + x.entries().map(([k, v]) => printStr(k) + " " + printStr(v)).join(", ") + "}";
+  if (x instanceof HMap) {
+    // rt.bl's stored representatives: the hidden table is not an entry, and
+    // a key prints as it was written
+    const reps = x.get(KEY_REPS, null);
+    const es = reps instanceof HMap ? x.entries().filter(([k]) => !(k instanceof Kw && k.fq === "$bl/key-reps")).map(([k, v]) => [reps.get(k, k), v]) : x.entries();
+    return "{" + es.map(([k, v]) => printStr(k) + " " + printStr(v)).join(", ") + "}";
+  }
   if (x instanceof HSet) return "#{" + x.elements().sort(compare).map(printStr).join(" ") + "}";
   if (x instanceof Tup) return "{" + x.items.map(printStr).join(", ") + "}";
   if (x instanceof BLError) return "#error {:message " + escStr(x.message) + "}";
