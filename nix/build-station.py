@@ -163,7 +163,13 @@ def client(value, link, description=None):
     inputs += [store(value[k]) for k in ('source', 'sdk', 'previous', 'preparation') if value.get(k)]
     if 'request' in value:
         inputs.append(store(value['request']['source']))
-    command(['nix', 'copy', '--to', uri, *dict.fromkeys(inputs)])
+    # Work's inputs are unsigned (no secret-key-files) and input-addressed, and
+    # `nix copy` checks signatures on its own side unless told not to. The
+    # station's daemon trusts this transport's user, so it honours
+    # --no-check-sigs; an untrusted user is still refused there. Without it a
+    # copy works only while the station already holds the path, and the first
+    # preparation after a station GC fails ("lacks a signature by a trusted key").
+    command(['nix', 'copy', '--no-check-sigs', '--to', uri, *dict.fromkeys(inputs)])
     ticket = secrets.token_hex(32)
     body = command(argv, input=json.dumps(dict(version=1, action='build', operation=value, ticket=ticket)),
                    stdout=subprocess.PIPE, text=True).stdout
