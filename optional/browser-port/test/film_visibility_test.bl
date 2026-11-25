@@ -1,0 +1,37 @@
+(ns browser.film-visibility-test (:require [browser.page :as page] [browser.film :as film]))
+
+(deftest visible-only-references-follow-real-tab-visibility-without-reusing-old-frames
+ (let [root (str "/tmp/bl-film-visibility-" (erlang/unique_integer (list :positive)))
+       options {:width 800 :height 480
+                :launch {"chromium" (System/get_env "CHROMIUM") "compositor" (System/get_env "SWAY")
+                         "vnc" (System/get_env "WAYVNC") "width" 800 "height" 580}}
+       world (film/owned-worlds [[:reader options] [:observer options]] root
+              {:fps 10 :capture-hidden? false :compose-on-close? false :compose-on-dispose? false})
+       pages ((:open world) {}) p (get pages :reader)]
+  (try
+   (let [before ((:basis world) pages)
+         target (page/cdp! p "Target.createTarget" {"url" "about:blank" "background" false})]
+    (is (= "visible" (get-in before [:visibility :reader])))
+    (is (File/regular? (get-in before [:frames :reader])))
+    (page/cdp! p "Target.activateTarget" {"targetId" (get target "targetId")})
+    (page/wait! p "document.visibilityState==='hidden'")
+    (let [hidden ((:basis world) pages)]
+     (is (= "hidden" (get-in hidden [:visibility :reader])))
+     (is (nil? (get-in hidden [:frames :reader])))
+     (is (not (File/exists? (str root "/reader-reference-2.png"))))
+     (is (= "visible" (get-in hidden [:visibility :observer])))
+     (is (File/regular? (get-in hidden [:frames :observer])))
+     (is (> (get-in hidden [:video :at]) (get-in before [:video :at]))))
+    (page/cdp! p "Target.activateTarget" {"targetId" (:target p)})
+    (page/wait! p "document.visibilityState==='visible'")
+    (let [resumed ((:basis world) pages)]
+     (is (= "visible" (get-in resumed [:visibility :reader])))
+     (is (File/regular? (get-in resumed [:frames :reader])))
+     (is (not= (get-in before [:frames :reader]) (get-in resumed [:frames :reader]))))
+    (page/cdp! p "Target.closeTarget" {"targetId" (get target "targetId")}))
+   (finally ((:dispose! world)) (File/rm_rf! root)))))
+
+(deftest hidden-reference-option-rejects-non-booleans-before-opening-a-browser
+ (is (= "capture-hidden? must be an explicit boolean"
+       (try (film/owned-worlds [[:reader {:height 480}]] "/tmp/bl-invalid-visibility" {:capture-hidden? "skip"})
+        :unexpected (catch e (ex-message e))))))

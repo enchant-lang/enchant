@@ -79,11 +79,18 @@
    tracks/clocks. :compose-on-close? false also defers the normal full-width
    mosaic for consumers supplying their own final composition; raw tracks and
    clocks are complete, and the receipt explicitly reports a deferred source.
-   Both flags default true. All ports stay with the scenario owner."
+   Both flags default true. :capture-hidden? false omits reference PNGs for
+   documents actually reporting a non-visible state and records :visibility
+   per actor. Their frame is nil, never a substituted old screenshot. Native
+   streams keep recording; an inactive target may supply no new paint frames.
+   The default retains every-page reference capture. All ports stay owned."
   [actors directory opts]
   (when (and (contains? opts :compose-on-close?)
              (not (contains? #{true false} (:compose-on-close? opts))))
     (throw (ex-info "compose-on-close? must be an explicit boolean" {})))
+  (when (and (contains? opts :capture-hidden?)
+             (not (contains? #{true false} (:capture-hidden? opts))))
+    (throw (ex-info "capture-hidden? must be an explicit boolean" {})))
   (when (or (empty? actors) (not= (count actors) (count (set (map first actors))))
             (not (apply = (map #(get-in % [1 :height] 900) actors))))
     (throw (ex-info "Recorded actors require unique names and equal viewport heights" {})))
@@ -152,11 +159,17 @@
      :liveness (fn [_] nil)
      :basis (fn [_]
               (let [i (swap! index inc)
+                    visible-only? (= false (get opts :capture-hidden? true))
+                    visibility (when visible-only?
+                                 (into {} (map (fn [[actor _]]
+                                   [actor (page/evaluate! (get @owned actor) "document.visibilityState")]) actors)))
                     frames (into {} (map (fn [[actor _]]
-                             [actor (page/screenshot! (get @owned actor) (str root "/" (name actor) "-reference-" i ".png"))]) actors))
-                    basis {:frame (get frames @active) :frames frames
-                           :video {:source movie :at (/ (- (clock) @epoch) 1000.0)
-                                   :kind :native-screencast :actors (mapv first actors)}}]
+                             [actor (when (or (not visible-only?) (= "visible" (get visibility actor)))
+                                      (page/screenshot! (get @owned actor) (str root "/" (name actor) "-reference-" i ".png")))]) actors))
+                    basis (cond-> {:frame (get frames @active) :frames frames
+                                   :video {:source movie :at (/ (- (clock) @epoch) 1000.0)
+                                           :kind :native-screencast :actors (mapv first actors)}}
+                            visible-only? (assoc :visibility visibility))]
                 (reset! last-basis basis) basis))
      :close! (fn [_] (try (finish (get opts :compose-on-close? true)) @last-basis (finally (release))))
      :views-fn (fn [basis actor] (assoc basis :frame (get-in basis [:frames actor])))
