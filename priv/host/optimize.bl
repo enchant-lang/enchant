@@ -747,23 +747,30 @@
     (tuple result (elem xp 1))))
 
 (defn- ordered-apply
-  "Preserve canonical packed-cons order: head before tail.
-   Core apply may schedule complex arguments differently, so bind them in
-   that same order. Atomic arguments need no bindings. Observed names prevent
+  "Preserve canonical invoke order: the callee, then packed-cons order, head
+   before tail. Core apply may schedule complex arguments differently, so bind
+   them in that same order, after a callee that is itself an effectful
+   expression (`((do (mark :callee) f) a b)` marks :callee first). Atomic
+   arguments and a value callee need no bindings. Observed names prevent
    capture; argument positions themselves remain unchanged."
   [f args ann state]
   (if (lists/all (fn [n] (or (op? n :var) (op? n :lit))) args)
     (tuple (put (BeamLisp.Ns.Anf/app f args) :ann ann) state)
-    (loop [rest args vars (list) bindings (list) s state]
-      (if (erlang/== rest (list))
-        (let [body (put (BeamLisp.Ns.Anf/app f (lists/reverse vars)) :ann ann)
-              result (lists/foldl (fn [b inner]
-                                    (put (BeamLisp.Ns.Anf/lett (elem b 0) (elem b 1) inner) :ann ann))
-                                  body bindings)]
-          (tuple result s))
-        (let [p (argument-name s) name (elem p 0)]
-          (recur (erlang/tl rest) (cons (BeamLisp.Ns.Anf/var name) vars)
-                 (cons (tuple name (erlang/hd rest)) bindings) (elem p 1)))))))
+    (let [value? (or (op? f :var) (op? f :lit) (op? f :fn))
+          fp (if value? (tuple nil state) (argument-name state))
+          callee (if value? f (BeamLisp.Ns.Anf/var (elem fp 0)))
+          ;; `bindings` is newest-first; the fold makes its LAST entry outermost.
+          initial (if value? (list) (list (tuple (elem fp 0) f)))]
+      (loop [rest args vars (list) bindings initial s (elem fp 1)]
+        (if (erlang/== rest (list))
+          (let [body (put (BeamLisp.Ns.Anf/app callee (lists/reverse vars)) :ann ann)
+                result (lists/foldl (fn [b inner]
+                                      (put (BeamLisp.Ns.Anf/lett (elem b 0) (elem b 1) inner) :ann ann))
+                                    body bindings)]
+            (tuple result s))
+          (let [p (argument-name s) name (elem p 0)]
+            (recur (erlang/tl rest) (cons (BeamLisp.Ns.Anf/var name) vars)
+                   (cons (tuple name (erlang/hd rest)) bindings) (elem p 1))))))))
 
 ; —— evidence and traversal ————————————————————————————————————————————————
 
