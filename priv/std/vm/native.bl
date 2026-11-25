@@ -125,24 +125,38 @@
         (erlang/apply :erlang :list_to_binary (list d))
         nil))))
 
-(defn lib-path
-  "The extension-less path erlang/load_nif wants for `crate`. Searches every
-   loaded app's priv/native (consumers first), then the loader's own roots'
-   priv/native (a project's own crate), then beam_lisp's priv; falls back to
-   beam_lisp's priv so a load error names a sensible location."
+(defn- sdk-native-path
+  "`<sdk priv>/native/<crate>`, when the SDK itself ships that cdylib."
   [crate]
-  (let [apps (erlang/apply :lists :map
-               (list (fn [a] (elem a 0))
-                     (erlang/apply :application :loaded_applications (list))))
-        others (erlang/apply :lists :filter (list (fn [a] (not= a :beam_lisp)) apps))
-        found (or (some (fn [app]
-                          (let [dir (app-priv-dir app)]
-                            (if (nil? dir)
-                              nil
-                              (root-native-dir dir crate))))
-                        others)
-                  (some (fn [root] (root-native-dir root crate)) (ambient-roots)))]
-    (or found (str (BeamLisp.Tiers/priv_root) "/native/" crate))))
+  (let [p (str (BeamLisp.Tiers/priv_root) "/native/" crate)]
+    (if (File/exists? (str p ".so")) p nil)))
+
+(defn lib-path
+  "The extension-less path erlang/load_nif wants for `crate`. A crate the SDK
+   ships is always the SDK's own library. Otherwise searches every loaded app's
+   priv/native (consumers first), then the loader's own roots' priv/native (a
+   project's own crate), and falls back to beam_lisp's priv so a load error
+   names a sensible location."
+  [crate]
+  ;; The runtime admits an SDK native host only from the SDK's physical native
+  ;; directory (`AOT/sdk_native_library_identity!`). An ambient copy, such as
+  ;; the checkout platform's links in <checkout>/priv/native (same bytes,
+  ;; another store path), could only be refused: on CI, `bl --cold install
+  ;; embed` from the checkout root failed with
+  ;; :sdk_native_library_outside_selected_sdk.
+  (or (sdk-native-path crate)
+      (let [apps (erlang/apply :lists :map
+                   (list (fn [a] (elem a 0))
+                         (erlang/apply :application :loaded_applications (list))))
+            others (erlang/apply :lists :filter (list (fn [a] (not= a :beam_lisp)) apps))
+            found (or (some (fn [app]
+                              (let [dir (app-priv-dir app)]
+                                (if (nil? dir)
+                                  nil
+                                  (root-native-dir dir crate))))
+                            others)
+                      (some (fn [root] (root-native-dir root crate)) (ambient-roots)))]
+        (or found (str (BeamLisp.Tiers/priv_root) "/native/" crate)))))
 
 (defn artifact-name
   "THE name a crate's cdylib is installed under AND loaded under. Both the
