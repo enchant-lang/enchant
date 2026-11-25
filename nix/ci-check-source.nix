@@ -8,7 +8,7 @@ let
   roots = builtins.filter (name: builtins.pathExists (root + "/${name}")) [
     ".gitignore" ".github" "AGENTS.md" "README.md" "README.bl.org" "examples" "bin" "nix" "scripts"
     "test" "priv" "native" "tooling/drop" "tooling/build-backends" "packages/job-runner"
-    "docs" "research" "env.bl" "bl.lock" "flake.nix" "flake.lock"
+    "docs" "research" "optional/browser-port/bl" "optional/browser-port/test" "env.bl" "bl.lock" "flake.nix" "flake.lock"
     "rust-toolchain" "rust-toolchain.toml"
   ];
 in import ./project-source.nix {

@@ -2464,14 +2464,20 @@
                            (compile-body fin-items (notail env))))]
         (a/tryy body-node catch-clauses after-node)))))
 
-(defn datum
+(defn- datum-in
   "Turn a reader form into the plain DATA value it denotes.
 
    This is what `quote` hands back: the form as data, not as running code. A
    symbol stays a symbol node, a list becomes a list of data, a vector becomes
    a real beam-lisp vector, a keyword becomes its atom, and a plain literal is
-   itself. Source-location wrappers are peeled first."
-  [form]
+   itself. Source-location wrappers are peeled first.
+
+   `code?` says the datum is CODE handed to a macro, not a quoted value: a set
+   literal's members and a map literal's keys are then forms still to be
+   evaluated, so they stay exactly as written. Canonicalising them (Q3) would
+   rewrite the program: `(is #{(f 0.0) (f -0.0)})` would reach the macro as
+   `#{(f 0)}`. The evaluated literal is keyed when it is built."
+  [form code?]
   (case (rn/node-tag form)
       ; a metadata wrapper carries two kinds of key. POSITIONAL keys
       ; (:line/:col/:file) are the compiler's source channel and are dropped
@@ -2485,7 +2491,7 @@
       ; Only a vector or a symbol keeps author metadata, so the position keys
       ; are filtered only for those: a list wrapper, the common case, skips it.
       :meta
-        (let [base (datum (rn/node-form form))
+        (let [base (datum-in (rn/node-form form) code?)
               m (when (or (vector? base) (erlang/=:= :symbol (rn/node-tag base))) (rn/node-pos form))
               author (if (erlang/is_map m) (author-meta m) {})]
           (if (and (erlang/is_map author)
@@ -2499,13 +2505,16 @@
                 (Enum/map (maps/to_list author)
                   (fn [pair] (erlang/list_to_tuple
                                (list (erlang/element 1 pair)
-                                     (datum (erlang/element 2 pair))))))))
+                                     (datum-in (erlang/element 2 pair) code?)))))))
             base))
       :symbol form
       :keyword (erlang/binary_to_atom (rn/node-name form))
-      :list (Enum/map (rn/node-items form) (fn [value] (datum value)))
-      :vector (BeamLisp.Vector/new (Enum/map (rn/node-items form) (fn [value] (datum value))))
-      :set (BeamLisp.Set/new (Enum/map (rn/node-items form) (fn [value] (datum value))))
+      :list (Enum/map (rn/node-items form) (fn [value] (datum-in value code?)))
+      :vector (BeamLisp.Vector/new (Enum/map (rn/node-items form) (fn [value] (datum-in value code?))))
+      :set (let [members (Enum/map (rn/node-items form) (fn [value] (datum-in value code?)))]
+             (if code?
+               (maps/put :members (MapSet/new members) (BeamLisp.Set/new))
+               (BeamLisp.Set/new members)))
       :map
         ; build a plain map value from the key/value data; :maps.from_list
         ; takes a list of {k, v} tuples, which is what each pair becomes. Each
@@ -2516,8 +2525,19 @@
             (fn [pair]
               (let [kv (erlang/tuple_to_list pair)]
                 (erlang/list_to_tuple
-                  (list (BeamLisp.Ns.Rt/hash_key (datum (first kv))) (datum (second kv))))))))
+                  (let [k (datum-in (first kv) code?)]
+                          (list (if code? k (BeamLisp.Ns.Rt/hash_key k)) (datum-in (second kv) code?))))))))
       form))
+
+(defn datum
+  "The quoted DATA a reader form denotes: `(datum-in form false)`."
+  [form]
+  (datum-in form false))
+
+(defn- macro-datum
+  "A macro's argument: the form as CODE, see `datum-in`."
+  [form]
+  (datum-in form true))
 
 (defn- compile-quote
   "Turn (quote form) into the data the form denotes, as a literal value.
@@ -5147,8 +5167,8 @@
   [macro-fn form args env]
   (datum-macro-result
     (BeamLisp.Ns.Rt/invoke macro-fn
-      (erlang/++ (list (datum form) (macro-env env))
-                 (Enum/map args (fn [value] (datum value)))))))
+      (erlang/++ (list (macro-datum form) (macro-env env))
+                 (Enum/map args (fn [value] (macro-datum value)))))))
 
 
 

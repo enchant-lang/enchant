@@ -46,12 +46,14 @@ range scan over an amount would bracket the wrong window:
 (println "cash  =" (dec/plain-str (balance-of "cash")))
 (println "bank  =" (dec/plain-str (balance-of "bank")))
 
-;; every stored balance, read back and sorted by true value — the AVET order
+;; every stored balance, read back and sorted by true value — the AVET order.
+;; A collection find answers the stored decimals themselves. A relation find
+;; (`:find ?bal`) answers a SET of tuples, and a set member is its canonical
+;; key (`100.50M` is the float `100.5` there), so it would drop the scale.
 (def all-balances
   (->> (datom.query.engine/q
-         '[:find ?bal :where [?e :account/balance ?bal]]
+         '[:find [?bal ...] :where [?e :account/balance ?bal]]
          (datom.conn/db conn))
-       (map first)
        (sort (fn [a b] (<= (dec/compare a b) 0)))
        (map dec/plain-str)))
 (println "ascending:" all-balances)
