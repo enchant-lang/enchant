@@ -1,0 +1,88 @@
+;; N4d: compile edited pinned host units with a qualified SDK's own compiler.
+;; Run by scripts/dev-sdk on the BASE SDK (`$SDK/bin/bl-cold run`), never by a
+;; checkout launcher. DEV_SDK_REQUEST names a JSON request from scripts/dev-sdk:
+;;   {"host-dir": edited priv/host, "out": scratch dir,
+;;    "seed": base priv/bootstrap/seed, "stage": scratch priv root,
+;;    "leaves": ["delay.bl", ...]}
+;; Writes <out>/<Module>.beam per table entry of each leaf, then
+;; <stage>/bootstrap/seed/{changed beams, manifest.term} (unchanged members are
+;; already linked there by the caller) and <stage>/seed-metadata.term, and
+;; prints one `DEV-SDK-RESULT {json}` line.
+;;
+;; The options are exactly the producer's (`seed/host-sources` + host-opts): the
+;; recorded source is root-relative (`priv/host/<leaf>`), so a beam compiled from
+;; unchanged bytes is the store SDK's beam byte for byte.
+(ns tooling.dev-sdk-compile (:require [seed]))
+
+(defn- hex [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+
+(defn- code-digest
+  "`unit-store/floor-code-digest`: a floor BEAM's digest without its
+   `bl_source_hash` value, the per-member input of the library-runtime key."
+  [bytes]
+  (let [chunks (beam_lib/all_chunks bytes) attr (erlang/binary_to_list "Attr")]
+    (hex (erlang/term_to_binary
+           (mapv (fn [chunk]
+                   (let [id (elem chunk 0) data (elem chunk 1)]
+                     (if (= id attr)
+                       [id (to-list (remove #(and (erlang/is_tuple %) (= 2 (erlang/tuple_size %))
+                                                  (= :bl_source_hash (elem % 0)))
+                                            (erlang/binary_to_term data)))]
+                       [id data])))
+                 (elem chunks 2))
+           (list :deterministic)))))
+
+(defn- host-opts [entry out leaf source-hash]
+  ;; seed/host-opts, with the floor's root-relative source label.
+  (erlang/++
+    (list (tuple :module (:module entry)) (tuple :output_dir out)
+          (tuple :file (str "priv/host/" leaf)) (tuple :source_hash source-hash)
+          (tuple :load? false))
+    (erlang/++ (if (some? (:struct-fields entry)) (list (tuple :struct_fields (:struct-fields entry))) (list))
+      (erlang/++ (if (some? (:behaviour entry)) (list (tuple :behaviour (:behaviour entry))) (list))
+                 (if (some? (:macro-exports entry)) (list (tuple :macro_exports (:macro-exports entry))) (list))))))
+
+(let [request (Jason/decode! (File/read! (System/fetch_env! "DEV_SDK_REQUEST")))
+      host-dir (get request "host-dir") out (get request "out")
+      seed-dir (get request "seed") stage (get request "stage")
+      leaves (set (get request "leaves"))
+      table (filter (fn [entry] (contains? leaves (Path/basename (:source entry))))
+                    (seed/host-sources host-dir))
+      _ (when-not (= leaves (set (map (fn [e] (Path/basename (:source e))) table)))
+          (throw (ex-info "edited host source is not in the pinned host table" {:leaves leaves})))
+      manifest-text (File/read! (Path/join seed-dir "manifest.term"))
+      started (erlang/monotonic_time :millisecond)
+      _ (File/mkdir_p! out)
+      compiled
+      (mapv (fn [entry]
+              (let [leaf (Path/basename (:source entry))
+                    bytes (File/read! (:source entry))
+                    name (str (Atom/to_string (:module entry)) ".beam")
+                    t0 (erlang/monotonic_time :millisecond)
+                    _ (BeamLisp.AOT/compile_host_file (:source entry) (host-opts entry out leaf (hex bytes)))
+                    beam (File/read! (Path/join out name))
+                    old (File/read! (Path/join seed-dir name))]
+                {"leaf" leaf "module" name "sha256" (hex beam) "base-sha256" (hex old)
+                 "identical" (= beam old) "code-identical" (= (code-digest beam) (code-digest old))
+                 "milliseconds" (- (erlang/monotonic_time :millisecond) t0)}))
+            table)
+      manifest (reduce (fn [text row]
+                         (let [old (get row "base-sha256")]
+                           (when-not (= 1 (count (binary/matches text old)))
+                             (throw (ex-info "base manifest does not name the member digest once" {:row row})))
+                           (String/replace text old (get row "sha256"))))
+                       manifest-text compiled)
+      seed-out (Path/join stage "bootstrap/seed")]
+  (doseq [row compiled]
+    (let [target (Path/join seed-out (get row "module"))]
+      (File/rm target)
+      (File/cp! (Path/join out (get row "module")) target)))
+  (File/rm (Path/join seed-out "manifest.term"))
+  (File/write! (Path/join seed-out "manifest.term") manifest)
+  (let [t0 (erlang/monotonic_time :millisecond)
+        rows (BeamLisp.AOT/prime_seed_metadata! stage)]
+    (println (str "DEV-SDK-RESULT "
+                  (Jason/encode! {"units" (to-list compiled) "manifest-sha256" (hex manifest)
+                                  "seed-metadata-rows" rows
+                                  "seed-metadata-ms" (- (erlang/monotonic_time :millisecond) t0)
+                                  "milliseconds" (- (erlang/monotonic_time :millisecond) started)})))))

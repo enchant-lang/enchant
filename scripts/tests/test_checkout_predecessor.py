@@ -17,7 +17,10 @@ class CheckoutPredecessorTests(unittest.TestCase):
     def test_recovered_preparation_is_frozen_alongside_the_qualified_predecessor(self):
         self.check_predecessor(True)
 
-    def check_predecessor(self, with_preparation):
+    def test_a_development_sdk_is_never_the_predecessor_its_base_is(self):
+        self.check_predecessor(False, dev=True)
+
+    def check_predecessor(self, with_preparation, dev=False):
         with tempfile.TemporaryDirectory(prefix='checkout-predecessor-') as temporary:
             base = Path(temporary)
             checkout, tools, engine = [base / name for name in ('checkout', 'tools', 'engine')]
@@ -34,7 +37,16 @@ class CheckoutPredecessorTests(unittest.TestCase):
                 (sdk / 'unit-store').mkdir(parents=True)
                 (sdk / 'unit-store/unit-index.json').write_text('{}')
                 predecessors.append(sdk)
-            selection.symlink_to(predecessors[0], target_is_directory=True)
+            if dev:
+                # scripts/dev-sdk (N4d): the selected SDK names its qualified base.
+                development = base / 'development'
+                (development / 'unit-store').mkdir(parents=True)
+                (development / 'unit-store/unit-index.json').write_text('{}')
+                (development / 'artifact.json').write_text(json.dumps(
+                    {'kind': 'sdk', 'version': 1, 'dev': {'base': str(predecessors[0])}}))
+                selection.symlink_to(development, target_is_directory=True)
+            else:
+                selection.symlink_to(predecessors[0], target_is_directory=True)
             preparations = [base / 'prepared', base / 'newer-preparation']
             hint = selection.parent / 'previous-preparation'
             if with_preparation:

@@ -64,13 +64,20 @@ for prerequisite in nix-build systemd-run python3 flock; do
   command -v "$prerequisite" >/dev/null || { echo "bl: required preparation tool missing: $prerequisite" >&2; exit 69; }
 done
 mkdir -p "$root/.bl/sdks"
+# A development SDK (scripts/dev-sdk, N4d) is accepted only where its own
+# fingerprint directory records it (third argument), never as a preparation
+# result, a predecessor or the qualified SDK of a plain preparation.
 verify_selection() {
-  python3 - "$1" "$2" <<'PYVERIFY'
+  python3 - "$1" "$2" "${3:-}" <<'PYVERIFY'
 import json, pathlib, re, sys
-output, coordinator = map(pathlib.Path, sys.argv[1:])
+output, coordinator = map(pathlib.Path, sys.argv[1:3])
 assert re.fullmatch(r'/nix/store/[0-9a-z]{32}-[^/]+', str(output))
 metadata = json.loads((output / 'artifact.json').read_text())
 assert metadata['version'] == 1 and metadata['kind'] == 'sdk'
+if 'dev' in metadata:
+    marker = pathlib.Path(sys.argv[3]) / 'dev-sdk' if sys.argv[3] else None
+    assert marker is not None and marker.is_file() and marker.read_text().strip() == str(output), \
+        'development SDK outside its dev selection'
 assert metadata['target'] == 'x86_64-linux'
 assert metadata['coordinator'] == str(coordinator)
 assert (output / 'preparation-coordinator').is_symlink()
@@ -81,6 +88,23 @@ cm = json.loads((coordinator / 'artifact.json').read_text())
 assert cm['version'] == 1 and cm['kind'] == 'artifact-coordinator-runtime'
 assert (coordinator / 'foundry/bin/preparation-operation.bl').is_file()
 PYVERIFY
+}
+# The fingerprint directory whose dev-sdk marker names this SDK, if any.
+dev_directory() {
+  local link
+  for link in "$root"/.bl/sdks/*/dev-sdk; do
+    [ -f "$link" ] && [ "$(cat "$link")" = "$1" ] && { printf '%s\n' "${link%/dev-sdk}"; return 0; }
+  done
+  return 1
+}
+# A development SDK's qualified base: the predecessor a preparation uses.
+qualified_base() {
+  python3 - "$1" <<'PYBASE'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1]) / 'artifact.json'
+metadata = json.loads(path.read_text()) if path.is_file() else {}
+print(metadata['dev']['base'] if 'dev' in metadata else sys.argv[1])
+PYBASE
 }
 # The lock holder names itself here so a waiting caller can say whom it waits
 # for and where that preparation reports progress. The file is advisory: it is
@@ -132,7 +156,7 @@ reuse_current_sdk() {
   done
   [[ "$reused" =~ ^[0-9a-f]{64}$ ]] || return 1
   coordinator=$(readlink -f "$output/preparation-coordinator" 2>/dev/null) || return 1
-  verify_selection "$output" "$coordinator" 2>/dev/null || return 1
+  verify_selection "$output" "$coordinator" "$(dev_directory "$output" || true)" 2>/dev/null || return 1
   echo "bl: SDK preparation busy; BL_SDK_REUSE_CURRENT=1 selects current SDK $reused, which may predate engine edits" >&2
   fingerprint=$reused
   emit_selection "$output"
@@ -181,7 +205,7 @@ PYHELD
     return 1
   fi
   coordinator=$(readlink -f "$output/preparation-coordinator" 2>/dev/null) || return 1
-  verify_selection "$output" "$coordinator" 2>/dev/null || return 1
+  verify_selection "$output" "$coordinator" "$(dev_directory "$output" || true)" 2>/dev/null || return 1
   echo "bl: library sources differ from SDK ${sdk_fp:0:12}; the warm VM compiles them over it (scripts/prepare-checkout-sdk builds them in)" >&2
   fingerprint=$sdk_fp
   emit_selection "$output"
@@ -280,10 +304,16 @@ dispatch() {
 # coordinator can differ solely because the predecessor hint changed.
 # Verify the retained product against the current exact engine bytes before
 # any source capture, coordinator evaluation or durable job is needed.
+# A plain preparation replaces this tree's development SDK with the qualified
+# one; command selection keeps using it.
+if [ -f "$directory/dev-sdk" ] && ! "$selection"; then
+  echo "bl: replacing development SDK $(cat "$directory/dev-sdk") with this tree's qualified SDK" >&2
+  rm -f "$directory/result-sdk" "$directory/selection.v1" "$directory/dev-sdk"
+fi
 if [ -f "$retained/artifact.json" ]; then
   output=$(readlink -f "$retained")
   coordinator=$(readlink -f "$output/preparation-coordinator")
-  verify_selection "$output" "$coordinator"
+  verify_selection "$output" "$coordinator" "$([ -f "$directory/dev-sdk" ] && echo "$directory")"
   source=$(readlink -f "$directory/source-engine")
   if [[ ! -L "$directory/source-engine" || ! "$source" =~ ^/nix/store/[0-9a-z]{32}-[^/]+$ ]]; then
     echo 'bl: retained SDK lacks its captured immutable engine source' >&2
@@ -352,7 +382,8 @@ if [ ! -f "$job/operation.json" ]; then
   if [ -L "$job/previous-sdk" ]; then
     previous=$(readlink -f "$job/previous-sdk")
   elif [ -f "$root/.bl/sdks/current-sdk/unit-store/unit-index.json" ]; then
-    previous=$(readlink -f "$root/.bl/sdks/current-sdk")
+    # Never a development SDK: its qualified base is the predecessor.
+    previous=$(qualified_base "$(readlink -f "$root/.bl/sdks/current-sdk")")
     ln -s "$previous" "$job/previous-sdk"
   fi
   preparation=
