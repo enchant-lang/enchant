@@ -535,12 +535,18 @@
   "Return a seq of the items in coll, in reverse order. Always a list,
   as in Clojure — (reverse [1 2]) is (2 1), not [2 1]."
   [coll]
-  ;; A list, vector or lazy seq folds with the kernel walk: the public
-  ;; `reduce` consults the live `reduced?` after every element, and the step
-  ;; here never halts. Anything else keeps that public rule.
-  (if (or (list? coll) (vector? coll) (nil? coll) (BeamLisp.LazySeq/lazy? coll))
-    (BeamLisp.Ns.Rt/k-reduce (fn [acc x] (cons x acc)) () coll)
-    (reduce (fn [acc x] (cons x acc)) (list) coll)))
+  ;; A vector or a list is reversed directly: the public `reduce` consults the
+  ;; live `reduced?` after every element (1.7 µs each), and the step here never
+  ;; halts. A list's lazy tail, and anything else, keeps the `reduce` rule.
+  (cond
+    (vector? coll) (lists/reverse (BeamLisp.Vector/to_list coll))
+    (erlang/is_list coll)
+    (loop [xs coll acc ()]
+      (cond
+        (erlang/=:= xs ()) acc
+        (erlang/is_list xs) (recur (erlang/tl xs) (cons (erlang/hd xs) acc))
+        :else (reduce (fn [acc x] (cons x acc)) acc xs)))
+    :else (reduce (fn [acc x] (cons x acc)) (list) coll)))
 
 (defn last
   "Return the last item in coll, in linear time."
@@ -1169,9 +1175,10 @@
    several colls, as map does). An `(f x)` is entered only when the one
    before it runs out, so `(take 3 (mapcat f (range)))` returns."
   [f & colls]
-  (let [[c & more] colls]
-    (BeamLisp.Ns.Rt/lazy-cat
-      (if more (BeamLisp.Ns.Rt/lazy-map-multi f c (BeamLisp.Ns.Rt/k-to-list more)) (map f c)))))
+  (BeamLisp.Ns.Rt/lazy-cat
+    (if (next colls)
+      (BeamLisp.Ns.Rt/map-multi f (first colls) (BeamLisp.Ns.Rt/k-to-list (next colls)))
+      (map f (first colls)))))
 
 (defn keep
   "Returns a lazy seq of the non-nil results of (f x) for x in coll —

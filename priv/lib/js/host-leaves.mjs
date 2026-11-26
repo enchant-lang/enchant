@@ -319,6 +319,11 @@ export const STRING = {
     return L(trim ? xs.filter((x) => x !== "") : xs);
   },
   "Elixir.String/graphemes/1": (s) => L(graphemes(s)),
+  "Elixir.String/next_grapheme/1": (s) => {
+    if (s === "") return null;
+    const g = asciiUnits(s.slice(0, 2)) ? s[0] : (SEG ? SEG.segment(s)[Symbol.iterator]().next().value.segment : [...s][0]);
+    return T(g, s.slice(g.length));
+  },
   "Elixir.String/length/1": graphemeLength,
   "Elixir.String/slice/3": (s, start, len) => asciiUnits(s) ? s.slice(start, start + len) : graphemes(s).slice(start, start + len).join(""),
   "Elixir.String/replace/3": (s, pat, rep) => pat instanceof Regex ? repl(pat, s, rep, true) : s.split(pat).join(rep),
