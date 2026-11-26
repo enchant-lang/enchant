@@ -682,6 +682,30 @@
              (if (> (:fail t) 0) (str ", " (:fail t) " failed") "")
              (if (> (:error t) 0) (str ", " (:error t) " errored") ""))))))
 
+(defn- diagnostic-lines
+  "A timed-out worker's `Process/info` snapshot (`:diagnostic`, recorded just
+   before the kill) as report lines: where it was, its status and mailbox, and
+   its stack innermost first. Without these a timeout said only `timed out`,
+   and a hang in a warm VM could not be told from a slow file."
+  [err]
+  (let [d (:diagnostic err)
+        info (if (or (map? d) (sequential? d)) (into {} (map (fn [e] (if (tuple? e) [(elem e 0) (elem e 1)] e)) d)) {})
+        frame (fn [f]
+                (if (and (tuple? f) (= 4 (erlang/tuple_size f)))
+                  (let [loc (elem f 3)
+                        file (some (fn [e] (when (and (tuple? e) (= :file (elem e 0))) (str (elem e 1)))) loc)
+                        line (some (fn [e] (when (and (tuple? e) (= :line (elem e 0))) (elem e 1))) loc)]
+                    (str (elem f 0) "." (elem f 1) "/" (let [a (elem f 2)] (if (int? a) a (count a)))
+                         (if file (str "  " file (if line (str ":" line) "")) "")))
+                  (pr-str f)))]
+    (if (empty? info) []
+      (concat
+        [(str "      at " (pr-str (get info :current_function))
+              "  status " (pr-str (get info :status))
+              "  mailbox " (pr-str (get info :message_queue_len))
+              "  reductions " (pr-str (get info :reductions)))]
+        (map (fn [f] (str "        " (frame f))) (take 16 (or (get info :current_stacktrace) [])))))))
+
 (defn- eq-left
   "The LEFT operand of an `(= a b)` assertion form, or nil for any other form.
 
@@ -751,7 +775,8 @@
           (concat
             [(file-line r)]
             ;; a load crash: the bl frames that led to it, innermost first
-            (mapcat (fn [err] (map (fn [f] (str "      " f)) (or (:frames err) [])))
+            (mapcat (fn [err] (concat (map (fn [f] (str "      " f)) (or (:frames err) []))
+                                      (diagnostic-lines err)))
                     (if (= :incoherent (:status r)) (or (:errors r) []) []))
             ;; Tier A: per-assertion why, only for a failing file
             (map failure-block (or (:reports r) []))

@@ -162,6 +162,14 @@ anything reading the number rather than the picture.
         result (isolated-result paths (when diag (diag {:deep (:deep st)})))]
     (if (:json st)
       (u/emit st (assoc (totals result) :ok (get result :ok?)
+                        ;; every file that did not pass, with its errors, so a
+                        ;; timeout's diagnostic reaches a machine reader too
+                        :unpassed
+                        (vec (for [r (:files result) :when (not= :passed (:status r))]
+                               {:file (or (:path r) (:ns r)) :status (name (:status r))
+                                :errors (vec (map (fn [e] {:kind (str (:kind e)) :msg (str (:msg e))
+                                                           :diagnostic (when (:diagnostic e) (pr-str (:diagnostic e)))})
+                                                  (or (:errors r) [])))}))
                         :contamination
                         (if (nil? diag)
                           nil
