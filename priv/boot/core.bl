@@ -979,7 +979,16 @@
    contents as a single flat seq. The root itself is dropped, exactly as
    Clojure's does: (flatten 5) is empty."
   [x]
-  (filter (complement sequential?) (rest (tree-seq sequential? seq x))))
+  ;; One stack walk that keeps the leaves. Filtering `tree-seq`'s node list
+  ;; lazily copied every SUBTREE into the filter's cells (a copy does not keep
+  ;; sharing): O(n²) for a deep tree, over the lazy cache budget at depth 5000.
+  (loop [stack (if (sequential? x) (BeamLisp.Ns.Rt/k-to-list (seq x)) ()) acc ()]
+    (if (erlang/=:= stack ())
+      (lists/reverse acc)
+      (let [n (erlang/hd stack) more (erlang/tl stack)]
+        (if (sequential? n)
+          (recur (erlang/++ (BeamLisp.Ns.Rt/k-to-list (seq n)) more) acc)
+          (recur more (cons n acc)))))))
 
 (defn repeatedly
   "Takes a fn of no args, presumably with side effects, and returns a lazy
@@ -1171,14 +1180,22 @@
           {} maps))
 
 (defn mapcat
-  "Returns the lazy concatenation of (f x ...) for each x (in lockstep over
-   several colls, as map does). An `(f x)` is entered only when the one
-   before it runs out, so `(take 3 (mapcat f (range)))` returns."
+  "Returns the concatenation of (f x ...) for each x (in lockstep over
+   several colls, as map does). Over a lazy seq it is lazy, so
+   `(take 3 (mapcat f (range)))` returns; over a realised coll every (f x)
+   is computed up front, as it always was."
   [f & colls]
-  (BeamLisp.Ns.Rt/lazy-cat
-    (if (next colls)
-      (BeamLisp.Ns.Rt/map-multi f (first colls) (BeamLisp.Ns.Rt/k-to-list (next colls)))
-      (map f (first colls)))))
+  ;; A REALISED coll keeps the historical timing: every (f x) runs now, as
+  ;; `(apply concat (map f coll))` did, and only the concatenation is lazy.
+  ;; 460 call sites may lean on those effects (the JS emitter did: it read
+  ;; its interned constants after a `mapcat` of emissions). A lazy input,
+  ;; possibly infinite, yields lazily.
+  (cond
+    (next colls)
+      (BeamLisp.Ns.Rt/lazy-cat
+        (BeamLisp.Ns.Rt/map-multi f (first colls) (BeamLisp.Ns.Rt/k-to-list (next colls))))
+    (BeamLisp.LazySeq/lazy? (first colls)) (BeamLisp.Ns.Rt/lazy-cat (map f (first colls)))
+    :else (apply concat (map f (first colls)))))
 
 (defn keep
   "Returns a lazy seq of the non-nil results of (f x) for x in coll —
