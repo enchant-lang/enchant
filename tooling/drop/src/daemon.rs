@@ -595,6 +595,10 @@ struct StartedVm {
     child: Option<std::process::Child>,
 }
 
+/// Idle bound of an auto-started command VM, in seconds (see `start_daemon_child`).
+#[cfg(unix)]
+const COMMAND_VM_IDLE_SECONDS: &str = "28800";
+
 /// `start_daemon_detached`, keeping the child and the start of its log section.
 #[cfg(unix)]
 fn start_daemon_child(bin: &Path, root: &Path, build: &str, shared: bool, commands_only: bool) -> StartedVm {
@@ -610,7 +614,12 @@ fn start_daemon_child(bin: &Path, root: &Path, build: &str, shared: bool, comman
     cmd.args(warm_start_argv(root, shared, &log_arg));
     let command_vm = commands_only && command_vm_for(bin);
     if command_vm {
-        cmd.args(["--idle", "0", "--no-ui", "--commands-only"]);
+        // An auto-started VM idles out like `bl realm start`'s default (8 h,
+        // `bl.realm-lifecycle/DEFAULT-IDLE-SECONDS`). With `--idle 0` every
+        // project that ever ran a warm command kept a 250-550 MB VM until
+        // someone ran `bl realm stop`; the next command after an idle exit pays
+        // one start, as the first command did.
+        cmd.args(["--idle", COMMAND_VM_IDLE_SECONDS, "--no-ui", "--commands-only"]);
     }
     if checkout_root().is_some() || command_vm {
         cmd = checkout_memory_bound(cmd);
