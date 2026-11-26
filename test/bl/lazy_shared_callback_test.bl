@@ -1,0 +1,71 @@
+; lazy_shared_callback_test.bl — a lazy transformer's callback is copied once
+; per chain, not once per cell, whatever it captures.
+;
+; Each chunk cell of `map`/`filter`/… stores a new thunk and fold recipe that
+; capture the callback, and a cell stores its state by copy. A callback closing
+; over a big map therefore paid several deep copies of it per cell (Backdesk,
+; 2026-11-26: 2 s for a 200-element `filter`, 2 ms with `filterv`).
+; `BeamLisp.LazySeq/share_callback` moves a large callback into one native cell
+; and hands the chain a one-word handle.
+;
+; Run: ./bin/bl test test/bl/lazy_shared_callback_test.bl
+
+(ns lazy-shared-callback-test)
+
+(defn- big-map [n] (into {} (map (fn [i] [i (str "v" i)]) (range n))))
+
+(deftest a-large-callback-becomes-a-handle-and-a-small-one-stays-itself
+ (let [ctx (big-map 20000)
+       f (fn [x] (contains? ctx x))
+       small (fn [x] (inc x))
+       shared (BeamLisp.LazySeq/share_callback f)]
+  (is (erlang/> (BeamLisp.LazyMemo/estimate_bytes f) 100000))
+  (is (erlang/< (BeamLisp.LazyMemo/estimate_bytes shared) 1024))
+  (is (identical? small (BeamLisp.LazySeq/share_callback small)))
+  (is (identical? inc (BeamLisp.LazySeq/share_callback inc)))
+  (is (= :k (BeamLisp.LazySeq/share_callback :k)))
+  (is (= [true false] [(shared 1) (shared -1)]))))
+
+(deftest every-shared-transformer-answers-what-the-eager-form-does
+ (let [ctx (big-map 20000)
+       keep? (fn [x] (and (contains? ctx 7) (odd? x)))
+       f (fn [x] (if (contains? ctx 7) (* 2 x) x))
+       g (fn [a b] (if (contains? ctx 7) (+ a b) 0))
+       xs (vec (range 500))]
+  (is (= (filterv keep? xs) (vec (filter keep? xs))))
+  (is (= (vec (remove keep? xs)) (filterv (complement keep?) xs)))
+  (is (= (mapv f xs) (vec (map f xs))))
+  (is (= (mapv g xs xs) (vec (map g xs xs))))
+  (is (= (vec (range 0 100 2)) (vec (take-while #(and (contains? ctx 7) (< % 100)) (map f xs)))))
+  (is (= 400 (count (drop-while #(and (contains? ctx 7) (< % 100)) xs))))
+  (is (= [1 2 4 8 16] (vec (take 5 (iterate f 1)))))
+  (is (= (reduce + (filterv keep? xs)) (reduce + (filter keep? xs))))
+  (is (= (count (filterv keep? xs)) (count (filter keep? xs))))))
+
+(deftest another-process-realizes-a-shared-chain
+ (let [ctx (big-map 20000)
+       s (filter (fn [x] (and (contains? ctx 3) (even? x))) (range 300))]
+  (is (= (vec (range 0 300 2)) @(future (vec s))))
+  (is (= (vec (range 0 300 2)) (vec s)))))
+
+(deftest the-per-process-cache-is-bounded-and-eviction-stays-correct
+ (let [ctx (big-map 5000)
+       fs (mapv (fn [i] (BeamLisp.LazySeq/share_callback (fn [x] (if (contains? ctx 1) (+ x i) x)))) (range 20))]
+  (is (erlang/=< (count (erlang/get :bl_lazy_shared_keys)) 8))
+  (is (= (vec (range 20)) (mapv (fn [f] (f 0)) fs)))
+  (is (= (vec (range 20)) @(future (mapv (fn [f] (f 0)) fs))))
+  (is (erlang/=< (count (erlang/get :bl_lazy_shared_keys)) 8))))
+
+(defn- ms [f]
+ (let [t (System/monotonic_time :microsecond) _ (f)]
+  (/ (- (System/monotonic_time :microsecond) t) 1000.0)))
+
+(deftest a-big-capture-no-longer-scales-the-chain
+ (let [xs (vec (range 200))
+       chain (fn [ctx] (fn [] (count (doall (filter (fn [c] (and (contains? ctx 1) (odd? c)))
+                                                    (sort-by - (filter even? xs)))))))
+       small (ms (chain (big-map 10)))
+       large (ms (chain (big-map 30000)))]
+  (println "LAZY-SHARED-BENCH capture-10" small "ms capture-30000" large "ms")
+  ;; Before: ~8.8 ms against ~0.2 ms (40×). Allow generous noise, not a scale.
+  (is (erlang/< large (erlang/+ 5.0 (erlang/* 5 small))))))

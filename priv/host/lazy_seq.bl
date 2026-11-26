@@ -193,6 +193,79 @@
           (Elixir.FunctionClauseError/exception
             (list (tuple :module own) (tuple :function :new) (tuple :arity 2))))))))
 
+; ── shared callbacks ─────────────────────────────────────────────────────────
+;
+; A transformer (`map`, `filter`, `take-while`, …) builds a NEW thunk per chunk
+; cell, and every one captures the user's callback. A cell stores its state by
+; COPY (the native cell owns an OwnedEnv), the cache budget measures it with
+; `flat_size`, and a claim copies it back out — and the thunk and the fold
+; recipe are copied separately, without sharing. So a callback closing over a
+; big map (a request context, a registry) paid several deep copies of that map
+; PER CELL: Backdesk measured 2 s for a 200-element `filter` that `filterv`
+; does in 2 ms (2026-11-26).
+;
+; `share_callback/1` moves a large callback into ONE native cell, once per
+; chain, and returns a same-arity fun that captures only that cell's handle
+; (one word), so every per-cell thunk is small again. A call recovers the
+; callback from a bounded per-process cache: the creating process caches the
+; heap term it already holds (no copy at all); another process realizing the
+; chain copies it out once and caches it. The cache is keyed by the cell's
+; integer id, so it never keeps a native cell alive; it keeps at most
+; `shared-cache-limit` callbacks a process already referenced.
+;
+; Small or capture-free callbacks are returned unchanged: the indirection only
+; pays for itself when the capture is what dominates a cell's copy.
+
+(defn- shared-cache-limit [] 8)
+(defn- shared-threshold-bytes [] 4096)
+
+(defn- shared-remember [key f]
+  (let [previous (erlang/put key f)]
+    (cond
+      (erlang/== previous :undefined)
+      (let [known (erlang/get :bl_lazy_shared_keys)
+            keys (lists/append (list key)
+                   (cond (erlang/== known :undefined) (list) :else known))]
+        (cond
+          (erlang/> (erlang/length keys) (shared-cache-limit))
+          (let [kept (lists/sublist keys (shared-cache-limit))]
+            (erlang/erase (lists/last keys))
+            (erlang/put :bl_lazy_shared_keys kept))
+          :else (erlang/put :bl_lazy_shared_keys keys))
+        f)
+      :else f)))
+
+(defn- shared-recall [resource key]
+  (let [f (erlang/get key)]
+    (cond
+      (erlang/== f :undefined) (shared-remember key (BeamLisp.LazyMemo/read resource))
+      :else f)))
+
+(defn share_callback
+  "A callback for a lazy chain whose cells must not each copy what it captures.
+   Returns `f` itself unless it is a native fun of arity 0–3 that captures at
+   least `shared-threshold-bytes`; otherwise a same-arity fun over a single
+   native cell holding `f` (see the section comment)."
+  [f]
+  (cond
+    (erlang/not (erlang/is_function f)) f
+    (erlang/== (list) (erlang/element 2 (erlang/fun_info f :env))) f
+    :else
+    (let [arity (erlang/element 2 (erlang/fun_info f :arity))
+          bytes (BeamLisp.LazyMemo/estimate_bytes f)]
+      (cond
+        (erlang/> arity 3) f
+        (erlang/< bytes (shared-threshold-bytes)) f
+        :else
+        (let [resource (BeamLisp.LazyMemo/new f (list) bytes)
+              key (erlang/list_to_tuple (list :bl_lazy_shared (BeamLisp.LazyMemo/id resource)))]
+          (shared-remember key f)
+          (cond
+            (erlang/== arity 0) (fn [] (erlang/apply (shared-recall resource key) (list)))
+            (erlang/== arity 1) (fn [a] (erlang/apply (shared-recall resource key) (list a)))
+            (erlang/== arity 2) (fn [a b] (erlang/apply (shared-recall resource key) (list a b)))
+            :else (fn [a b c] (erlang/apply (shared-recall resource key) (list a b c)))))))))
+
 (defn from_fun
   "`new/1` under the name the `lazy-seq` core macro expands to. A non-function
    argument is the `FunctionClauseError` the live guard raised."
