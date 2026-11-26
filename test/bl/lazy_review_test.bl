@@ -1,0 +1,105 @@
+; lazy_review_test.bl — the second lazy review (2026-11-26): mapcat is lazy,
+; repeat/cycle chunk, tree-seq is linear, reverse skips the public reduce rule,
+; `for` shares its outer iterator, and `first` of a string reads one grapheme.
+;
+; Run: ./bin/bl test test/bl/lazy_review_test.bl
+
+(ns lazy-review-test)
+
+(defn- big-map [n] (into {} (map (fn [i] [i (str "v" i)]) (range n))))
+
+(deftest mapcat-is-lazy-and-answers-what-concat-did
+ (is (= [0 0 1 1 2] (vec (take 5 (mapcat (fn [x] [x x]) (range))))))
+ (is (= [0 0 1 1] (vec (take 4 (mapcat (fn [x] (repeat 2 x)) (range))))))
+ (let [xs (vec (range 1000)) f (fn [x] (cond (even? x) [x (- x)] (= 1 (mod x 3)) [] :else (list x)))]
+  (is (= (vec (apply concat (map f xs))) (vec (mapcat f xs))))
+  (is (= (count (apply concat (map f xs))) (count (mapcat f xs))))
+  (is (= (reduce + (apply concat (map f xs))) (reduce + (mapcat f xs)))))
+ (is (= [1 3 2 4] (vec (mapcat (fn [a b] [a b]) [1 2] [3 4]))))
+ (is (= [[1 2] [3 4]] (vec (mapcat (fn [a b c] [[a b] c]) [1] [2] [[3 4]]))) "three colls")
+ (is (= [] (vec (mapcat identity []))))
+ (is (= [] (vec (mapcat identity [[] nil () []]))))
+ (is (= [:a 1 :b 2] (vec (mapcat identity (sort-by first {:a 1 :b 2})))))
+ (is (= ["a" "b" "c"] (vec (mapcat seq ["ab" "" "c"]))))
+ (is (= 3 (first (drop 3 (mapcat (fn [x] [x]) (range))))))
+ (let [calls (atom 0)]
+  (first (mapcat (fn [x] (swap! calls inc) [x]) (range 1000)))
+  (is (< @calls 100) "one chunk of the outer seq, not all of it")))
+
+(deftest repeat-and-cycle-chunk-and-stay-correct
+ (is (= (vec (repeat 100 :x)) (vec (take 100 (repeat :x)))))
+ (is (= 70 (count (take 70 (repeat nil)))))
+ (is (= [1 2 3 1 2 3 1] (vec (take 7 (cycle [1 2 3])))))
+ (is (= (vec (concat (range 50) (range 50) (range 20))) (vec (take 120 (cycle (vec (range 50)))))) "a cursor input")
+ (is (= [0 1 0 1 0] (vec (take 5 (cycle (take 2 (range)))))))
+ (is (= [:a :a :a] (vec (take 3 (cycle [:a])))))
+ (is (empty? (cycle [])))
+ (is (= [[0 :x] [1 :x]] (vec (map vector (range 2) (repeat :x)))))
+ (is (= 10 (reduce + (take 4 (cycle [1 2 3 4])))))
+ (is (= [3 1 2 3] (vec (take 4 (drop 2 (cycle [1 2 3]))))))
+ (is (= [1 2 3 1] @(future (vec (take 4 (cycle [1 2 3])))))))
+
+(deftest tree-seq-is-preorder-and-linear
+ (let [t [1 [2 [3 4]] 5 [] [[6]]]]
+  (is (= [t 1 [2 [3 4]] 2 [3 4] 3 4 5 [] [[6]] [6] 6] (vec (tree-seq vector? seq t))))
+  (is (= [1 2 3 4 5 6] (vec (flatten t)))))
+ (is (= [5] (vec (tree-seq vector? seq 5))))
+ (is (= [] (vec (flatten 5))))
+ (is (= [{:a [1]} [:a [1]] :a [1] 1] (vec (tree-seq coll? seq {:a [1]}))))
+ (let [order (atom [])]
+  (vec (tree-seq (fn [n] (swap! order conj [:b n]) (vector? n))
+                 (fn [n] (swap! order conj [:c n]) n)
+                 [1 [2]]))
+  (is (= [[:b [1 [2]]] [:c [1 [2]]] [:b 1] [:b [2]] [:c [2]] [:b 2]] @order)))
+ (let [deep (loop [d 0 t [0]] (if (= d 5000) t (recur (inc d) [d t])))]
+  (is (= 10001 (count (tree-seq vector? seq deep))))
+  (is (= 5001 (count (flatten deep))))))
+
+(deftest reverse-of-every-shape
+ (is (= '(3 2 1) (reverse '(1 2 3))))
+ (is (= '(3 2 1) (reverse [1 2 3])))
+ (is (= '(2 1 0) (reverse (range 3))))
+ (is (= '(4 3 2) (reverse (map inc (range 1 4)))))
+ (is (= () (reverse nil)))
+ (is (= () (reverse [])))
+ (is (= () (reverse ())))
+ (is (list? (reverse [1 2])))
+ (is (= '("c" "b" "a") (reverse "abc")))
+ (is (= #{1 2 3} (set (reverse #{1 2 3}))))
+ (is (= '(3 2 1) (reverse (cons 1 (lazy-seq (list 2 3))))))
+ (let [r (reverse (vec (range 100000)))]
+  (is (= [99999 99998] (vec (take 2 r))))
+  (is (= (vec (reverse (range 100000))) (vec r)))))
+
+(deftest for-shares-its-outer-iterator-and-keeps-every-form
+ (let [ctx (big-map 20000)
+       xs (vec (range 300))]
+  (is (= (mapv (fn [x] (contains? ctx x)) xs) (vec (for [x xs] (contains? ctx x)))))
+  (is (= (vec (for [x (range 5) y (range x) :when (contains? ctx y)] [x y]))
+         [[1 0] [2 0] [2 1] [3 0] [3 1] [3 2] [4 0] [4 1] [4 2] [4 3]]))
+  (is (= [0 2 4] (vec (for [x (range) :let [y (* 2 x)] :while (< y 5) :when (contains? ctx y)] y))))
+  (is (= [0 1 2] (vec (take 3 (for [x (range) :when (contains? ctx x)] x)))))
+  (is (= (filterv even? xs) @(future (vec (for [x xs :when (and (contains? ctx 1) (even? x))] x)))))
+  (is (= [[0 :a] [0 :b] [1 :a] [1 :b]] (vec (for [x (range 2) y [:a :b]] [x y]))))
+  (is (= [[0 0 0] [1 0 0] [1 1 0] [1 1 1]]
+         (vec (for [x (range 2) y (range (inc x)) z (range (inc y))] [x y z]))))
+  (is (= [] (vec (for [x [] y (range 3)] [x y]))))
+  (is (= 300 (count (for [x xs] (contains? ctx x)))))
+  (is (= [[1 2] [3 4]] (vec (for [[a b] [[1 2] [3 4]]] [a b])))))
+ ;; the iterator recurses through a handle: a long `for` over a big capture
+ ;; does not grow with it
+ (let [small (big-map 10) large (big-map 30000) xs (vec (range 6000))
+       t (fn [ctx] (let [t0 (System/monotonic_time :microsecond)]
+                     (count (doall (for [x xs] (contains? ctx x))))
+                     (/ (- (System/monotonic_time :microsecond) t0) 1000.0)))
+       ts (min (t small) (t small)) tl (min (t large) (t large))]
+  (println "LAZY-REVIEW for small" ts "large" tl)
+  (is (< tl (+ (* 4 ts) 20.0)))))
+
+(deftest first-of-a-string-is-its-first-grapheme
+ (is (= "a" (first "abc")))
+ (is (nil? (first "")))
+ (is (= "é" (first "é!")))
+ (is (= "👍🏽" (first "👍🏽x")))
+ (is (= "b" (second "abc")))
+ (is (= '("b" "c") (rest "abc"))))

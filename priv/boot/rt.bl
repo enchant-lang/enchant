@@ -1115,7 +1115,9 @@
       (cond
         (erlang/== kd :nil) nil
         (erlang/== kd :list) nil
-        (erlang/== kd :text) (k-first (k-seq x))
+        ; the first grapheme, without splitting the whole string
+        (erlang/== kd :text) (let [g (String/next_grapheme x)]
+                               (cond (erlang/== g nil) nil :else (erlang/element 1 g)))
         (erlang/== kd :vector) (cond (erlang/== 0 (BeamLisp.Vector/count x)) nil
                                      :else (BeamLisp.Vector/nth x 0))
         (erlang/== kd :lazy) (let [c (BeamLisp.LazySeq/cell x)]
@@ -3395,10 +3397,11 @@
   ([n x] (lists/duplicate (erlang/max n 0) x)))
 
 (defn- repeat-from [x]
-  "Generate an infinite repetition of x."
-  (raw-cons x
-    (BeamLisp.LazySeq/new
-      (fn [] (repeat-from x)))))
+  "Generate an infinite repetition of x, one chunk of `chunk_size` copies per
+   memo cell (it was one cell per element: a memo create and a copy of `x`
+   for each)."
+  (BeamLisp.LazySeq/chain (lists/duplicate (BeamLisp.LazySeq/chunk_size) x)
+                          (fn [] (repeat-from x))))
 
 ;; ── cycle: repeat a collection forever ─────────────────────────────────────
 (declare cycle-from)
@@ -3424,18 +3427,17 @@
                         :else (recur acc2))))))))))
 
 (defn- cycle-from [current original]
-  "Yield current's head, then recursively cycle through tail. When current ends,
-   restart from original."
-  (let [cell (BeamLisp.LazySeq/cell current)]
+  "One chunk of the cycle: up to `chunk_size` elements from `current`,
+   restarting at `original` (non-empty, checked by `lazy-cycle`) when it ends,
+   then the next chunk. It was one memo cell per element."
+  (loop [cur current n (BeamLisp.LazySeq/chunk_size) acc ()]
     (cond
-      (erlang/== nil cell)
-      (cycle-from original original)
+      (erlang/== n 0) (BeamLisp.LazySeq/chain (lists/reverse acc) (fn [] (cycle-from cur original)))
       :else
-      (let [head (erlang/hd cell)
-            tail (erlang/tl cell)]
-        (raw-cons head
-          (BeamLisp.LazySeq/new
-            (fn [] (cycle-from tail original))))))))
+      (let [cell (BeamLisp.LazySeq/cell cur)]
+        (cond
+          (erlang/== nil cell) (recur original n acc)
+          :else (recur (erlang/tl cell) (erlang/- n 1) (raw-cons (erlang/hd cell) acc)))))))
 
 ;; ── doall: force a lazy seq and return it ────────────────────────────────
 (defn lazy-doall [x]
@@ -3538,14 +3540,22 @@
 (defn lazy-tree-seq [branch? children root]
   "Depth-first traversal: yields root, then each subtree reachable through
    children. Uses branch? to decide if a node has children. Realized eagerly."
-  (cond
-    (lazy-invoke branch? (lazy-one root))
-    (let [kids (lazy-invoke children (lazy-one root))
-          seqable-kids (seqable kids)
-          tree-seqs (lists/flatmap (fn [child] (lazy-tree-seq branch? children child))
-                            (k-to-list seqable-kids))]
-      (raw-cons root tree-seqs))
-    :else (lazy-one root)))
+  ; One explicit stack of pending nodes, so the walk is O(n). The recursive
+  ; `flatmap` it replaced appended every subtree's list at each level:
+  ; O(n · depth). Callbacks are called in the same preorder as before.
+  (let [branch? (call-prepare-callback branch? 1)
+        children (call-prepare-callback children 1)]
+    (loop [stack (lazy-one root) acc ()]
+      (cond
+        (erlang/== stack ()) (lists/reverse acc)
+        :else
+        (let [node (erlang/hd stack)
+              more (erlang/tl stack)]
+          (cond
+            (invoke1 branch? node)
+            (recur (erlang/++ (k-to-list (seqable (invoke1 children node))) more)
+                   (raw-cons node acc))
+            :else (recur more (raw-cons node acc))))))))
 
 ;; ── concat: one lazy seq from a list of collections ────────────────────────
 ;
@@ -3642,6 +3652,55 @@
               (cond
                 (reduce-reduced? acc2) acc2
                 :else (recur acc2 (erlang/tl ss))))))))))
+
+;; ── cat: one lazy seq from a (lazy) seq of collections ─────────────────────
+; `concat`'s chunking with the inputs themselves a seq, walked lazily, so
+; `mapcat` over an infinite or huge coll enters an input only when the one
+; before it runs out. `(apply concat (map f coll))` realised every `(f x)`
+; before yielding anything, and never returned over `(range)`.
+
+(declare cat-chunk)
+
+(defn- cat-next
+  "The next NON-EMPTY input of `outer` as `{cell outer'}`, or nil."
+  [outer]
+  (loop [outer outer]
+    (let [oc (BeamLisp.LazySeq/cell outer)]
+      (cond
+        (erlang/== oc nil) nil
+        :else
+        (let [c (BeamLisp.LazySeq/cell (BeamLisp.LazySeq/input (erlang/hd oc)))]
+          (cond (erlang/== c nil) (recur (erlang/tl oc))
+                :else (tuple2 c (erlang/tl oc))))))))
+
+(defn- cat-chunk
+  "Up to `chunk_size` elements per memo cell, crossing input boundaries."
+  [cur outer]
+  (loop [cur cur outer outer n (BeamLisp.LazySeq/chunk_size) acc ()]
+    (cond
+      (erlang/== n 0) (BeamLisp.LazySeq/chain (lists/reverse acc) (fn [] (cat-chunk cur outer)))
+      (erlang/== cur nil)
+        (let [nx (cat-next outer)]
+          (cond
+            (erlang/== nx nil) (cond (erlang/== acc ()) nil :else (lists/reverse acc))
+            :else (let [c (erlang/element 1 nx)]
+                    (recur (erlang/tl c) (erlang/element 2 nx) (erlang/- n 1) (raw-cons (erlang/hd c) acc)))))
+      :else
+        (let [c (BeamLisp.LazySeq/cell cur)]
+          (cond
+            (erlang/== c nil) (recur nil outer n acc)
+            :else (recur (erlang/tl c) outer (erlang/- n 1) (raw-cons (erlang/hd c) acc)))))))
+
+(defn lazy-cat
+  "A lazy seq of every element of every collection in the seq `outer`."
+  [outer]
+  (BeamLisp.LazySeq/new
+    (fn [] (cat-chunk nil outer))
+    ; Fold each input in turn; a halt inside one stops the outer fold too.
+    (fn [rf init]
+      (lazy-fold-source
+        (fn [acc s] (lazy-fold-source rf acc (BeamLisp.LazySeq/input s)))
+        init outer))))
 
 
 ;; ════ rt.num ═══════════════════════════════════════════════════════════════════

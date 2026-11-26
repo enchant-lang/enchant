@@ -535,7 +535,12 @@
   "Return a seq of the items in coll, in reverse order. Always a list,
   as in Clojure — (reverse [1 2]) is (2 1), not [2 1]."
   [coll]
-  (reduce (fn [acc x] (cons x acc)) (list) coll))
+  ;; A list, vector or lazy seq folds with the kernel walk: the public
+  ;; `reduce` consults the live `reduced?` after every element, and the step
+  ;; here never halts. Anything else keeps that public rule.
+  (if (or (list? coll) (vector? coll) (nil? coll) (BeamLisp.LazySeq/lazy? coll))
+    (BeamLisp.Ns.Rt/k-reduce (fn [acc x] (cons x acc)) () coll)
+    (reduce (fn [acc x] (cons x acc)) (list) coll)))
 
 (defn last
   "Return the last item in coll, in linear time."
@@ -1160,13 +1165,13 @@
           {} maps))
 
 (defn mapcat
-  "Returns the concatenation of (f x) for each x in coll. Only a single
-   collection is supported: beam-lisp's map is 2-arity, so the multi-coll
-   form Clojure allows has nothing to stand on here."
+  "Returns the lazy concatenation of (f x ...) for each x (in lockstep over
+   several colls, as map does). An `(f x)` is entered only when the one
+   before it runs out, so `(take 3 (mapcat f (range)))` returns."
   [f & colls]
-  (if (= 1 (count colls))
-    (apply concat (apply map f colls))
-    (throw (ex-info "mapcat: only a single collection is supported" {}))))
+  (let [[c & more] colls]
+    (BeamLisp.Ns.Rt/lazy-cat
+      (if more (BeamLisp.Ns.Rt/lazy-map-multi f c (BeamLisp.Ns.Rt/k-to-list more)) (map f c)))))
 
 (defn keep
   "Returns a lazy seq of the non-nil results of (f x) for x in coll —
@@ -1371,8 +1376,16 @@
         ; `emit` is the code that consumes ONE element and emits for it —
         ; the body (outermost group) or the inner iterator (an outer group);
         ; it is the only place the body expression appears.
-        emit-group (fn emit-group [[[bind expr & mod-pairs] & next-groups]]
+        ; `top?` marks the outermost group, the one built once per `for`.
+        ; Its chunk loop is a SHARED callback (`LazySeq/share_callback`) taking
+        ; itself as its first argument, so each chunk's thunk captures a handle
+        ; and the cursor, not the body's environment: a body closing over a big
+        ; map copied it twice per 32 elements. Inner groups are built per outer
+        ; element and keep the plain shape.
+        emit-group (fn emit-group [[[bind expr & mod-pairs] & next-groups] top?]
                      (let [giter (gensym "iter__")
+                           gself (gensym "self__")
+                           again (fn [s] (if top? `(lazy-seq (~gself ~gself ~s)) `(~giter ~s)))
                            gs (gensym "s__")
                            gacc (gensym "acc__")
                            gn (gensym "n__")
@@ -1383,7 +1396,7 @@
                            ; one unit of budget through ONE recur.
                            emit (if next-groups
                                   (let [[_ next-expr] (first next-groups)]
-                                    `(let [inner# ~(emit-group next-groups)
+                                    `(let [inner# ~(emit-group next-groups false)
                                            ys# (seq (inner# (lazy-input ~next-expr)))]
                                        (recur ~tails (if ys# (cons ys# ~gacc) ~gacc) (dec ~gn))))
                                   `(recur ~tails (cons ~body-expr ~gacc) (dec ~gn)))
@@ -1410,10 +1423,11 @@
                            flush (if next-groups
                                    `(if (empty? ~gacc)
                                       (recur ~gs () (BeamLisp.LazySeq/chunk_size))
-                                      (apply concat (reverse (cons (~giter ~gs) ~gacc))))
+                                      (apply concat (reverse (cons ~(again gs) ~gacc))))
                                    `(if (empty? ~gacc)
                                       (recur ~gs () (BeamLisp.LazySeq/chunk_size))
-                                      (BeamLisp.LazySeq/chain (reverse ~gacc) (fn [] (~giter ~gs)))))
+                                      (BeamLisp.LazySeq/chain (reverse ~gacc)
+                                                              (fn [] ~(if top? `(~gself ~gself ~gs) `(~giter ~gs))))))
                            do-mod (fn do-mod [[[k v] & etc]]
                                     (cond
                                       (nil? k) emit
@@ -1421,17 +1435,19 @@
                                       (= k :while) `(if ~v ~(do-mod etc) ~stop)
                                       (= k :when) `(if ~v ~(do-mod etc) ~skip)
                                       :else (err "Invalid 'for' keyword " k)))]
-                       `(fn ~giter [~gs]
-                          (lazy-seq
-                            (loop [~gs ~gs ~gacc () ~gn (BeamLisp.LazySeq/chunk_size)]
-                              (if (pos? ~gn)
-                                (let [~gc (BeamLisp.LazySeq/cell ~gs)]
-                                  (if (erlang/== nil ~gc)
-                                    ~stop
-                                    (let [~bind (erlang/hd ~gc)]
-                                      ~(do-mod mod-pairs))))
-                                ~flush))))))]
-    `(let [iter# ~(emit-group (to-groups seq-exprs))]
+                       (let [chunk-loop `(loop [~gs ~gs ~gacc () ~gn (BeamLisp.LazySeq/chunk_size)]
+                                           (if (pos? ~gn)
+                                             (let [~gc (BeamLisp.LazySeq/cell ~gs)]
+                                               (if (erlang/== nil ~gc)
+                                                 ~stop
+                                                 (let [~bind (erlang/hd ~gc)]
+                                                   ~(do-mod mod-pairs))))
+                                             ~flush))]
+                         (if top?
+                           `(let [step# (BeamLisp.LazySeq/share_callback (fn [~gself ~gs] ~chunk-loop))]
+                              (fn [s#] (lazy-seq (step# step# s#))))
+                           `(fn ~giter [~gs] (lazy-seq ~chunk-loop))))))]
+    `(let [iter# ~(emit-group (to-groups seq-exprs) true)]
        (iter# (lazy-input ~(second seq-exprs))))))
 
 ; --- wave 27: the prims Specter and faithful programs reach for ---
