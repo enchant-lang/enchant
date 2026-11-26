@@ -357,6 +357,8 @@ export const LAZY_LEAVES = {
   [LS + "new/1"]: (t) => newLazy(t),
   [LS + "new/2"]: (t, r) => newLazy(t, r),
   [LS + "from_fun/1"]: (t) => newLazy(t),
+  // One heap: a callback is never copied per cell, so sharing it is itself.
+  [LS + "share_callback/1"]: (f) => f,
   [LS + "input/1"]: input,
   [LS + "chain/2"]: chain,
   [LS + "cell/1"]: cell,
