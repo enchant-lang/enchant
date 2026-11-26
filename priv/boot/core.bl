@@ -540,10 +540,12 @@
 (defn last
   "Return the last item in coll, in linear time."
   [s]
-  (loop [s s]
-    (if (next s)
-      (recur (next s))
-      (first s))))
+  (if (vector? s)
+    (let [n (count s)] (if (zero? n) nil (nth s (dec n))))
+    (loop [s s]
+      (if (next s)
+        (recur (next s))
+        (first s)))))
 
 (defn butlast
   "Return a seq of all but the last item in coll, in linear time."
@@ -631,6 +633,7 @@
 
 (declare chunked)
 
+(declare chunked-continue)
 (defn- chunked-realise
   "One cell's worth of `chunked`: run chunks until one emits (or the input
    ends), then chain the rest. Looping HERE, rather than chaining an empty
@@ -643,7 +646,7 @@
     (cond
       (nil? cursor) elems
       (erlang/== elems ()) (chunked-realise step st cursor)
-      :else (BeamLisp.LazySeq/chain elems (fn [] (chunked step st cursor))))))
+      :else (BeamLisp.LazySeq/chain elems (fn [] (chunked-continue step st cursor))))))
 
 (defn- chunked
   "The chunked lazy producer engine — `rt`'s `lazy-map`/`lazy-filter`
@@ -654,6 +657,12 @@
    to continue at. Up to `chunk_size` elements share one memo cell, and the
    cell captures only the step fn, the state and the cursor."
   [step state input]
+  ;; `step` closes over the producer's user fn; share it ONCE per chain so the
+  ;; per-cell thunks capture a handle, not the fn's environment
+  ;; (`BeamLisp.LazySeq/share_callback`).
+  (chunked-continue (BeamLisp.LazySeq/share_callback step) state input))
+
+(defn- chunked-continue [step state input]
   (BeamLisp.LazySeq/new (fn [] (chunked-realise step state input))))
 
 (defn- interleave-step
@@ -1729,7 +1738,11 @@
    SPECIFICATION, so core bends to it, never the reverse."
   ([keyfn coll] (sort-by keyfn compare coll))
   ([keyfn cmp coll]
-   (sort (fn [x y] (cmp (keyfn x) (keyfn y))) coll)))
+   ;; Each key is computed ONCE (decorate, stable sort, undecorate): the
+   ;; comparator used to call `keyfn` twice per comparison, 2·n·log n calls.
+   (lists/map (fn [pair] (erlang/element 1 pair))
+     (sort (fn [a b] (cmp (erlang/element 2 a) (erlang/element 2 b)))
+           (map (fn [x] (tuple x (keyfn x))) coll)))))
 
 ;; ── function composition ────────────────────────────────────────────────────
 

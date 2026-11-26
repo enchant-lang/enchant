@@ -36,7 +36,7 @@
   (is (= (vec (remove keep? xs)) (filterv (complement keep?) xs)))
   (is (= (mapv f xs) (vec (map f xs))))
   (is (= (mapv g xs xs) (vec (map g xs xs))))
-  (is (= (vec (range 0 100 2)) (vec (take-while #(and (contains? ctx 7) (< % 100)) (map f xs)))))
+  (is (= (filterv even? (range 100)) (vec (take-while #(and (contains? ctx 7) (< % 100)) (map f xs)))))
   (is (= 400 (count (drop-while #(and (contains? ctx 7) (< % 100)) xs))))
   (is (= [1 2 4 8 16] (vec (take 5 (iterate f 1)))))
   (is (= (reduce + (filterv keep? xs)) (reduce + (filter keep? xs))))
@@ -45,8 +45,8 @@
 (deftest another-process-realizes-a-shared-chain
  (let [ctx (big-map 20000)
        s (filter (fn [x] (and (contains? ctx 3) (even? x))) (range 300))]
-  (is (= (vec (range 0 300 2)) @(future (vec s))))
-  (is (= (vec (range 0 300 2)) (vec s)))))
+  (is (= (filterv even? (range 300)) @(future (vec s))))
+  (is (= (filterv even? (range 300)) (vec s)))))
 
 (deftest the-per-process-cache-is-bounded-and-eviction-stays-correct
  (let [ctx (big-map 5000)
@@ -60,12 +60,54 @@
  (let [t (System/monotonic_time :microsecond) _ (f)]
   (/ (- (System/monotonic_time :microsecond) t) 1000.0)))
 
-(deftest a-big-capture-no-longer-scales-the-chain
- (let [xs (vec (range 200))
-       chain (fn [ctx] (fn [] (count (doall (filter (fn [c] (and (contains? ctx 1) (odd? c)))
-                                                    (sort-by - (filter even? xs)))))))
-       small (ms (chain (big-map 10)))
-       large (ms (chain (big-map 30000)))]
-  (println "LAZY-SHARED-BENCH capture-10" small "ms capture-30000" large "ms")
-  ;; Before: ~8.8 ms against ~0.2 ms (40×). Allow generous noise, not a scale.
-  (is (erlang/< large (erlang/+ 5.0 (erlang/* 5 small))))))
+;; The floor under the copy model: sharing pays ONE measure and ONE native copy
+;; of the capture per chain (a cell may be forced by another process and outlive
+;; its creator, so the callback must live off-heap). Before, every 32-element
+;; cell paid several. So a long chain stops scaling with the capture; a chain of
+;; one or two cells costs about what it did.
+(deftest a-big-capture-no-longer-scales-a-long-chain
+ (let [long-xs (vec (range 4000))
+       chain (fn [ctx xs] (fn [] (count (doall (filter (fn [c] (and (contains? ctx 1) (odd? c)))
+                                                       (filter even? xs))))))
+       ctx-small (big-map 10) ctx-large (big-map 30000)
+       f (fn [x] (contains? ctx-large x))
+       measure (ms #(BeamLisp.LazyMemo/estimate_bytes f))
+       share (ms #(BeamLisp.LazySeq/share_callback f))
+       short-small (ms (chain ctx-small (vec (range 200))))
+       short-large (ms (chain ctx-large (vec (range 200))))
+       long-small (ms (chain ctx-small long-xs))
+       long-large (ms (chain ctx-large long-xs))
+       eager-large (ms #(count (filterv (fn [c] (and (contains? ctx-large 1) (odd? c))) (filterv even? long-xs))))]
+  (println "LAZY-SHARED-BENCH measure" measure "share" share
+           "short-small" short-small "short-large" short-large
+           "long-small" long-small "long-large" long-large "eager-large" eager-large)
+  ;; ~63 cells: before, the large capture made this ~60 copies of a 30k map.
+  (is (erlang/< long-large (erlang/+ (erlang/* 3 share) (erlang/* 3 long-small) 5.0)))))
+
+;; ── the same review's other reducible costs (2026-11-26) ──────────────────
+
+(deftest sort-by-computes-each-key-once-and-stays-stable
+ (let [calls (atom 0)
+       xs (mapv (fn [i] {:k (mod i 7) :i i}) (range 300))
+       sorted (sort-by (fn [m] (swap! calls inc) (:k m)) xs)]
+  (is (= 300 @calls))
+  (is (list? sorted))
+  (is (= (sort-by :k > [{:k 1} {:k 3} {:k 2}]) [{:k 3} {:k 2} {:k 1}]))
+  ;; stable: equal keys keep input order
+  (is (= (map :i (filter #(= 0 (:k %)) sorted)) (filterv #(= 0 (mod % 7)) (range 300))))))
+
+(deftest last-of-a-vector-is-direct
+ (is (= 3 (last [1 2 3])))
+ (is (nil? (last [])))
+ (is (= 3 (last '(1 2 3))))
+ (is (= 9999 (last (vec (range 10000))))))
+
+(deftest a-map-or-a-string-walks-through-a-cursor
+ (let [m (into {} (map (fn [i] [i (* i i)]) (range 2000)))
+       s (apply str (repeat 100 "ab"))]
+  (is (= m (into {} (map (fn [[k v]] [k v]) m))))
+  (is (= 1000 (count (filter (fn [[k _]] (even? k)) m))))
+  (is (= 100 (count (filter #(= "a" %) s))))
+  (is (= (seq s) (seq (apply str (map identity s)))))
+  (is (= [] (vec (map identity {}))))
+  (is (= [] (vec (filter identity ""))))))
